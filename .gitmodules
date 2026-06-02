@@ -1,0 +1,3 @@
+[submodule "uni-agent"]
+	path = uni-agent
+	url = git@github.com:Siyuexi/uni-agent.git
