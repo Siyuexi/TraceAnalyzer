@@ -52,8 +52,8 @@ from rllm.environments.swe.trace import (
     _is_test_file,
     extract_callables_from_ast,
     find_modified_callables_from_task,
-    make_instance_id,
-    normalize_task,
+    make_instance_id as _legacy_make_instance_id,
+    normalize_task as _legacy_normalize_task,
 )
 
 # ---------------------------------------------------------------------------
@@ -79,6 +79,63 @@ TEST_EXIT_PATH = "/tmp/_swe_test_exit.txt"
 
 
 _PRODUCER_METADATA: dict | None = None
+
+
+def _looks_like_bare_hash(value: str) -> bool:
+    return len(value) >= 20 and all(ch in "0123456789abcdef" for ch in value)
+
+
+def normalize_task(task: dict) -> dict:
+    """Normalize legacy rows and Uni-Agent ``extra_info.tools_kwargs`` rows."""
+    task = _legacy_normalize_task(task)
+    extra = task.get("extra_info")
+    if isinstance(extra, str) and extra.strip():
+        try:
+            extra = json.loads(extra)
+        except (json.JSONDecodeError, TypeError):
+            extra = None
+    if not isinstance(extra, dict):
+        extra = {}
+
+    tools_kwargs = task.get("tools_kwargs")
+    if not isinstance(tools_kwargs, dict):
+        maybe_tools = extra.get("tools_kwargs")
+        tools_kwargs = maybe_tools if isinstance(maybe_tools, dict) else {}
+
+    reward = tools_kwargs.get("reward") if isinstance(tools_kwargs.get("reward"), dict) else {}
+    metadata = reward.get("metadata") if isinstance(reward.get("metadata"), dict) else {}
+
+    merged = {**metadata, **task}
+    if tools_kwargs:
+        merged["tools_kwargs"] = tools_kwargs
+    if extra:
+        merged["extra_info"] = extra
+    if "repo" in merged and "repo_name" not in merged:
+        merged["repo_name"] = merged["repo"]
+    return merged
+
+
+def make_instance_id(task: dict) -> str:
+    """Return the instance id used by Uni-Agent R2E parquet rows.
+
+    The old rLLM helper used an 8-char R2E commit prefix. Uni-Agent's
+    ``r2e_gym_subset_filtered.py`` uses 10 chars, and trainer lookup keys must
+    match the parquet metadata exactly.
+    """
+    task = normalize_task(task)
+    iid = task.get("instance_id")
+    if isinstance(iid, str) and iid and not _looks_like_bare_hash(iid):
+        return iid
+
+    repo = task.get("repo_name") or task.get("repo")
+    commit = task.get("commit_hash") or task.get("base_commit")
+    if isinstance(repo, str) and repo and isinstance(commit, str) and commit:
+        return f"{repo}__{commit[:10]}"
+
+    legacy = _legacy_make_instance_id(task)
+    if isinstance(legacy, str) and legacy:
+        return legacy
+    return "unknown"
 
 
 def _producer_metadata() -> dict:
@@ -625,6 +682,7 @@ def compute_dynamic_bonus_map(
     trace_sidecar_dir: str | None = None,
     max_sidecar_traces: int | None = None,
     max_sidecar_output_chars: int = 100_000,
+    sandbox_backend: str | None = None,
 ) -> dict:
     """Compute a dynamic bonus map using the full trace pipeline.
 
@@ -644,9 +702,12 @@ def compute_dynamic_bonus_map(
 
     all_modified = find_modified_callables_from_task(task)
     newly_created = find_newly_created_callables(task)
+    backend = (sandbox_backend or os.environ.get("P2A_SANDBOX_BACKEND") or "uni_agent").lower()
+    env_diag: dict = {"sandbox_backend": backend}
+    env = None
+    has_structured_callable_source = bool(task.get("parsed_commit_content") or task.get("parsed_commit"))
 
-    # ── Static layer ──────────────────────────────────────────────────────
-    if not all_modified:
+    if not all_modified and (newly_created or has_structured_callable_source or not task.get("patch") or backend == "legacy"):
         if newly_created:
             case_type = "newly_created"
         else:
@@ -658,19 +719,58 @@ def compute_dynamic_bonus_map(
             newly_created,
             error=False,
             reason_code=case_type,
+            diagnostics=env_diag,
         )
 
-    # ── Dynamic layer: instrument → run → parse ───────────────────────────
-    from rllm.environments.swe.swe import SWEEnv
-
-    env = SWEEnv.from_dict(
-        {
-            **task,
-            "experiment_id": os.environ.get("ARL_EXPERIMENT_ID", "bonus-maps"),
-        }
-    )
     try:
-        env.reset()
+        if backend == "uni_agent":
+            from p2a.precompute.uni_agent_sandbox import (
+                create_uni_agent_sandbox,
+                find_changed_callables_via_patch,
+            )
+
+            env = create_uni_agent_sandbox(task, instance_id=instance_id)
+            env.start()
+            env_diag.update(env.checkout_buggy_commit(task, instance_id=instance_id))
+
+            # Uni-Agent R2E parquet keeps reward.metadata.patch but drops the
+            # parsed old/new file contents. Recover callable diffs from the
+            # actual buggy sandbox plus the golden patch.
+            if not all_modified and task.get("patch"):
+                patch_modified, patch_newly_created, patch_diag = find_changed_callables_via_patch(env, task)
+                all_modified = patch_modified
+                newly_created = patch_newly_created or newly_created
+                env_diag.update(patch_diag)
+        elif backend == "legacy":
+            from rllm.environments.swe.swe import SWEEnv
+
+            env = SWEEnv.from_dict(
+                {
+                    **task,
+                    "experiment_id": os.environ.get("ARL_EXPERIMENT_ID", "bonus-maps"),
+                }
+            )
+            env.reset()
+        else:
+            raise ValueError(f"Unsupported sandbox_backend={backend!r}; expected uni_agent or legacy")
+
+        # ── Static layer ──────────────────────────────────────────────────
+        if not all_modified:
+            if newly_created:
+                case_type = "newly_created"
+            else:
+                case_type = "no_callable"
+            return _make_result(
+                instance_id,
+                case_type,
+                [],
+                newly_created,
+                error=False,
+                reason_code=case_type,
+                diagnostics=env_diag,
+            )
+
+        # ── Dynamic layer: instrument → run → parse ───────────────────────
 
         instrumented_callables = instrument_sandbox(env, all_modified)
         if not instrumented_callables:
@@ -682,7 +782,7 @@ def compute_dynamic_bonus_map(
                 newly_created,
                 error=True,
                 reason_code="instrumentation_empty",
-                diagnostics=_base_diagnostics(instrumented_callables_count=0),
+                diagnostics={**env_diag, **_base_diagnostics(instrumented_callables_count=0)},
             )
 
         # Clear stale trace file, run tests
@@ -724,6 +824,7 @@ def compute_dynamic_bonus_map(
             stderr=stderr,
             test_output_capture="file",
         )
+        common_diag.update(env_diag)
         common_diag["trace_file_line_count"] = trace_file_line_count
         common_diag["test_output_capture_detail"] = capture_diag
         common_diag["parsed_trace_count"] = parsed_trace_count
@@ -936,6 +1037,8 @@ def compute_dynamic_bonus_map(
     except Exception as e:
         print(f"  [WARN] Dynamic tracing failed for {instance_id}: {e}")
         traceback.print_exc()
+        exception_diag = _base_diagnostics()
+        exception_diag.update(env_diag)
         return _make_result(
             instance_id,
             "no_trace",
@@ -943,10 +1046,14 @@ def compute_dynamic_bonus_map(
             newly_created,
             error=True,
             reason_code="exception",
-            diagnostics=_base_diagnostics(),
+            diagnostics=exception_diag,
         )
     finally:
-        env.close()
+        if env is not None:
+            try:
+                env.close()
+            except Exception:
+                pass
 
 
 def _make_result(
@@ -983,7 +1090,16 @@ def _make_result(
 
 def _process_one(args):
     """Worker function for parallel processing."""
-    idx, task_json, output_dir, mode, trace_sidecar_dir, max_sidecar_traces, max_sidecar_output_chars = args
+    (
+        idx,
+        task_json,
+        output_dir,
+        mode,
+        trace_sidecar_dir,
+        max_sidecar_traces,
+        max_sidecar_output_chars,
+        sandbox_backend,
+    ) = args
     try:
         task = json.loads(task_json) if isinstance(task_json, str) else dict(task_json)
 
@@ -995,6 +1111,7 @@ def _process_one(args):
                 trace_sidecar_dir=trace_sidecar_dir,
                 max_sidecar_traces=max_sidecar_traces,
                 max_sidecar_output_chars=max_sidecar_output_chars,
+                sandbox_backend=sandbox_backend,
             )
 
         instance_id = result["instance_id"]
@@ -1013,6 +1130,12 @@ def main():
     parser.add_argument("parquet_path", help="Path to dataset parquet file")
     parser.add_argument("--output_dir", required=True, help="Output directory for bonus map JSONs")
     parser.add_argument("--mode", choices=["static", "dynamic"], default="static", help="static: AST diff only. dynamic: full trace pipeline")
+    parser.add_argument(
+        "--sandbox_backend",
+        choices=["uni_agent", "legacy"],
+        default=os.environ.get("P2A_SANDBOX_BACKEND", "uni_agent"),
+        help="Sandbox backend for dynamic mode. Default: uni_agent. legacy uses old rLLM/ARL only as an explicit fallback.",
+    )
     parser.add_argument("--n_parallel", type=int, default=1, help="Number of parallel workers")
     parser.add_argument("--limit", type=int, default=None, help="Process only first N instances")
     parser.add_argument(
@@ -1051,21 +1174,24 @@ def main():
 
     print(f"Processing {len(df)} instances from {args.parquet_path}")
     print(f"Mode: {args.mode}, Output: {args.output_dir}, Workers: {args.n_parallel}")
+    if args.mode == "dynamic":
+        print(f"Dynamic sandbox backend: {args.sandbox_backend}")
     if trace_sidecar_dir:
         print(f"Trace sidecars: {trace_sidecar_dir}")
 
     work_items = []
     for idx, row in df.iterrows():
-        extra_raw = row.get("extra_info", "{}")
+        task_payload = row.to_dict()
         work_items.append(
             (
                 idx,
-                extra_raw,
+                task_payload,
                 args.output_dir,
                 args.mode,
                 trace_sidecar_dir,
                 args.max_sidecar_traces,
                 args.max_sidecar_output_chars,
+                args.sandbox_backend,
             )
         )
 

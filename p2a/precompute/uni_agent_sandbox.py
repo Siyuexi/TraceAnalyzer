@@ -1,0 +1,352 @@
+"""Uni-Agent sandbox adapter for dynamic P2A bonus-map construction.
+
+The migrated P2A path must not depend on the old rLLM/ARL sandbox backend.
+This module starts Uni-Agent ``AgentEnv`` sandboxes and exposes the small
+``SWEEnv``-like surface that the existing tracer helpers need.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import concurrent.futures
+import os
+import shlex
+import uuid
+from pathlib import Path
+from typing import Any
+
+from p2a.precompute._path_compat import ensure_paths
+
+ensure_paths()
+
+
+R2E_POST_SETUP_CMD = """
+export PIP_CACHE_DIR=~/.cache/pip
+export PATH=/root/.venv/bin:/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+
+ln -s /testbed/.venv /root/.venv
+ln -s /testbed/.venv/bin/python /root/.local/bin/python
+ln -s /testbed/.venv/bin/python /root/.local/bin/python3
+find "/testbed/.venv/bin" -type f -executable -exec ln -sf {} "/root/.local/bin/" \\;
+
+find . -name '*.pyc' -delete
+find . -name '__pycache__' -exec rm -rf {} +
+find /r2e_tests -name '*.pyc' -delete
+find /r2e_tests -name '__pycache__' -exec rm -rf {} +
+
+mv /testbed/run_tests.sh /root/run_tests.sh
+mv /testbed/r2e_tests /root/r2e_tests
+
+mv /r2e_tests /root/r2e_tests
+ln -s /root/r2e_tests /testbed/r2e_tests
+""".strip()
+
+R2E_VEFAAS_IMAGE_TEMPLATE = "enterprise-public-cn-beijing.cr.volces.com/r2e-gym-subset/{instance_number}:latest"
+VEFAAS_SWEREX_COMMAND = (
+    "curl -fsSL https://vefaas-swe.tos-cn-beijing.ivolces.com/swe-rex/install_1.4.0.sh | bash -s -- {token}"
+)
+
+
+def _run_coro(coro):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
+def _decode_extra_info(task: dict[str, Any]) -> dict[str, Any]:
+    extra = task.get("extra_info")
+    if isinstance(extra, dict):
+        return extra
+    if isinstance(extra, str) and extra.strip():
+        import json
+
+        try:
+            parsed = json.loads(extra)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def extract_tools_kwargs(task: dict[str, Any]) -> dict[str, Any]:
+    tools_kwargs = task.get("tools_kwargs")
+    if isinstance(tools_kwargs, dict):
+        return tools_kwargs
+    extra = _decode_extra_info(task)
+    tools_kwargs = extra.get("tools_kwargs")
+    return tools_kwargs if isinstance(tools_kwargs, dict) else {}
+
+
+def extract_reward_metadata(task: dict[str, Any]) -> dict[str, Any]:
+    tools_kwargs = extract_tools_kwargs(task)
+    reward = tools_kwargs.get("reward")
+    if isinstance(reward, dict) and isinstance(reward.get("metadata"), dict):
+        return reward["metadata"]
+    return {}
+
+
+def infer_commit_ref(task: dict[str, Any], instance_id: str | None = None) -> str | None:
+    commit = task.get("commit_hash") or task.get("base_commit") or extract_reward_metadata(task).get("commit_hash")
+    if isinstance(commit, str) and commit:
+        return commit
+
+    iid = instance_id or task.get("instance_id") or extract_reward_metadata(task).get("instance_id")
+    if isinstance(iid, str) and "__" in iid:
+        suffix = iid.rsplit("__", 1)[-1]
+        if suffix:
+            return suffix
+    return None
+
+
+def derive_r2e_vefaas_image(instance_id: str) -> str | None:
+    if "__" not in instance_id:
+        return None
+    instance_number = instance_id.rsplit("__", 1)[-1].lower()
+    if not instance_number:
+        return None
+    return R2E_VEFAAS_IMAGE_TEMPLATE.format(instance_number=instance_number)
+
+
+def _extract_image(task: dict[str, Any], instance_id: str) -> str | None:
+    tools_kwargs = extract_tools_kwargs(task)
+    env_cfg = tools_kwargs.get("env") if isinstance(tools_kwargs.get("env"), dict) else {}
+    deployment_cfg = env_cfg.get("deployment") if isinstance(env_cfg.get("deployment"), dict) else {}
+    image = deployment_cfg.get("image") or env_cfg.get("image") or task.get("docker_image")
+    if isinstance(image, str) and image:
+        return image
+    return derive_r2e_vefaas_image(instance_id)
+
+
+def _extract_post_setup_cmd(task: dict[str, Any]) -> str:
+    tools_kwargs = extract_tools_kwargs(task)
+    env_cfg = tools_kwargs.get("env") if isinstance(tools_kwargs.get("env"), dict) else {}
+    post_setup_cmd = env_cfg.get("post_setup_cmd")
+    if isinstance(post_setup_cmd, str) and post_setup_cmd.strip():
+        return post_setup_cmd
+    return R2E_POST_SETUP_CMD
+
+
+def _default_env_variables() -> dict[str, str]:
+    return {
+        "PIP_PROGRESS_BAR": "off",
+        "PIP_CACHE_DIR": "~/.cache/pip",
+        "PAGER": "cat",
+        "MANPAGER": "cat",
+        "LESS": "-R",
+        "TQDM_DISABLE": "1",
+        "GIT_PAGER": "cat",
+    }
+
+
+def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment: str | None = None) -> dict[str, Any]:
+    """Build a Uni-Agent ``AgentEnvConfig`` dict from a dataset/sample row."""
+    impl = (deployment or os.getenv("P2A_DEPLOYMENT") or os.getenv("DEPLOYMENT") or "vefaas").lower()
+    image = _extract_image(task, instance_id)
+    if not image:
+        raise ValueError(f"Cannot infer sandbox image for {instance_id}")
+
+    if impl == "vefaas":
+        deployment_config = {
+            "type": "vefaas",
+            "image": image,
+            "command": VEFAAS_SWEREX_COMMAND,
+            "timeout": float(os.getenv("P2A_VEFAAS_TIMEOUT", "600")),
+            "startup_timeout": float(os.getenv("P2A_VEFAAS_STARTUP_TIMEOUT", "180")),
+            "function_id": os.getenv("VEFAAS_FUNCTION_ID"),
+            "function_route": os.getenv("VEFAAS_FUNCTION_ROUTE"),
+        }
+    elif impl == "modal":
+        deployment_config = {
+            "type": "modal",
+            "image": image,
+            "startup_timeout": float(os.getenv("P2A_MODAL_STARTUP_TIMEOUT", "600")),
+            "runtime_timeout": float(os.getenv("P2A_MODAL_RUNTIME_TIMEOUT", "600")),
+            "deployment_timeout": float(os.getenv("P2A_MODAL_DEPLOYMENT_TIMEOUT", "3600")),
+        }
+    elif impl == "local":
+        deployment_config = {
+            "type": "local",
+            "image": image,
+            "startup_timeout": float(os.getenv("P2A_LOCAL_STARTUP_TIMEOUT", "180")),
+            "timeout": float(os.getenv("P2A_LOCAL_TIMEOUT", "600")),
+            "container_runtime": os.getenv("P2A_LOCAL_CONTAINER_RUNTIME", "docker"),
+        }
+    else:
+        raise ValueError(f"Unsupported P2A_DEPLOYMENT={impl!r}; expected vefaas/modal/local")
+
+    return {
+        "deployment": deployment_config,
+        "env_variables": _default_env_variables(),
+        "post_setup_cmd": _extract_post_setup_cmd(task),
+    }
+
+
+class UniAgentSandboxAdapter:
+    """Expose the minimal old-SWEEnv methods used by trace helpers."""
+
+    repo_path = "/testbed"
+    alt_path = "/root"
+    swebench_verified = False
+
+    def __init__(self, agent_env, *, default_timeout: int = 300):
+        self.agent_env = agent_env
+        self.default_timeout = default_timeout
+
+    def start(self) -> None:
+        self.agent_env.start()
+
+    def close(self) -> None:
+        self.agent_env.close()
+
+    def _execute_raw(self, command: str, timeout: int | float | None = None) -> tuple[str, str, int]:
+        from swerex.runtime.abstract import BashAction
+
+        action = BashAction(command=command, timeout=timeout or self.default_timeout, check="silent")
+        result = _run_coro(self.agent_env.deployment.runtime.run_in_session(action))
+        return result.output or "", "", int(getattr(result, "exit_code", 0))
+
+    def _run(self, command: str, timeout: int | float | None = None) -> tuple[str, str]:
+        stdout, stderr, _ = self._execute_raw(command, timeout=timeout)
+        return stdout, stderr
+
+    def read_file(self, path: str | Path) -> str:
+        return self.agent_env.read_file(path)
+
+    def write_file(self, path: str | Path, content: str) -> None:
+        self.agent_env.write_file(path, content)
+
+    def checkout_buggy_commit(self, task: dict[str, Any], *, instance_id: str) -> dict[str, Any]:
+        """Restore the buggy commit even when the image starts at a fixed HEAD."""
+        commit_ref = infer_commit_ref(task, instance_id)
+        if not commit_ref:
+            return {"buggy_checkout_ref": None, "buggy_checkout_exit": None, "buggy_checkout_skipped": True}
+
+        quoted_ref = shlex.quote(commit_ref)
+        cmd = (
+            f"cd {self.repo_path} && "
+            "git rev-parse --is-inside-work-tree >/dev/null 2>&1 && "
+            f"git checkout --force {quoted_ref} && "
+            "git reset --hard"
+        )
+        output, _, exit_code = self._execute_raw(cmd, timeout=120)
+        head, _, head_exit = self._execute_raw(f"cd {self.repo_path} && git rev-parse --short=12 HEAD", timeout=30)
+        if exit_code != 0:
+            raise RuntimeError(f"buggy checkout failed for {instance_id} ({commit_ref}): {output}")
+        return {
+            "buggy_checkout_ref": commit_ref,
+            "buggy_checkout_exit": exit_code,
+            "buggy_checkout_head": head.strip() if head_exit == 0 else None,
+        }
+
+
+def create_uni_agent_sandbox(task: dict[str, Any], *, instance_id: str) -> UniAgentSandboxAdapter:
+    from uni_agent.interaction import AgentEnv, AgentEnvConfig
+
+    config = build_agent_env_config(task, instance_id=instance_id)
+    env = AgentEnv(run_id=f"p2a-bonus-{uuid.uuid4()}", env_config=AgentEnvConfig(**config))
+    return UniAgentSandboxAdapter(env)
+
+
+def _read_old_sources(env: UniAgentSandboxAdapter, files: set[str]) -> tuple[dict[str, str], set[str]]:
+    from rllm.environments.swe.trace import _read_sandbox_file
+
+    old_sources: dict[str, str] = {}
+    existing_files: set[str] = set()
+    for file_path in sorted(files):
+        content, exit_code = _read_sandbox_file(env, f"{env.repo_path}/{file_path}")
+        if exit_code == 0:
+            old_sources[file_path] = content
+            existing_files.add(file_path)
+        else:
+            old_sources[file_path] = ""
+    return old_sources, existing_files
+
+
+def _apply_patch_and_read_new_sources(
+    env: UniAgentSandboxAdapter,
+    *,
+    patch_text: str,
+    files: set[str],
+    existing_files: set[str],
+) -> dict[str, str]:
+    from rllm.environments.swe.trace import _read_sandbox_file
+
+    patch_b64 = base64.b64encode(patch_text.encode()).decode()
+    env._run(f"printf '%s' '{patch_b64}' | base64 -d > /tmp/_p2a_golden_patch.diff")
+    stdout, _, exit_code = env._execute_raw(
+        f"cd {env.repo_path} && git apply --whitespace=nowarn /tmp/_p2a_golden_patch.diff",
+        timeout=120,
+    )
+    if exit_code != 0:
+        env._run(f"cd {env.repo_path} && git reset --hard")
+        raise RuntimeError(f"failed to apply golden patch for source diff: {stdout}")
+
+    new_sources: dict[str, str] = {}
+    try:
+        for file_path in sorted(files):
+            content, read_exit = _read_sandbox_file(env, f"{env.repo_path}/{file_path}")
+            if read_exit == 0:
+                new_sources[file_path] = content
+    finally:
+        env._run(f"cd {env.repo_path} && git reset --hard")
+        created = [file_path for file_path in files if file_path not in existing_files]
+        if created:
+            quoted = " ".join(shlex.quote(f"{env.repo_path}/{file_path}") for file_path in created)
+            env._run(f"rm -f {quoted}")
+    return new_sources
+
+
+def find_changed_callables_via_patch(env: UniAgentSandboxAdapter, task: dict[str, Any]) -> tuple[list[dict], list[dict], dict]:
+    """Derive old/new callable changes from a Uni-Agent sample's patch field."""
+    from rllm.environments.swe.trace import (
+        _get_patched_py_files,
+        _is_test_file,
+        extract_callables_from_ast,
+        extract_non_test_patch,
+        find_modified_callables_from_sources,
+    )
+
+    patch_text = extract_non_test_patch(task)
+    if not patch_text.strip():
+        return [], [], {"callable_source": "patch", "patch_error": "missing_patch"}
+
+    files = {file_path for file_path in _get_patched_py_files(patch_text) if not _is_test_file(file_path)}
+    if not files:
+        return [], [], {"callable_source": "patch", "patched_py_files": 0}
+
+    old_sources, existing_files = _read_old_sources(env, files)
+    new_sources = _apply_patch_and_read_new_sources(
+        env,
+        patch_text=patch_text,
+        files=files,
+        existing_files=existing_files,
+    )
+
+    modified: list[dict] = []
+    newly_created: list[dict] = []
+    for file_path in sorted(files):
+        old_source = old_sources.get(file_path, "")
+        new_source = new_sources.get(file_path, "")
+        if not new_source:
+            continue
+        if old_source:
+            modified.extend(find_modified_callables_from_sources(old_source, new_source, file_path))
+            old_callables = extract_callables_from_ast(old_source, file_path)
+        else:
+            old_callables = {}
+        new_callables = extract_callables_from_ast(new_source, file_path)
+        for qname, info in new_callables.items():
+            if qname not in old_callables:
+                newly_created.append(info.to_dict())
+
+    return modified, newly_created, {
+        "callable_source": "sandbox_patch",
+        "patched_py_files": len(files),
+        "patched_py_files_with_old_source": len([p for p in files if old_sources.get(p)]),
+        "patched_py_files_with_new_source": len([p for p in files if new_sources.get(p)]),
+    }

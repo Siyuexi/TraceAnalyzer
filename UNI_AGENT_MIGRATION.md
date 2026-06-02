@@ -16,7 +16,10 @@ This project now uses a local `src/` source repository for P2A code and Uni-Agen
 Run Uni-Agent's baseline path first, without P2A loss changes:
 
 1. Prepare veFaaS runtime env and agent config.
-2. Generate R2E-Gym-Subset train parquet.
+2. Generate R2E-Gym-Subset train parquet. Re-run this after the migration; the
+   forked preprocess script now embeds `git checkout <commit_hash>` in each
+   sample's `post_setup_cmd` so sandboxes start from the buggy commit rather
+   than the fixed image HEAD.
 3. Generate SWE-Bench Verified veFaaS eval parquet.
 4. Run `examples/agent_train/single_node_debug.sh` from `src/uni-agent/`.
 
@@ -24,6 +27,13 @@ P2A bonus-map instrumentation should be added only after the baseline can run en
 Lightweight P2A rollout instrumentation is available but disabled by default; set
 `UNI_AGENT_P2A_TRACE=1` before `src/scripts/uni_agent_baseline.sh prepare` if you want
 per-step spans and parsed tool calls to be carried in rollout `extra_fields`.
+
+Dynamic bonus-map construction now uses Uni-Agent sandboxes by default, not the
+old rLLM/ARL backend. The old trace code is only imported as instrumentation and
+parser utilities. In dynamic mode, the precompute script starts a Uni-Agent
+`AgentEnv`, runs the sample `post_setup_cmd`, explicitly checks out the buggy
+commit inferred from `commit_hash` or `instance_id`, instruments `/testbed`, and
+runs `/root/run_tests.sh`. This is the path intended for R2E-Gym-Subset veFaaS.
 
 For P2A training, use `src/p2a/train_p2a.sh` from the project root. That script
 creates a separate `$RAY_DATA_HOME/data/swe_agent/p2a_runtime_env.yaml` with
@@ -118,6 +128,30 @@ export RUNTIME_ENV="${RAY_DATA_HOME}/data/swe_agent/runtime_env.yaml"
 export AGENT_CONFIG_PATH="${RAY_DATA_HOME}/data/swe_agent/agent_config.yaml"
 
 bash examples/agent_train/single_node_debug.sh
+```
+
+## P2A Bonus Map Precompute
+
+After veFaaS credentials and Uni-Agent dependencies are available, dynamic
+bonus maps can be generated against the Uni-Agent R2E parquet:
+
+```bash
+PYTHONPATH=src \
+python -m p2a.precompute.precompute_bonus_maps \
+  "${RAY_DATA_HOME}/data/swe_agent/r2e_gym_subset_filtered.parquet" \
+  --output_dir "${RAY_DATA_HOME}/data/swe_agent/bonus_maps" \
+  --mode dynamic \
+  --sandbox_backend uni_agent \
+  --n_parallel 4 \
+  --limit 20 \
+  --save_trace_sidecars
+```
+
+Use low `--n_parallel` first because each dynamic item starts a sandbox. The
+`legacy` sandbox backend exists only as an explicit fallback:
+
+```bash
+P2A_SANDBOX_BACKEND=legacy python -m p2a.precompute.precompute_bonus_maps ...
 ```
 
 ## Known Tomorrow Blockers

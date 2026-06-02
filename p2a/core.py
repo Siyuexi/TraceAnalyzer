@@ -25,6 +25,9 @@ class BonusMapStore:
     """Loads and caches precomputed bonus maps from disk.
 
     Each bonus map is a JSON file at {bonus_map_dir}/{instance_id}.json.
+    Existing rLLM-era R2E maps used 8-char commit prefixes, while Uni-Agent
+    R2E parquet rows use 10-char prefixes. Exact matches win; a 10-char R2E
+    key falls back to the legacy 8-char filename.
     """
 
     def __init__(self, bonus_map_dir: str):
@@ -35,15 +38,30 @@ class BonusMapStore:
         if instance_id in self._cache:
             return self._cache[instance_id]
 
-        path = os.path.join(self.bonus_map_dir, f"{instance_id}.json")
-        if not os.path.exists(path):
-            self._cache[instance_id] = None
-            return None
+        for candidate_id in _bonus_map_candidate_ids(instance_id):
+            path = os.path.join(self.bonus_map_dir, f"{candidate_id}.json")
+            if not os.path.exists(path):
+                continue
 
-        with open(path) as f:
-            data = json.load(f)
-        self._cache[instance_id] = data
-        return data
+            with open(path) as f:
+                data = json.load(f)
+            self._cache[instance_id] = data
+            self._cache[candidate_id] = data
+            return data
+
+        self._cache[instance_id] = None
+        return None
+
+
+def _bonus_map_candidate_ids(instance_id: str) -> list[str]:
+    candidates = [instance_id]
+    if "__" not in instance_id:
+        return candidates
+
+    repo, suffix = instance_id.rsplit("__", 1)
+    if len(suffix) > 8 and all(ch in "0123456789abcdef" for ch in suffix.lower()):
+        candidates.append(f"{repo}__{suffix[:8]}")
+    return candidates
 
 
 # ---------------------------------------------------------------------------
