@@ -19,8 +19,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+from p2a.precompute._path_compat import PROJECT_ROOT, SRC_BACKUP, ensure_paths
+
+ensure_paths()
 
 SCHEMA_VERSION = 1
 CASE_TYPES_ORDERED = [
@@ -50,7 +51,7 @@ def _load_is_test_file() -> Callable[[str], bool]:
         if exc.name != "torch":
             raise
 
-    trace_path = PROJECT_ROOT / "rllm" / "environments" / "swe" / "trace.py"
+    trace_path = SRC_BACKUP / "rllm" / "environments" / "swe" / "trace.py"
     spec = importlib.util.spec_from_file_location("_summary_trace_module", trace_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Could not load trace module from {trace_path}")
@@ -117,7 +118,7 @@ def _classify_bonus_map_fallback(bm: dict) -> dict:
 
 def _load_classify_bonus_map() -> Callable[[dict], dict]:
     try:
-        from utils.p2a.analyze_traceability import classify_bonus_map as helper
+        from p2a.precompute.analyze_traceability import classify_bonus_map as helper
 
         return helper
     except ModuleNotFoundError as exc:

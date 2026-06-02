@@ -41,7 +41,9 @@ from pathlib import Path
 
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from p2a.precompute._path_compat import ensure_paths
+
+ensure_paths()
 
 from rllm.environments.swe.trace import (
     find_modified_callables_from_task,

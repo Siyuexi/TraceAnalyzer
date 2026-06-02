@@ -40,9 +40,11 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from p2a.precompute._path_compat import ensure_paths
 
-from rllm.trainer.verl.p2a import (
+ensure_paths()
+
+from p2a.core import (
     BonusMapStore,
     match_reads_to_callgraph,
     parse_read_actions,

@@ -28,6 +28,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from p2a.precompute._path_compat import SRC_BACKUP
+
 CATEGORY_SWAP = "decorator-only-swap"
 CATEGORY_ADD_OR_REMOVE = "decorator-add-or-remove-around-unchanged-def"
 CATEGORY_F1 = "f1-affected"
@@ -41,7 +43,7 @@ _TRACE_MODULE: ModuleType | None = None
 
 
 def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    return SRC_BACKUP
 
 
 def _load_trace_module() -> ModuleType:
