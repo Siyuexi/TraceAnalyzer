@@ -13,6 +13,12 @@ EOF
 }
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEFAULT_VEFAAS_ENV="${SRC_DIR}/.secrets/vefaas_env.sh"
+if [[ -f "${DEFAULT_VEFAAS_ENV}" ]]; then
+  # shellcheck source=/dev/null
+  source "${DEFAULT_VEFAAS_ENV}"
+fi
+
 UNI_AGENT_DIR="${SRC_DIR}/uni-agent"
 RAY_DATA_HOME="${RAY_DATA_HOME:-${HOME}/verl}"
 DATA_DIR="${RAY_DATA_HOME}/data/swe_agent"
@@ -98,7 +104,8 @@ Prepared Uni-Agent baseline config:
   TRAIN_FILE=${TRAIN_FILE}
   TEST_FILE=${TEST_FILE}
 
-Check runtime_env.yaml before launching; placeholder secrets must be replaced.
+If ${DEFAULT_VEFAAS_ENV} exists, veFaaS secrets are loaded from it automatically.
+Check runtime_env.yaml before launching only if that file is absent or intentionally bypassed.
 EOF
 }
 

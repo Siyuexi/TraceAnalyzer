@@ -16,6 +16,12 @@
 set -xeuo pipefail
 
 SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEFAULT_VEFAAS_ENV="${SRC_ROOT}/.secrets/vefaas_env.sh"
+if [[ -f "${DEFAULT_VEFAAS_ENV}" ]]; then
+  # shellcheck source=/dev/null
+  source "${DEFAULT_VEFAAS_ENV}"
+fi
+
 UNI_AGENT_DIR="${SRC_ROOT}/uni-agent"
 cd "${SRC_ROOT}"
 
