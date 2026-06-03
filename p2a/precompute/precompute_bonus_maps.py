@@ -128,7 +128,7 @@ def make_instance_id(task: dict) -> str:
         return iid
 
     repo = task.get("repo_name") or task.get("repo")
-    commit = task.get("commit_hash") or task.get("base_commit")
+    commit = task.get("new_commit_hash") or task.get("commit_hash") or task.get("base_commit")
     if isinstance(repo, str) and repo and isinstance(commit, str) and commit:
         return f"{repo}__{commit[:10]}"
 
@@ -500,7 +500,7 @@ def _run_tests_with_file_capture(env, test_script: str, timeout: int = 300) -> t
         "export PY_COLORS=0 NO_COLOR=1 TERM=dumb; "
         'export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -rA --color=no -vv"; '
         f"bash {quoted_script} > {TEST_STDOUT_PATH} 2> {TEST_STDERR_PATH}; "
-        f"code=$?; printf '%s\\n' \"$code\" > {TEST_EXIT_PATH}; exit 0"
+        f"code=$?; printf '%s\\n' \"$code\" > {TEST_EXIT_PATH}; true"
     )
     wrapper_stdout, wrapper_stderr, wrapper_exit = env._execute_raw(cmd, timeout=timeout)
 

@@ -54,6 +54,8 @@ for key in keys:
     value = os.environ.get(key)
     if not value:
         continue
+    if key == "VEFAAS_FUNCTION_ROUTE":
+        value = value.rstrip("/")
     pattern = rf"(^\s*{re.escape(key)}:\s*).*$"
     replacement = rf"\1{json.dumps(value)}"
     if re.search(pattern, text, flags=re.MULTILINE):

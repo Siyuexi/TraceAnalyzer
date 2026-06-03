@@ -91,11 +91,19 @@ def extract_reward_metadata(task: dict[str, Any]) -> dict[str, Any]:
 
 
 def infer_commit_ref(task: dict[str, Any], instance_id: str | None = None) -> str | None:
-    commit = task.get("commit_hash") or task.get("base_commit") or extract_reward_metadata(task).get("commit_hash")
+    metadata = extract_reward_metadata(task)
+    commit = (
+        task.get("old_commit_hash")
+        or task.get("base_commit")
+        or metadata.get("old_commit_hash")
+        or metadata.get("base_commit")
+        or task.get("commit_hash")
+        or metadata.get("commit_hash")
+    )
     if isinstance(commit, str) and commit:
         return commit
 
-    iid = instance_id or task.get("instance_id") or extract_reward_metadata(task).get("instance_id")
+    iid = instance_id or task.get("instance_id") or metadata.get("instance_id")
     if isinstance(iid, str) and "__" in iid:
         suffix = iid.rsplit("__", 1)[-1]
         if suffix:
@@ -151,6 +159,9 @@ def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment
         raise ValueError(f"Cannot infer sandbox image for {instance_id}")
 
     if impl == "vefaas":
+        function_route = os.getenv("VEFAAS_FUNCTION_ROUTE")
+        if function_route:
+            function_route = function_route.rstrip("/")
         deployment_config = {
             "type": "vefaas",
             "image": image,
@@ -158,7 +169,7 @@ def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment
             "timeout": float(os.getenv("P2A_VEFAAS_TIMEOUT", "600")),
             "startup_timeout": float(os.getenv("P2A_VEFAAS_STARTUP_TIMEOUT", "180")),
             "function_id": os.getenv("VEFAAS_FUNCTION_ID"),
-            "function_route": os.getenv("VEFAAS_FUNCTION_ROUTE"),
+            "function_route": function_route,
         }
     elif impl == "modal":
         deployment_config = {
