@@ -1,0 +1,36 @@
+[project]
+name = "p2a-arl"
+version = "0.1.0"
+description = "P2A on uni-agent with an ARL-native sandbox backend (env/) + bonus-map process supervision (p2a/)."
+requires-python = ">=3.10"
+
+# Light runtime deps only — enough to import/run the ARL sandbox backend
+# (env/: deployment + runtime + smoke) and the adapter tests WITHOUT a GPU.
+# Mirrors uni-agent's own install split: the framework (uni-agent + nested verl)
+# is added as `--no-deps -e` editable installs (see [tool.uv.sources] + DEV_SETUP.md),
+# and the heavy GPU/training stack (torch/vllm/megatron) is installed separately,
+# on GPU only. This keeps the local lock GPU-free.
+dependencies = [
+    "arl-env==0.3.1",        # the ARL SDK: SandboxSession + InteractiveShellClient
+    "swe-rex",               # AbstractRuntime interface that uni-agent's AgentEnv drives
+    "websockets",            # required by InteractiveShellClient (persistent WS shell)
+    "loguru",
+    "pydantic",
+    "pydantic-settings",
+    "aiohttp",
+    "httpx",
+]
+
+[project.optional-dependencies]
+# GPU/training stack — installed ONLY on GPU. Locally we skip it (see DEV_SETUP.md);
+# it is sourced from uni-agent/verl/requirements.txt, not pinned here, so this
+# project's lock never drags torch onto a CPU box.
+gpu = []
+
+[tool.uv]
+# uni-agent and its nested verl are editable --no-deps installs (mirroring
+# uni-agent's own `pip install --no-deps -e ./verl`) + made importable via
+# PYTHONPATH=uni-agent/verl:uni-agent:.  — they are intentionally NOT resolved
+# deps here, so `uv sync` stays GPU-free for local ARL-runtime testing.
+# arl-env resolves from the default PyPI index (no custom source needed).
+package = false

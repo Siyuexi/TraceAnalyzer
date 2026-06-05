@@ -6,6 +6,7 @@ This project now uses a local `src/` source repository for P2A code and Uni-Agen
 
 - `src/`: local P2A source repository. It intentionally has no remote right now.
 - `src/p2a/`: P2A advantage reshape, bonus-map loading, and precompute utilities.
+- `src/env/`: local ARL SDK deployment glue, image routing, ARL-aware Uni-Agent loop adapter, and smoke/data helpers. The external `arl-env` SDK owns the `arl` import name.
 - `src/scripts/`: project helper scripts for baseline preparation and launch.
 - `src/uni-agent/`: Uni-Agent submodule. Its `origin` is the fork (`git@github.com:Siyuexi/uni-agent.git`), and `upstream` can point to `git@github.com:verl-project/uni-agent.git` when upstream sync is needed.
 - `src/uni-agent/verl`: nested verl submodule required by Uni-Agent training scripts.
@@ -28,9 +29,9 @@ Lightweight P2A rollout instrumentation is available but disabled by default; se
 `UNI_AGENT_P2A_TRACE=1` before `src/scripts/uni_agent_baseline.sh prepare` if you want
 per-step spans and parsed tool calls to be carried in rollout `extra_fields`.
 
-Dynamic bonus-map construction now uses Uni-Agent sandboxes by default, not the
-old rLLM/ARL backend. The old trace code is only imported as instrumentation and
-parser utilities. In dynamic mode, the precompute script starts a Uni-Agent
+Dynamic bonus-map construction uses Uni-Agent sandboxes (ARL backend). The trace
+instrumentation/parsing engine is a first-class module of this source tree,
+`p2a/trace.py` (no dependency on `src-backup`). In dynamic mode, the precompute script starts a Uni-Agent
 `AgentEnv`, runs the sample `post_setup_cmd`, explicitly checks out the buggy
 commit inferred from `commit_hash` or `instance_id`, instruments `/testbed`, and
 runs `/root/run_tests.sh`. This is the path intended for R2E-Gym-Subset veFaaS.
@@ -64,6 +65,7 @@ cd uni-agent
 pip install --no-deps -e ./verl
 pip install -e .
 pip install swe-rex loguru pydantic pydantic_settings aiohttp datasets ray orjson
+pip install arl-env==0.3.1  # required by the direct ARL SDK deployment path
 pip install git+https://github.com/R2E-Gym/R2E-Gym.git
 ```
 
@@ -148,11 +150,12 @@ python -m p2a.precompute.precompute_bonus_maps \
 ```
 
 Use low `--n_parallel` first because each dynamic item starts a sandbox. The
-`legacy` sandbox backend exists only as an explicit fallback:
+only sandbox backend is `uni_agent` (backed by the ARL deployment).
 
-```bash
-P2A_SANDBOX_BACKEND=legacy python -m p2a.precompute.precompute_bonus_maps ...
-```
+The Uni-Agent dynamic path applies the sample `post_setup_cmd`, performs a
+plain buggy checkout, instruments `/testbed`, and runs `/root/run_tests.sh`.
+There is intentionally no generalized startup-fixup layer in the current ARL
+migration path.
 
 ## Known Tomorrow Blockers
 
@@ -160,3 +163,40 @@ P2A_SANDBOX_BACKEND=legacy python -m p2a.precompute.precompute_bonus_maps ...
 - veFaaS credentials/function/route are not configured yet.
 - `single_node_debug.sh` submits a Ray job; Ray must be running on the GPU server.
 - Uni-Agent's R2E-Gym-Subset preprocess currently supports veFaaS mapping, not local deployment.
+- The direct ARL SDK path requires `arl-env==0.3.1` in the ambient Uni-Agent
+  execution environment and in the training image/environment; this source tree
+  currently does not own a `src/pyproject.toml`/`uv.lock`.
+
+## ARL-backed Uni-Agent Path
+
+ARL is integrated without editing the `uni-agent/` submodule. The local
+`env.agent_loop.ArlUniAgentLoop` intercepts `env.deployment.type=arl`, boots an
+ARL managed sandbox through the external `arl-env` SDK, and hands Uni-Agent a
+local runtime adapter that implements the SWE-ReX `AbstractRuntime` interface
+over ARL's persistent interactive shell.
+
+Key commands from `src/`:
+
+```bash
+scripts/uni_agent_arl.sh prepare
+scripts/uni_agent_arl.sh smoke
+scripts/uni_agent_arl.sh data
+```
+
+`smoke` is the hard gate before training. It verifies that the ARL SDK sandbox
+is reachable, that `run_in_session` persists `export`/`cd` through the
+interactive shell, and that `upload` works. If this fails, do not start
+training; the ARL runtime adapter needs to be fixed first.
+
+R2E image routing defaults:
+
+- `coveragepy` and `orange3` use the verified enterprise image
+  `enterprise-public-cn-beijing.cr.volces.com/r2e-gym-subset/{instance}:latest`.
+- Other `namanjain12/*_final` images are rewritten through the ARL mirror
+  `${ARL_MIRROR_REGISTRY:-pair-diag-cn-guangzhou.cr.volces.com}/${ARL_MIRROR_NAMESPACE:-code}/...`.
+- Extend `P2A_ARL_ENTERPRISE_REPOS` or set exact `P2A_ARL_IMAGE_OVERRIDES_JSON`
+  after the full reproduction-gate audit identifies more anomalous images.
+
+For dynamic bonus-map precompute, set `P2A_DEPLOYMENT=arl` while keeping
+`--sandbox_backend uni_agent`; the existing adapter will use the ARL bridge and
+still run the plain buggy checkout gate before instrumentation.

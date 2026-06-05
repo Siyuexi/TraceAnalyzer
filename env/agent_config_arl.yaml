@@ -1,0 +1,36 @@
+- name: swe_agent
+
+  _target_: env.agent_loop.ArlUniAgentLoop
+
+  concurrency: 32
+  log_dir: /tmp/swebench_qwen3_coder_arl
+  mask_abnormal_exit_traj: false
+  # Match the Qwen3-Coder XML tool-call template used by the Uni-Agent default model.
+  tool_parser: qwen3_coder
+
+  interaction:
+    action_timeout: 300
+    max_turns: 100
+
+  env:
+    deployment:
+      type: arl
+      image: python:3.11-slim
+      timeout: 600
+      startup_timeout: 240
+    env_variables:
+      PIP_PROGRESS_BAR: "off"
+      PIP_CACHE_DIR: "~/.cache/pip"
+      PAGER: "cat"
+      MANPAGER: "cat"
+      LESS: "-R"
+      TQDM_DISABLE: "1"
+      GIT_PAGER: "cat"
+
+  tools:
+    - name: str_replace_editor
+    - name: execute_bash
+    - name: submit
+
+  reward:
+    eval_timeout: 600

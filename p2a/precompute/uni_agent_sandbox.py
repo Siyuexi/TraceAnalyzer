@@ -1,8 +1,8 @@
 """Uni-Agent sandbox adapter for dynamic P2A bonus-map construction.
 
-The migrated P2A path must not depend on the old rLLM/ARL sandbox backend.
 This module starts Uni-Agent ``AgentEnv`` sandboxes and exposes the small
-``SWEEnv``-like surface that the existing tracer helpers need.
+synchronous sandbox surface (``_run`` / ``_execute_raw`` / ``repo_path`` /
+``alt_path``) that ``p2a.trace`` instrumentation helpers expect.
 """
 
 from __future__ import annotations
@@ -10,15 +10,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import concurrent.futures
+import json
 import os
 import shlex
 import uuid
 from pathlib import Path
 from typing import Any
-
-from p2a.precompute._path_compat import ensure_paths
-
-ensure_paths()
 
 
 R2E_POST_SETUP_CMD = """
@@ -90,24 +87,50 @@ def extract_reward_metadata(task: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _parsed_commit_content_dict(*sources: Any) -> dict[str, Any]:
+    """Return parsed_commit_content as a dict from the first source that carries it."""
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        pcc = src.get("parsed_commit_content")
+        if isinstance(pcc, str):
+            try:
+                pcc = json.loads(pcc)
+            except (ValueError, TypeError):
+                pcc = None
+        if isinstance(pcc, dict):
+            return pcc
+    return {}
+
+
 def infer_commit_ref(task: dict[str, Any], instance_id: str | None = None) -> str | None:
     metadata = extract_reward_metadata(task)
+    # R2E stores the buggy ref as parsed_commit_content.old_commit_hash (= commit_hash^).
+    # It is NOT at the top level / reward metadata, so it MUST be read from parsed_commit_content;
+    # otherwise we fall through to commit_hash (the FIXED commit) and run tests on fixed code
+    # (the all_pass bug).
+    pcc = _parsed_commit_content_dict(task, metadata)
     commit = (
         task.get("old_commit_hash")
         or task.get("base_commit")
         or metadata.get("old_commit_hash")
         or metadata.get("base_commit")
-        or task.get("commit_hash")
-        or metadata.get("commit_hash")
+        or pcc.get("old_commit_hash")
+        or pcc.get("base_commit")
     )
     if isinstance(commit, str) and commit:
         return commit
+    # Last-resort fallback: the PARENT of the fixed commit (= buggy), never the fixed commit itself.
+    fixed = task.get("commit_hash") or metadata.get("commit_hash")
+    if isinstance(fixed, str) and fixed:
+        return f"{fixed}^"
 
     iid = instance_id or task.get("instance_id") or metadata.get("instance_id")
     if isinstance(iid, str) and "__" in iid:
         suffix = iid.rsplit("__", 1)[-1]
         if suffix:
-            return suffix
+            # The instance suffix is the FIXED commit prefix; the buggy state is its parent.
+            return f"{suffix}^"
     return None
 
 
@@ -120,11 +143,24 @@ def derive_r2e_vefaas_image(instance_id: str) -> str | None:
     return R2E_VEFAAS_IMAGE_TEMPLATE.format(instance_number=instance_number)
 
 
-def _extract_image(task: dict[str, Any], instance_id: str) -> str | None:
+def _extract_image(task: dict[str, Any], instance_id: str, *, deployment: str = "vefaas") -> str | None:
     tools_kwargs = extract_tools_kwargs(task)
     env_cfg = tools_kwargs.get("env") if isinstance(tools_kwargs.get("env"), dict) else {}
     deployment_cfg = env_cfg.get("deployment") if isinstance(env_cfg.get("deployment"), dict) else {}
-    image = deployment_cfg.get("image") or env_cfg.get("image") or task.get("docker_image")
+    # An explicit per-sample image override always wins.
+    explicit = deployment_cfg.get("image") or env_cfg.get("image")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    # veFaaS only hosts the enterprise r2e-gym-subset registry. The parquet's
+    # ``docker_image`` (e.g. ``namanjain12/*_final``) is NOT available on veFaaS and is built
+    # with different/wrong baked package versions than the enterprise image (e.g. orange3 ships
+    # numpy 1.24.4 instead of <1.18). Derive the enterprise image first for the veFaaS path;
+    # other deployments keep docker_image.
+    if deployment == "vefaas":
+        enterprise = derive_r2e_vefaas_image(instance_id)
+        if enterprise:
+            return enterprise
+    image = task.get("docker_image")
     if isinstance(image, str) and image:
         return image
     return derive_r2e_vefaas_image(instance_id)
@@ -154,7 +190,12 @@ def _default_env_variables() -> dict[str, str]:
 def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment: str | None = None) -> dict[str, Any]:
     """Build a Uni-Agent ``AgentEnvConfig`` dict from a dataset/sample row."""
     impl = (deployment or os.getenv("P2A_DEPLOYMENT") or os.getenv("DEPLOYMENT") or "vefaas").lower()
-    image = _extract_image(task, instance_id)
+    if impl == "arl":
+        from env.images import select_image_for_sample
+
+        image = select_image_for_sample(task, instance_id=instance_id)
+    else:
+        image = _extract_image(task, instance_id, deployment=impl)
     if not image:
         raise ValueError(f"Cannot infer sandbox image for {instance_id}")
 
@@ -187,8 +228,21 @@ def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment
             "timeout": float(os.getenv("P2A_LOCAL_TIMEOUT", "600")),
             "container_runtime": os.getenv("P2A_LOCAL_CONTAINER_RUNTIME", "docker"),
         }
+    elif impl == "arl":
+        deployment_config = {
+            "type": "arl",
+            "image": image,
+            "gateway_url": os.getenv("ARL_GATEWAY_URL", "http://118.145.210.10:8080"),
+            "namespace": os.getenv("ARL_NAMESPACE", "default"),
+            "experiment_id": os.getenv("ARL_EXPERIMENT_ID", "p2a-uniagent-arl-precompute"),
+            "timeout": float(os.getenv("ARL_TIMEOUT", "600")),
+            "startup_timeout": float(os.getenv("ARL_STARTUP_TIMEOUT", os.getenv("ARL_SWEREX_STARTUP_TIMEOUT", "240"))),
+        }
+        max_replicas = os.getenv("ARL_MAX_REPLICAS")
+        if max_replicas:
+            deployment_config["max_replicas"] = int(max_replicas)
     else:
-        raise ValueError(f"Unsupported P2A_DEPLOYMENT={impl!r}; expected vefaas/modal/local")
+        raise ValueError(f"Unsupported P2A_DEPLOYMENT={impl!r}; expected vefaas/modal/local/arl")
 
     return {
         "deployment": deployment_config,
@@ -198,7 +252,7 @@ def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment
 
 
 class UniAgentSandboxAdapter:
-    """Expose the minimal old-SWEEnv methods used by trace helpers."""
+    """Expose the minimal synchronous sandbox methods used by ``p2a.trace`` helpers."""
 
     repo_path = "/testbed"
     alt_path = "/root"
@@ -238,11 +292,13 @@ class UniAgentSandboxAdapter:
             return {"buggy_checkout_ref": None, "buggy_checkout_exit": None, "buggy_checkout_skipped": True}
 
         quoted_ref = shlex.quote(commit_ref)
+        # PLAIN checkout only — never `--force` / `git reset --hard`. Those discard the image's
+        # install-time worktree fixups (e.g. pandas setup.cfg without --strict-data-files, aiohttp
+        # source-compat rewrites) and break test collection.
         cmd = (
             f"cd {self.repo_path} && "
             "git rev-parse --is-inside-work-tree >/dev/null 2>&1 && "
-            f"git checkout --force {quoted_ref} && "
-            "git reset --hard"
+            f"git checkout {quoted_ref}"
         )
         output, _, exit_code = self._execute_raw(cmd, timeout=120)
         head, _, head_exit = self._execute_raw(f"cd {self.repo_path} && git rev-parse --short=12 HEAD", timeout=30)
@@ -259,12 +315,23 @@ def create_uni_agent_sandbox(task: dict[str, Any], *, instance_id: str) -> UniAg
     from uni_agent.interaction import AgentEnv, AgentEnvConfig
 
     config = build_agent_env_config(task, instance_id=instance_id)
-    env = AgentEnv(run_id=f"p2a-bonus-{uuid.uuid4()}", env_config=AgentEnvConfig(**config))
+    if config["deployment"].get("type") == "arl":
+        from env.deployment import make_env_config
+
+        env_config = make_env_config(
+            config["deployment"],
+            env_variables=config.get("env_variables"),
+            post_setup_cmd=config.get("post_setup_cmd"),
+            tool_install_dir=config.get("tool_install_dir", "/usr/local/bin"),
+        )
+    else:
+        env_config = AgentEnvConfig(**config)
+    env = AgentEnv(run_id=f"p2a-bonus-{uuid.uuid4()}", env_config=env_config)
     return UniAgentSandboxAdapter(env)
 
 
 def _read_old_sources(env: UniAgentSandboxAdapter, files: set[str]) -> tuple[dict[str, str], set[str]]:
-    from rllm.environments.swe.trace import _read_sandbox_file
+    from p2a.trace import _read_sandbox_file
 
     old_sources: dict[str, str] = {}
     existing_files: set[str] = set()
@@ -285,7 +352,7 @@ def _apply_patch_and_read_new_sources(
     files: set[str],
     existing_files: set[str],
 ) -> dict[str, str]:
-    from rllm.environments.swe.trace import _read_sandbox_file
+    from p2a.trace import _read_sandbox_file
 
     patch_b64 = base64.b64encode(patch_text.encode()).decode()
     env._run(f"printf '%s' '{patch_b64}' | base64 -d > /tmp/_p2a_golden_patch.diff")
@@ -314,7 +381,7 @@ def _apply_patch_and_read_new_sources(
 
 def find_changed_callables_via_patch(env: UniAgentSandboxAdapter, task: dict[str, Any]) -> tuple[list[dict], list[dict], dict]:
     """Derive old/new callable changes from a Uni-Agent sample's patch field."""
-    from rllm.environments.swe.trace import (
+    from p2a.trace import (
         _get_patched_py_files,
         _is_test_file,
         extract_callables_from_ast,

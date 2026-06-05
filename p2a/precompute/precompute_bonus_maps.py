@@ -43,17 +43,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from p2a.precompute._path_compat import ensure_paths
-
-ensure_paths()
-
-from rllm.environments.swe.trace import (
+from p2a.trace import (
     TRACE_FILE_PATH,
     _is_test_file,
     extract_callables_from_ast,
     find_modified_callables_from_task,
-    make_instance_id as _legacy_make_instance_id,
-    normalize_task as _legacy_normalize_task,
+    make_instance_id as _trace_make_instance_id,
+    normalize_task as _trace_normalize_task,
 )
 
 # ---------------------------------------------------------------------------
@@ -86,8 +82,8 @@ def _looks_like_bare_hash(value: str) -> bool:
 
 
 def normalize_task(task: dict) -> dict:
-    """Normalize legacy rows and Uni-Agent ``extra_info.tools_kwargs`` rows."""
-    task = _legacy_normalize_task(task)
+    """Normalize raw dataset rows and Uni-Agent ``extra_info.tools_kwargs`` rows."""
+    task = _trace_normalize_task(task)
     extra = task.get("extra_info")
     if isinstance(extra, str) and extra.strip():
         try:
@@ -132,9 +128,9 @@ def make_instance_id(task: dict) -> str:
     if isinstance(repo, str) and repo and isinstance(commit, str) and commit:
         return f"{repo}__{commit[:10]}"
 
-    legacy = _legacy_make_instance_id(task)
-    if isinstance(legacy, str) and legacy:
-        return legacy
+    base = _trace_make_instance_id(task)
+    if isinstance(base, str) and base:
+        return base
     return "unknown"
 
 
@@ -410,7 +406,7 @@ def _get_f2p_test_funcs(task: dict, raw_output: str, swebench_verified: bool) ->
             return funcs  # may be empty
         return None
     else:
-        from rllm.environments.swe.reward import decolor_dict_keys, parse_log_pytest
+        from r2egym.repo_analysis.execution_log_parser import decolor_dict_keys, parse_log_pytest
 
         test_status = decolor_dict_keys(parse_log_pytest(raw_output))
         if not test_status:
@@ -492,7 +488,7 @@ def _run_tests_with_file_capture(env, test_script: str, timeout: int = 300) -> t
     lives near the end of output, so dynamic bonus-map construction must capture
     stdout/stderr to sandbox files and read them back with the chunked helper.
     """
-    from rllm.environments.swe.trace import _read_sandbox_file
+    from p2a.trace import _read_sandbox_file
 
     env._run(f"rm -f {TEST_STDOUT_PATH} {TEST_STDERR_PATH} {TEST_EXIT_PATH}")
     quoted_script = shlex.quote(test_script)
@@ -690,7 +686,7 @@ def compute_dynamic_bonus_map(
       1. newly_created / no_callable  (static layer)
       2. no_trace → no_gt → all_pass / no_f2p → standard / direct  (dynamic layer)
     """
-    from rllm.environments.swe.trace import (
+    from p2a.trace import (
         aggregate_traces,
         build_call_graph_from_traces,
         instrument_sandbox,
@@ -707,7 +703,7 @@ def compute_dynamic_bonus_map(
     env = None
     has_structured_callable_source = bool(task.get("parsed_commit_content") or task.get("parsed_commit"))
 
-    if not all_modified and (newly_created or has_structured_callable_source or not task.get("patch") or backend == "legacy"):
+    if not all_modified and (newly_created or has_structured_callable_source or not task.get("patch")):
         if newly_created:
             case_type = "newly_created"
         else:
@@ -741,18 +737,8 @@ def compute_dynamic_bonus_map(
                 all_modified = patch_modified
                 newly_created = patch_newly_created or newly_created
                 env_diag.update(patch_diag)
-        elif backend == "legacy":
-            from rllm.environments.swe.swe import SWEEnv
-
-            env = SWEEnv.from_dict(
-                {
-                    **task,
-                    "experiment_id": os.environ.get("ARL_EXPERIMENT_ID", "bonus-maps"),
-                }
-            )
-            env.reset()
         else:
-            raise ValueError(f"Unsupported sandbox_backend={backend!r}; expected uni_agent or legacy")
+            raise ValueError(f"Unsupported sandbox_backend={backend!r}; expected uni_agent")
 
         # ── Static layer ──────────────────────────────────────────────────
         if not all_modified:
@@ -995,7 +981,7 @@ def compute_dynamic_bonus_map(
         traces = aggregate_traces(f2p_traces)
 
         def _read_file(rel_path: str) -> str:
-            from rllm.environments.swe.trace import _read_sandbox_file
+            from p2a.trace import _read_sandbox_file
 
             content, exit_code = _read_sandbox_file(env, f"{env.repo_path}/{rel_path}")
             return content if exit_code == 0 else ""
@@ -1132,12 +1118,18 @@ def main():
     parser.add_argument("--mode", choices=["static", "dynamic"], default="static", help="static: AST diff only. dynamic: full trace pipeline")
     parser.add_argument(
         "--sandbox_backend",
-        choices=["uni_agent", "legacy"],
+        choices=["uni_agent"],
         default=os.environ.get("P2A_SANDBOX_BACKEND", "uni_agent"),
-        help="Sandbox backend for dynamic mode. Default: uni_agent. legacy uses old rLLM/ARL only as an explicit fallback.",
+        help="Sandbox backend for dynamic mode (uni_agent, backed by the ARL deployment).",
     )
     parser.add_argument("--n_parallel", type=int, default=1, help="Number of parallel workers")
     parser.add_argument("--limit", type=int, default=None, help="Process only first N instances")
+    parser.add_argument("--offset", type=int, default=0, help="Skip the first N rows before applying --limit")
+    parser.add_argument(
+        "--skip_existing",
+        action="store_true",
+        help="Skip rows whose <instance_id>.json already exists in --output_dir",
+    )
     parser.add_argument(
         "--save_trace_sidecars",
         action="store_true",
@@ -1169,6 +1161,10 @@ def main():
         os.makedirs(trace_sidecar_dir, exist_ok=True)
 
     df = pd.read_parquet(args.parquet_path)
+    if args.offset:
+        if args.offset < 0:
+            raise ValueError("--offset must be >= 0")
+        df = df.iloc[args.offset :]
     if args.limit:
         df = df.head(args.limit)
 
@@ -1182,6 +1178,13 @@ def main():
     work_items = []
     for idx, row in df.iterrows():
         task_payload = row.to_dict()
+        if args.skip_existing:
+            try:
+                instance_id = make_instance_id(normalize_task(task_payload))
+            except Exception:
+                instance_id = None
+            if instance_id and os.path.exists(os.path.join(args.output_dir, f"{instance_id}.json")):
+                continue
         work_items.append(
             (
                 idx,
@@ -1194,6 +1197,11 @@ def main():
                 args.sandbox_backend,
             )
         )
+
+    if not work_items:
+        print("No work items to process after applying offset/limit/skip_existing.")
+        print(f"Bonus maps saved to: {args.output_dir}")
+        return
 
     from collections import Counter
 

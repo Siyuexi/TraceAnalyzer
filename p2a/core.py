@@ -25,9 +25,9 @@ class BonusMapStore:
     """Loads and caches precomputed bonus maps from disk.
 
     Each bonus map is a JSON file at {bonus_map_dir}/{instance_id}.json.
-    Existing rLLM-era R2E maps used 8-char commit prefixes, while Uni-Agent
+    Older R2E maps on disk used 8-char commit prefixes, while Uni-Agent
     R2E parquet rows use 10-char prefixes. Exact matches win; a 10-char R2E
-    key falls back to the legacy 8-char filename.
+    key falls back to the 8-char filename.
     """
 
     def __init__(self, bonus_map_dir: str):
