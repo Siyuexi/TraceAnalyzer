@@ -136,6 +136,10 @@ with open(path, "w", encoding="utf-8") as fh:
     fh.write(text)
 PY
 
+# TRAIN_FILE must be the skip-filtered training parquet produced by
+# scripts/build_data.py r2e (the *.train.parquet output); bad cases are
+# already excluded there, so no separate filter step is needed here.
+
 # --- The one change: use p2a.main instead of verl.experimental.fully_async_policy.fully_async_main ---
 ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     -- python3 -m p2a.main \

@@ -138,6 +138,11 @@ debug() {
   fi
 
   cd "$SRC_DIR"
+
+  # TRAIN_FILE (and an R2E TEST_FILE) must be the skip-filtered training parquet
+  # produced by scripts/build_data.py r2e (*.train.parquet) — bad cases are
+  # already excluded there, so no separate filter step is needed here.
+
   export RAY_DATA_HOME
   export TRAIN_FILE
   export TEST_FILE
