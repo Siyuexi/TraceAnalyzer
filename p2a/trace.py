@@ -1001,9 +1001,17 @@ def instrument_sandbox(
     for c in modified_callables:
         callables_by_file.setdefault(c["file_path"], []).append(c)
 
-    # 1. Find site-packages path & deploy tracer module
-    site_output, site_err = env._run('python -c "import site; print(site.getsitepackages()[0])"')
-    site_packages = site_output.strip().splitlines()[0].strip()
+    # 1. Find site-packages path & deploy tracer module. The command is reliable
+    # on a clean boot but can return empty output under a transient ARL websocket
+    # hiccup at high concurrency; retry a few times and never index an empty list.
+    site_packages = ""
+    site_output = site_err = ""
+    for _ in range(3):
+        site_output, site_err = env._run('python -c "import site; print(site.getsitepackages()[0])"')
+        lines = site_output.strip().splitlines()
+        if lines and lines[0].strip():
+            site_packages = lines[0].strip()
+            break
     if not site_packages or "Error" in str(site_err):
         logger.warning("Failed to find site-packages: %s %s", site_output, site_err)
         return []

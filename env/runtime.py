@@ -61,6 +61,44 @@ _B64_CHUNK = 60_000
 _READ_POLL = 0.5  # seconds per websocket read while draining a command
 _DEFAULT_CMD_TIMEOUT = 60.0
 
+# Transient-error retry. At full-corpus (~4.5k instance) scale the ARL gateway
+# occasionally drops a connection mid-call — httpx for the managed-session
+# execute path, websockets for the interactive PTY shell. These are recoverable
+# by retrying (stateless execute) or reopening the shell, so we treat a bounded
+# set of network exceptions as transient rather than failing the instance.
+_RETRY_ATTEMPTS = 3
+_RETRY_BASE_DELAY = 1.5  # seconds; exponential backoff: 1.5, 3.0, ...
+
+
+def _transient_exc_types() -> tuple[type[BaseException], ...]:
+    """Best-effort tuple of transient network errors worth retrying.
+
+    Built defensively so this module imports even when a backend lib is absent.
+    """
+    types: list[type[BaseException]] = [ConnectionError, TimeoutError, OSError]
+    try:
+        import httpx
+
+        types += [
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.ReadTimeout,
+            httpx.RemoteProtocolError,
+            httpx.PoolTimeout,
+        ]
+    except Exception:  # noqa: BLE001 - httpx optional at import time
+        pass
+    try:
+        import websockets.exceptions as _wse
+
+        types += [_wse.ConnectionClosed, _wse.ConnectionClosedError, _wse.ConnectionClosedOK]
+    except Exception:  # noqa: BLE001 - websockets optional at import time
+        pass
+    return tuple(dict.fromkeys(types))
+
+
+_TRANSIENT = _transient_exc_types()
+
 
 def _extract_gateway_url(session: Any, explicit: str | None) -> str:
     if explicit:
@@ -104,6 +142,29 @@ class ArlRuntime(AbstractRuntime):
         if not sid:
             raise RuntimeError("ARL ManagedSession has no session_id (not created?).")
         return sid
+
+    # ── transient-error retry ─────────────────────────────────────────────
+    def _retry_sync(self, what: str, func, *args):
+        """Run a synchronous SDK call, retrying transient connection drops."""
+        last: BaseException | None = None
+        for attempt in range(1, _RETRY_ATTEMPTS + 1):
+            try:
+                return func(*args)
+            except _TRANSIENT as exc:
+                last = exc
+                if attempt >= _RETRY_ATTEMPTS:
+                    break
+                delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                self.logger.warning(
+                    "ARL %s transient error (attempt %d/%d), retry in %.1fs: %r",
+                    what, attempt, _RETRY_ATTEMPTS, delay, exc,
+                )
+                time.sleep(delay)
+        raise last  # type: ignore[misc]
+
+    def _session_execute(self, steps: list[dict[str, Any]]) -> Any:
+        """ManagedSession.execute with transient-drop retry (stateless → safe)."""
+        return self._retry_sync("execute", self._session.execute, steps)
 
     # ── persistent interactive shells ─────────────────────────────────────
     def _open_shell(self, name: str, startup_source: list[str] | None) -> str:
@@ -175,7 +236,7 @@ class ArlRuntime(AbstractRuntime):
         step: dict[str, Any] = {"name": "arl-exec", "command": ["bash", "-lc", shell_cmd]}
         if timeout:
             step["timeout"] = int(timeout)
-        resp = self._session.execute([step])
+        resp = self._session_execute([step])
         if not resp.results:
             raise RuntimeError("ARL execute returned no results")
         return resp.results[0].output
@@ -198,7 +259,7 @@ class ArlRuntime(AbstractRuntime):
                 "command": ["bash", "-lc", f"printf %s {shlex.quote(chunk)} | base64 -d {redirect} {quoted}"],
             })
             first = False
-        resp = self._session.execute(steps)
+        resp = self._session_execute(steps)
         bad = [r for r in resp.results if r.output.exit_code != 0]
         if bad:
             raise RuntimeError(f"write_file failed: {bad[-1].output.stderr}")
@@ -221,9 +282,25 @@ class ArlRuntime(AbstractRuntime):
             await self._blocking(self._open_shell, name, None)
 
         timeout = float(getattr(action, "timeout", None) or _DEFAULT_CMD_TIMEOUT)
-        output, exit_code, failure = await self._blocking(
-            self._run_in_shell_sync, name, action.command, timeout
-        )
+
+        def _run_with_reconnect() -> tuple[str, int, str]:
+            try:
+                return self._run_in_shell_sync(name, action.command, timeout)
+            except _TRANSIENT as exc:
+                # The PTY websocket dropped. Reopen the shell and retry once.
+                # Caveat: shell state (cwd/export) is lost on reopen — gate/setup
+                # paths should use the stateless ``execute`` for critical steps.
+                self.logger.warning("ARL shell %r dropped (%r); reopening + retry once", name, exc)
+                old = self._shells.pop(name, None)
+                if old is not None:
+                    try:
+                        old.close()
+                    except Exception:  # noqa: BLE001 - best-effort close
+                        pass
+                self._open_shell(name, None)
+                return self._run_in_shell_sync(name, action.command, timeout)
+
+        output, exit_code, failure = await self._blocking(_run_with_reconnect)
         return BashObservation(
             output=output,
             exit_code=exit_code,

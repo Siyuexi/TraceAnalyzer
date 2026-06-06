@@ -108,6 +108,15 @@ def normalize_task(task: dict) -> dict:
         merged["extra_info"] = extra
     if "repo" in merged and "repo_name" not in merged:
         merged["repo_name"] = merged["repo"]
+    # ``relevant_files`` is carried as a JSON string by the enrich adapter (a
+    # native list column re-introduces a nested-chunk parquet read error at
+    # scale); the static callable detector expects the decoded list.
+    rel = merged.get("relevant_files")
+    if isinstance(rel, str) and rel.strip():
+        try:
+            merged["relevant_files"] = json.loads(rel)
+        except (json.JSONDecodeError, TypeError):
+            pass
     return merged
 
 
@@ -686,6 +695,7 @@ def compute_dynamic_bonus_map(
       1. newly_created / no_callable  (static layer)
       2. no_trace → no_gt → all_pass / no_f2p → standard / direct  (dynamic layer)
     """
+    from p2a.test_setup import parse_fixups, startup_fixup_command
     from p2a.trace import (
         aggregate_traces,
         build_call_graph_from_traces,
@@ -728,6 +738,16 @@ def compute_dynamic_bonus_map(
             env = create_uni_agent_sandbox(task, instance_id=instance_id)
             env.start()
             env_diag.update(env.checkout_buggy_commit(task, instance_id=instance_id))
+
+            # Repo startup fixups (source patches + dep pins) run AFTER buggy
+            # checkout and BEFORE instrumentation, so the instrumented + tested
+            # source is the fixed-up source (same adapter the gate uses).
+            _repo = instance_id.split("__", 1)[0] if instance_id and "__" in instance_id else ""
+            _fix_out, _ = env._run(startup_fixup_command(_repo), timeout=300)
+            _fixups = parse_fixups(_fix_out)
+            env_diag["startup_fixups_applied"] = _fixups
+            if _fixups:
+                print(f"  [{instance_id}] startup_fixups_applied={_fixups}")
 
             # Uni-Agent R2E parquet keeps reward.metadata.patch but drops the
             # parsed old/new file contents. Recover callable diffs from the
@@ -777,6 +797,8 @@ def compute_dynamic_bonus_map(
         test_script = "/run_tests.sh" if env.swebench_verified else f"{env.alt_path}/run_tests.sh"
         if not env.swebench_verified:
             env._run(f"sed -i '/pytest/{{/-rA/!s/pytest/pytest -rA/}}' {test_script}")
+        # Repo fixups already ran after buggy checkout (see startup_fixup_command);
+        # no separate normalization shim needed here.
         stdout, stderr, test_exit, capture_diag = _run_tests_with_file_capture(env, test_script, timeout=300)
         raw_output = f"{stdout}\n{stderr}" if stderr else stdout
 
@@ -1131,6 +1153,12 @@ def main():
         help="Skip rows whose <instance_id>.json already exists in --output_dir",
     )
     parser.add_argument(
+        "--no_skip_filter",
+        action="store_true",
+        help="Do NOT exclude instances listed in src/config/bad_instances.json "
+        "(default: exclude them, matching the training-data skip filter)",
+    )
+    parser.add_argument(
         "--save_trace_sidecars",
         action="store_true",
         help="Write raw/f2p/aggregated trace debug sidecars as .json.gz files",
@@ -1168,21 +1196,35 @@ def main():
     if args.limit:
         df = df.head(args.limit)
 
-    print(f"Processing {len(df)} instances from {args.parquet_path}")
+    print(f"Loaded {len(df)} instances from {args.parquet_path}")
     print(f"Mode: {args.mode}, Output: {args.output_dir}, Workers: {args.n_parallel}")
     if args.mode == "dynamic":
         print(f"Dynamic sandbox backend: {args.sandbox_backend}")
     if trace_sidecar_dir:
         print(f"Trace sidecars: {trace_sidecar_dir}")
 
+    # Same skip-case registry consumed by the training-data filter, so the
+    # bonus-map precompute and training paths never diverge (src/config/bad_instances.json).
+    if args.no_skip_filter:
+        skip_ids: set[str] = set()
+    else:
+        from p2a.skip_cases import load_skip_ids
+
+        skip_ids = load_skip_ids()
+        print(f"Skip-case registry: {len(skip_ids)} bad instances will be excluded")
+    n_skipped_bad = 0
+
     work_items = []
     for idx, row in df.iterrows():
         task_payload = row.to_dict()
+        try:
+            instance_id = make_instance_id(normalize_task(task_payload))
+        except Exception:
+            instance_id = None
+        if instance_id and instance_id in skip_ids:
+            n_skipped_bad += 1
+            continue
         if args.skip_existing:
-            try:
-                instance_id = make_instance_id(normalize_task(task_payload))
-            except Exception:
-                instance_id = None
             if instance_id and os.path.exists(os.path.join(args.output_dir, f"{instance_id}.json")):
                 continue
         work_items.append(
@@ -1197,6 +1239,8 @@ def main():
                 args.sandbox_backend,
             )
         )
+
+    print(f"Excluded {n_skipped_bad} bad instances (skip registry); processing {len(work_items)} work items")
 
     if not work_items:
         print("No work items to process after applying offset/limit/skip_existing.")
