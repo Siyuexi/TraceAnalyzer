@@ -1,0 +1,655 @@
+{
+  "_doc": "R2E instances whose F2P/P2P does NOT match metadata expectation (buggy must FAIL F2P, fixed must PASS P2P) even after the full test_startup_fixups strategy. ALL ARL-based paths exclude these: plain RL data, P2A training data, and P2A bonus-map precompute. Maintained by hand + scripts/build_data.py skip-list; consumed via scripts/build_data.py r2e (skip-filter) and p2a.skip_cases.load_skip_ids. uni-agent is never modified.",
+  "schema": {
+    "id": "instance_id (uni-agent 10-char form)",
+    "repo": "repo",
+    "reason": "reason_code",
+    "source": "provenance",
+    "evidence": "artifact pointer",
+    "report_id": "original 8-char id",
+    "skip_training": "exclude from RL/P2A training",
+    "skip_bonus": "exclude from bonus precompute"
+  },
+  "skip": [
+    {
+      "id": "aiohttp__2e4b0337e1",
+      "repo": "aiohttp",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "aiohttp__2e4b0337",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "aiohttp__8f881a7ad8",
+      "repo": "aiohttp",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "aiohttp__8f881a7a",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "aiohttp__b8548c7d47",
+      "repo": "aiohttp",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "aiohttp__b8548c7d",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "coveragepy__25311c6caa",
+      "repo": "coveragepy",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "coveragepy__25311c6c",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "coveragepy__80bfea74c1",
+      "repo": "coveragepy",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "coveragepy__80bfea74",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "coveragepy__f12672d370",
+      "repo": "coveragepy",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "coveragepy__f12672d3",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "datalad__27bfd015eb",
+      "repo": "datalad",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "datalad__27bfd015",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "datalad__7c3d4767f5",
+      "repo": "datalad",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "datalad__7c3d4767",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "datalad__d5569a647e",
+      "repo": "datalad",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "datalad__d5569a64",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "numpy__0655cb9e24",
+      "repo": "numpy",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "numpy__0655cb9e",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "numpy__27bfcdbe13",
+      "repo": "numpy",
+      "reason": "unresolved_test_output_capture_failed",
+      "source": "report_2026-06-05",
+      "report_id": "numpy__27bfcdbe",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "numpy__4ec016784b",
+      "repo": "numpy",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "numpy__4ec01678",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "numpy__5fd25ab98c",
+      "repo": "numpy",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "numpy__5fd25ab9",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__14c32060df",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__14c32060",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__2177d800be",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__2177d800",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__2234de6d08",
+      "repo": "orange3",
+      "reason": "unresolved_startup_fixup_failed",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__2234de6d",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__27c11e41c2",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__27c11e41",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__3516fc30c8",
+      "repo": "orange3",
+      "reason": "unresolved_startup_fixup_failed",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__3516fc30",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__395a391215",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__395a3912",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__3cb2f09324",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__3cb2f093",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__406db69bf0",
+      "repo": "orange3",
+      "reason": "unresolved_class_level_no_attribute_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__406db69b",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__41e015e4bc",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__41e015e4",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__4467fb9e92",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__4467fb9e",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__5dc49d1909",
+      "repo": "orange3",
+      "reason": "unresolved_startup_fixup_failed",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__5dc49d19",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__6e8d153bf7",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__6e8d153b",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__8226727eec",
+      "repo": "orange3",
+      "reason": "unresolved_startup_fixup_failed",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__8226727e",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__8d9988d7ce",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__8d9988d7",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__8fbfa2c6ef",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__8fbfa2c6",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__91ad02f1ee",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__91ad02f1",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__945e235a69",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__945e235a",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__9b5494e26f",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_exit_one",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__9b5494e2",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__a2c7ac741f",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__a2c7ac74",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__b5c62e0ffd",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__b5c62e0f",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__b817423a70",
+      "repo": "orange3",
+      "reason": "unresolved_startup_fixup_failed",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__b817423a",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__c5fa7b7c74",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__c5fa7b7c",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__c86388cdfa",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__c86388cd",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__d2366dc6fd",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__d2366dc6",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__d61803f718",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__d61803f7",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__ecc15e9638",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__ecc15e96",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__f813020a9c",
+      "repo": "orange3",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__f813020a",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "orange3__f961edaeed",
+      "repo": "orange3",
+      "reason": "unresolved_startup_fixup_failed",
+      "source": "report_2026-06-05",
+      "report_id": "orange3__f961edae",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "pandas__0bad85d866",
+      "repo": "pandas",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "pandas__0bad85d8",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "pandas__1fc9d7e3b3",
+      "repo": "pandas",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "pandas__1fc9d7e3",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "pandas__3e4a2179db",
+      "repo": "pandas",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "pandas__3e4a2179",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "pandas__76f0dad185",
+      "repo": "pandas",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "pandas__76f0dad1",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "pandas__d2f376bc99",
+      "repo": "pandas",
+      "reason": "unresolved_test_setup_failure",
+      "source": "report_2026-06-05",
+      "report_id": "pandas__d2f376bc",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "pillow__3fdaecb025",
+      "repo": "pillow",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "pillow__3fdaecb0",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "pillow__4e31fb745f",
+      "repo": "pillow",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "pillow__4e31fb74",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "pillow__5dc418b8de",
+      "repo": "pillow",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "pillow__5dc418b8",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "pillow__7c0554c74e",
+      "repo": "pillow",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "pillow__7c0554c7",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "pillow__8ada23ed04",
+      "repo": "pillow",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "pillow__8ada23ed",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "pillow__92f5133469",
+      "repo": "pillow",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "pillow__92f51334",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "pillow__d0394d44c2",
+      "repo": "pillow",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "pillow__d0394d44",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "pyramid__11cbc8fed5",
+      "repo": "pyramid",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "pyramid__11cbc8fe",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "pyramid__24c63558d0",
+      "repo": "pyramid",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "pyramid__24c63558",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "pyramid__e1d1af88e3",
+      "repo": "pyramid",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "pyramid__e1d1af88",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "tornado__7da0d5bc19",
+      "repo": "tornado",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "tornado__7da0d5bc",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "tornado__80df78ac77",
+      "repo": "tornado",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "tornado__80df78ac",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "tornado__8b0f5d6c98",
+      "repo": "tornado",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "tornado__8b0f5d6c",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "tornado__a02d4f67b9",
+      "repo": "tornado",
+      "reason": "unresolved_test_setup_failure",
+      "source": "report_2026-06-05",
+      "report_id": "tornado__a02d4f67",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "tornado__bb00b7edc8",
+      "repo": "tornado",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "tornado__bb00b7ed",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "tornado__ccc89025f2",
+      "repo": "tornado",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "tornado__ccc89025",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "tornado__f2b3d8eb9f",
+      "repo": "tornado",
+      "reason": "unresolved_test_setup_failure",
+      "source": "report_2026-06-05",
+      "report_id": "tornado__f2b3d8eb",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    },
+    {
+      "id": "tornado__f57fd525f9",
+      "repo": "tornado",
+      "reason": "unresolved_no_trace_no_pre_entry_evidence",
+      "source": "report_2026-06-05",
+      "report_id": "tornado__f57fd525",
+      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
+      "skip_training": true,
+      "skip_bonus": true
+    }
+  ]
+}
