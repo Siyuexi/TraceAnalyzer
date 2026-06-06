@@ -1,4 +1,15 @@
-"""Image routing for ARL-backed R2E/Uni-Agent runs."""
+"""Image routing for ARL-backed R2E/Uni-Agent runs.
+
+R2E instances boot the **pair-diag mirror** of the original R2E ``namanjain12``
+images: ``pair-diag-cn-guangzhou.cr.volces.com/code/{repo}_final:{commit}``. This
+is the reference the old bonus-map report reproduces on, and the build wrapper
+(``scripts/build_data.py r2e``) writes the full pair-diag ref into each row's
+``deployment.image`` — so this module normally just passes that through (or
+mirrors a raw ``namanjain12`` ref). The 2026-06-05 all-enterprise switch was
+reverted: enterprise-public is a separate rebuild with divergent Python for
+orange3/coveragepy/numpy. ``P2A_ARL_IMAGE_OVERRIDES_JSON`` pins an exact image
+per instance.
+"""
 
 from __future__ import annotations
 
@@ -8,8 +19,6 @@ from typing import Any
 
 DEFAULT_MIRROR_REGISTRY = "pair-diag-cn-guangzhou.cr.volces.com"
 DEFAULT_MIRROR_NAMESPACE = "code"
-R2E_ENTERPRISE_TEMPLATE = "enterprise-public-cn-beijing.cr.volces.com/r2e-gym-subset/{instance_number}:latest"
-DEFAULT_ENTERPRISE_REPOS = frozenset({"coveragepy", "orange3"})
 
 
 def repo_from_instance_id(instance_id: str) -> str | None:
@@ -26,30 +35,17 @@ def suffix_from_instance_id(instance_id: str) -> str | None:
     return suffix or None
 
 
-def enterprise_r2e_image(instance_id: str) -> str | None:
-    suffix = suffix_from_instance_id(instance_id)
-    if not suffix:
-        return None
-    return R2E_ENTERPRISE_TEMPLATE.format(instance_number=suffix)
+def mirror_image(docker_image: str) -> str:
+    """Map an R2E ``namanjain12/{repo}_final:{commit}`` ref to its pair-diag mirror.
 
-
-def mirror_image(
-    docker_image: str,
-    *,
-    registry: str | None = None,
-    namespace: str | None = None,
-) -> str:
-    registry = registry or os.getenv("ARL_MIRROR_REGISTRY", DEFAULT_MIRROR_REGISTRY)
-    namespace = namespace or os.getenv("ARL_MIRROR_NAMESPACE", DEFAULT_MIRROR_NAMESPACE)
+    A ref already on the mirror registry is passed through unchanged.
+    """
+    registry = os.getenv("ARL_MIRROR_REGISTRY", DEFAULT_MIRROR_REGISTRY)
+    namespace = os.getenv("ARL_MIRROR_NAMESPACE", DEFAULT_MIRROR_NAMESPACE)
+    if docker_image.startswith(registry):
+        return docker_image
     image_path = docker_image.split("/", 1)[1] if "/" in docker_image else docker_image
     return f"{registry.rstrip('/')}/{namespace.strip('/')}/{image_path}"
-
-
-def _env_enterprise_repos() -> set[str]:
-    raw = os.getenv("P2A_ARL_ENTERPRISE_REPOS")
-    if raw is None:
-        return set(DEFAULT_ENTERPRISE_REPOS)
-    return {part.strip().lower() for part in raw.split(",") if part.strip()}
 
 
 def _env_image_overrides() -> dict[str, str]:
@@ -69,42 +65,30 @@ def select_r2e_image(
     *,
     instance_id: str,
     docker_image: str | None = None,
-    repo_name: str | None = None,
-    prefer_enterprise_repos: set[str] | None = None,
-    use_mirror: bool | None = None,
 ) -> str:
-    """Select the ARL image for an R2E instance.
+    """Select the ARL image for an R2E instance — the pair-diag mirror.
 
-    Correctness overrides are explicit and repo-scoped. By default only the
-    repos already verified as bad in the plan (coveragepy/orange3) route to the
-    enterprise image; other ``namanjain12`` images route through the ARL mirror.
-    A later full-corpus audit can extend ``P2A_ARL_ENTERPRISE_REPOS`` or provide
-    exact ``P2A_ARL_IMAGE_OVERRIDES_JSON`` entries.
+    Resolution order:
+      1. exact per-instance override (``P2A_ARL_IMAGE_OVERRIDES_JSON``);
+      2. the ``docker_image`` carried by the row, mapped to its pair-diag mirror
+         (a pair-diag ref passes through; a ``namanjain12`` ref is mirrored).
+    The build wrapper always writes the pair-diag ref into the row, so (2) is the
+    normal path; the full commit tag cannot be reconstructed from instance_id
+    alone, so a missing ``docker_image`` is an error rather than a silent guess.
     """
 
     overrides = _env_image_overrides()
     if instance_id in overrides:
         return overrides[instance_id]
 
-    repo = (repo_name or repo_from_instance_id(instance_id) or "").lower()
-    if repo and repo in (prefer_enterprise_repos or _env_enterprise_repos()):
-        enterprise = enterprise_r2e_image(instance_id)
-        if enterprise:
-            return enterprise
-
-    if docker_image and docker_image.startswith("enterprise-public"):
-        return docker_image
-
     if docker_image:
-        mirror_enabled = use_mirror
-        if mirror_enabled is None:
-            mirror_enabled = os.getenv("P2A_ARL_DISABLE_MIRROR", "").lower() not in {"1", "true", "yes"}
-        return mirror_image(docker_image) if mirror_enabled else docker_image
+        return mirror_image(docker_image)
 
-    enterprise = enterprise_r2e_image(instance_id)
-    if enterprise:
-        return enterprise
-    raise ValueError(f"Cannot select ARL image for {instance_id!r}: missing docker_image and bad instance id")
+    raise ValueError(
+        f"Cannot select ARL image for {instance_id!r}: no docker_image. The parquet "
+        f"must carry the pair-diag image (scripts/build_data.py r2e) or set "
+        f"P2A_ARL_IMAGE_OVERRIDES_JSON."
+    )
 
 
 def select_image_for_sample(sample_or_task: dict[str, Any], *, instance_id: str | None = None) -> str:
@@ -137,5 +121,4 @@ def select_image_for_sample(sample_or_task: dict[str, Any], *, instance_id: str 
         raise ValueError("Cannot select image: sample has no instance_id")
 
     docker_image = deployment.get("image") or env.get("image") or sample_or_task.get("docker_image")
-    repo_name = sample_or_task.get("repo_name") or metadata.get("repo")
-    return select_r2e_image(instance_id=str(iid), docker_image=docker_image, repo_name=repo_name)
+    return select_r2e_image(instance_id=str(iid), docker_image=docker_image)

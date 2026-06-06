@@ -16,10 +16,6 @@ from env.images import select_r2e_image
 
 ARL_IMAGE_ENV_KEYS = (
     "P2A_ARL_IMAGE_OVERRIDES_JSON",
-    "P2A_ARL_ENTERPRISE_REPOS",
-    "P2A_ARL_DISABLE_MIRROR",
-    "ARL_MIRROR_REGISTRY",
-    "ARL_MIRROR_NAMESPACE",
 )
 
 
@@ -145,37 +141,32 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertEqual(agent_env.env_config.env_variables, {"PIP_CACHE_DIR": "~/.cache/pip"})
         self.assertEqual(agent_env.env_config.post_setup_cmd, "git checkout abc123")
 
-    def test_image_override_and_enterprise_routing_are_explicit(self) -> None:
+    def test_image_override_and_pair_diag_routing_are_explicit(self) -> None:
+        # 1. exact per-instance override wins.
         with patched_env(
             {"P2A_ARL_IMAGE_OVERRIDES_JSON": '{"demo__abc123": "registry.local/custom:tag"}'},
-            remove=tuple(key for key in ARL_IMAGE_ENV_KEYS if key != "P2A_ARL_IMAGE_OVERRIDES_JSON"),
         ):
             self.assertEqual(
                 select_r2e_image(instance_id="demo__abc123", docker_image="namanjain12/demo_final"),
                 "registry.local/custom:tag",
             )
 
+        # 2. a raw namanjain12 R2E ref maps to its pair-diag mirror.
         with patched_env(remove=ARL_IMAGE_ENV_KEYS):
             self.assertEqual(
                 select_r2e_image(
                     instance_id="orange3__abcdef1234",
-                    docker_image="namanjain12/orange3_final",
-                    repo_name="orange3",
+                    docker_image="namanjain12/orange3_final:abcdef1234",
                 ),
-                "enterprise-public-cn-beijing.cr.volces.com/r2e-gym-subset/abcdef1234:latest",
+                "pair-diag-cn-guangzhou.cr.volces.com/code/orange3_final:abcdef1234",
             )
 
-        with patched_env(
-            {"ARL_MIRROR_REGISTRY": "mirror.local", "ARL_MIRROR_NAMESPACE": "r2e"},
-            remove=tuple(key for key in ARL_IMAGE_ENV_KEYS if key not in {"ARL_MIRROR_REGISTRY", "ARL_MIRROR_NAMESPACE"}),
-        ):
+        # 3. an image already on the pair-diag mirror passes through untouched.
+        with patched_env(remove=ARL_IMAGE_ENV_KEYS):
+            ref = "pair-diag-cn-guangzhou.cr.volces.com/code/django_final:abcdef1234"
             self.assertEqual(
-                select_r2e_image(
-                    instance_id="django__abcdef1234",
-                    docker_image="namanjain12/django_final",
-                    repo_name="django",
-                ),
-                "mirror.local/r2e/django_final",
+                select_r2e_image(instance_id="django__abcdef1234", docker_image=ref),
+                ref,
             )
 
     def test_p2a_precompute_arl_config_mapping_uses_overrides(self) -> None:
