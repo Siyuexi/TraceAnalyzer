@@ -143,7 +143,17 @@ class ArlDeployment(AbstractDeployment):
 
         self._hooks.on_custom_step("Attaching ARL runtime adapter")
         self._runtime = ArlRuntime(self._session, run_id=self.run_id, logger=self.logger)
-        await self._runtime.create_session(CreateBashSessionRequest())
+        # Best-effort: eagerly open the interactive PTY shell so the agent rollout path has
+        # it ready, but DON'T let a transient WS ``connect`` (HTTP 404 against a freshly
+        # provisioned pod) abort the whole deployment. The bonus-map precompute drives the
+        # sandbox purely through the one-shot ``execute`` path (no shell), and ``run_in_session``
+        # reopens the shell lazily on first use, so a startup-open failure stays recoverable.
+        try:
+            await self._runtime.create_session(CreateBashSessionRequest())
+        except Exception as exc:  # noqa: BLE001 - shell is reopened lazily by run_in_session
+            self.logger.warning(
+                f"Eager ARL shell open failed ({exc!r}); will open lazily on first interactive use"
+            )
         await self._runtime.is_alive(timeout=self._config.startup_timeout)
 
     async def stop(self) -> None:

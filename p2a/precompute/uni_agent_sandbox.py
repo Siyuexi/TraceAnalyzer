@@ -39,6 +39,14 @@ mv /r2e_tests /root/r2e_tests
 ln -s /root/r2e_tests /testbed/r2e_tests
 """.strip()
 
+# R2E-Gym containers run a plain venv (no conda); its DockerRuntime passes
+# environment={"PATH": DOCKER_PATH} with the venv bin first. A one-shot ``execute`` is a
+# FRESH shell each call, so — unlike the old persistent interactive shell — it does NOT
+# inherit post_setup_cmd's PATH export; we must re-inject this every call or the sandbox's
+# ``python``/pytest is not found (exit 127 → empty trace). Value copied from the pre-migration
+# tracer (rllm swe.py DOCKER_PATH).
+_R2E_DOCKER_PATH = "/root/.venv/bin:/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 R2E_VEFAAS_IMAGE_TEMPLATE = "enterprise-public-cn-beijing.cr.volces.com/r2e-gym-subset/{instance_number}:latest"
 VEFAAS_SWEREX_COMMAND = (
     "curl -fsSL https://vefaas-swe.tos-cn-beijing.ivolces.com/swe-rex/install_1.4.0.sh | bash -s -- {token}"
@@ -269,11 +277,35 @@ class UniAgentSandboxAdapter:
         self.agent_env.close()
 
     def _execute_raw(self, command: str, timeout: int | float | None = None) -> tuple[str, str, int]:
-        from swerex.runtime.abstract import BashAction
+        # One-shot ``execute`` (stateless ManagedSession.execute over HTTP, retry-wrapped
+        # in ArlRuntime._session_execute), NOT the interactive WebSocket PTY shell.
+        # Tracing commands are self-contained (each does its own ``cd``) and all cross-step
+        # state lives on the sandbox filesystem, so a persistent shell buys nothing here —
+        # while ``run_in_session`` opens an InteractiveShellClient whose ``connect`` returns
+        # HTTP 404 for whole repos (the orange3 regression). This mirrors the pre-migration
+        # tracer, which ran every command through ``ManagedSession.execute`` (0 WS404), and
+        # returns stdout/stderr as separate streams the way ``_run`` callers expect.
+        from swerex.runtime.abstract import Command
 
-        action = BashAction(command=command, timeout=timeout or self.default_timeout, check="silent")
-        result = _run_coro(self.agent_env.deployment.runtime.run_in_session(action))
-        return result.output or "", "", int(getattr(result, "exit_code", 0))
+        # Inject the sandbox env every call (one-shot execute = fresh shell, no persistent state),
+        # mirroring the pre-migration tracer: R2E-Gym → PATH with the venv first + cwd=/testbed;
+        # SWE-bench → conda activate testbed. Without this the venv python is unresolved (exit 127).
+        if self.swebench_verified:
+            run_command = f"source /opt/miniconda3/bin/activate && conda activate testbed && {command}"
+            env = None
+        else:
+            run_command = command
+            env = {"PATH": _R2E_DOCKER_PATH}
+        cmd = Command(
+            command=run_command,
+            shell=True,
+            check=False,
+            timeout=float(timeout or self.default_timeout),
+            cwd=self.repo_path,
+            env=env,
+        )
+        result = _run_coro(self.agent_env.deployment.runtime.execute(cmd))
+        return result.stdout or "", result.stderr or "", int(getattr(result, "exit_code", 0))
 
     def _run(self, command: str, timeout: int | float | None = None) -> tuple[str, str]:
         stdout, stderr, _ = self._execute_raw(command, timeout=timeout)
