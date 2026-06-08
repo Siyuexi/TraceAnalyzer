@@ -39,6 +39,7 @@ src/
     main.py                   # training entry; P2AFullyAsyncTrainer (vanilla if P2A_BONUS_MAP_DIR unset)
     test_setup.py             # startup_fixup_command(repo) — loads config/startup_fixups.json
     trace.py                  # instrumentation + call-graph build (bonus-map precompute)
+    eval_fault_localization.py # offline eval rollout read->fault-localization metrics
     precompute/precompute_bonus_maps.py  # build bonus maps on the ARL backend
     skip_cases.py             # load_skip_ids() from config/bad_instances.json
   env/                        # ARL deployment + runtime (implements swe-rex AbstractRuntime; no swe-rex server)
@@ -68,7 +69,19 @@ PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl ARL_GATEWAY_URL=$ARL \
 PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py swebench-hard --out $DATA/swe_bench_verified_hard.parquet
 
-# 4. Train.  Baseline (no P2A): leave P2A_BONUS_MAP_DIR unset.  P2A: set it.
+# 4. Optional diagnostics: build eval-set bonus maps for fault-localization metrics.
+#    These maps are NOT used for training.  They only score eval rollouts.
+TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
+  P2A_EVAL_BONUS_MAP_DIR=$DATA/eval_bonus_maps bash scripts/precompute_eval_bonus_maps.sh
+
+# After a validation rollout dump exists, score whether the model read files on/near
+# the eval fault-propagation graph.
+uv run python -m p2a.eval_fault_localization $ROLLOUT_JSONL \
+  --bonus-map-dir $DATA/eval_bonus_maps \
+  --summary-out $DATA/eval_faultloc_summary.json \
+  --details-out $DATA/eval_faultloc_details.jsonl
+
+# 5. Train.  Baseline (no P2A): leave P2A_BONUS_MAP_DIR unset.  P2A: set it.
 TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
   MODEL_PATH=$MODEL P2A_BONUS_MAP_DIR=$BONUS P2A_M_MAX=3.0 bash scripts/train_p2a.sh
 ```
@@ -83,11 +96,34 @@ These are knobs you set; the repo does not pin them:
 | Train / val data | `TRAIN_FILE` / `TEST_FILE` env vars (point at the parquets built above) |
 | GPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (e.g. 4×8 H20 → `NNODES=4`, `NGPUS_PER_NODE=8`) |
 | P2A on/off + strength | `P2A_BONUS_MAP_DIR` (unset = baseline), `P2A_M_MAX` |
+| Eval fault-localization diagnostics | `P2A_EVAL_BONUS_MAP_DIR`, `P2A_EVAL_BONUS_N_PARALLEL`, `P2A_EVAL_BONUS_LIMIT`, `P2A_EVAL_BONUS_OFFSET` |
 | ARL gateway | `ARL_GATEWAY_URL` |
 | Hard-subset criterion | `--difficulties` flag of `build_data.py swebench-hard` (default = old rLLM set) |
 
 Hydra training overrides live in `scripts/train_p2a.sh`; if you move any to a json/yaml
 config, put it under `config/`.
+
+## Eval Fault-Localization Metrics
+
+`scripts/precompute_eval_bonus_maps.sh` reuses the same dynamic precompute path as
+training bonus maps, but points it at `TEST_FILE` / `EVAL_FILE`.  The resulting
+eval maps should stay out of `P2A_BONUS_MAP_DIR`; they are only a diagnostic
+reference for validation rollouts.
+
+`p2a.eval_fault_localization` accepts rollout dumps in `.jsonl`, `.json`, or
+`.parquet` format.  It first reads `p2a_step_traces`, then structured
+`tool_calls`, then response text / assistant messages, and reports:
+
+| Metric | Meaning |
+|---|---|
+| `bonus_map_coverage` | Fraction of rollout rows with a matching eval bonus map. |
+| `call_graph_coverage` | Fraction with a bonus map that contains call-graph nodes. |
+| `read_rate` | Fraction of rows where file-viewing actions were recovered. |
+| `graph_hit_rate_over_call_graphs` | Fraction whose reads hit any node in the eval call graph. |
+| `ground_truth_hit_rate_over_call_graphs` | Fraction whose reads hit a patched callable (`distance == 0`). |
+| `near_hit_rate_over_call_graphs` | Fraction whose best read distance is `<= --near-threshold` (default `0.5`). |
+| `avg_min_distance_on_hits` | Lower is better; `0` means the model read the edited callable. |
+| `avg_best_positive_multiplier_on_hits` | The diagnostic P2A multiplier implied by the best read distance. |
 
 ## ⚠️ TODO — verify before trusting P2A training
 
