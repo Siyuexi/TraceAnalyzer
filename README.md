@@ -10,6 +10,17 @@ Everything is **self-contained**: data comes from HuggingFace, images from the
 pair-diag mirror of the original R2E images. There is **no dependency on the old
 `src-backup` fork**.
 
+Default HuggingFace assets are shared across sibling projects:
+
+| Asset | Default location from `src/` | Override |
+|---|---|---|
+| Models | `../../models/<repo-name>` | `MODEL_PATH` / `P2A_MODELS_DIR` / `P2A_MODEL_REPO` |
+| Datasets | `../../datasets/<repo-name>/<split>` | `P2A_DATASETS_DIR` |
+
+If a dataset/model is already present there, scripts read it directly. If it is
+missing, the script downloads it from HuggingFace and saves it under that shared
+location.
+
 ## Directory map
 
 ```
@@ -68,7 +79,7 @@ These are knobs you set; the repo does not pin them:
 
 | What | Where |
 |---|---|
-| Model | `MODEL_PATH` env var (e.g. a local `qwen3-coder-30b-a3b-instruct` checkout) in `scripts/train_p2a.sh` |
+| Model | `MODEL_PATH` env var; default is `../../models/Qwen3-Coder-30B-A3B-Instruct` from `Qwen/Qwen3-Coder-30B-A3B-Instruct` |
 | Train / val data | `TRAIN_FILE` / `TEST_FILE` env vars (point at the parquets built above) |
 | GPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (e.g. 4×8 H20 → `NNODES=4`, `NGPUS_PER_NODE=8`) |
 | P2A on/off + strength | `P2A_BONUS_MAP_DIR` (unset = baseline), `P2A_M_MAX` |
