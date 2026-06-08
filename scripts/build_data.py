@@ -2,7 +2,8 @@
 
 Every "build data" job lives here as a subcommand:
   r2e            HF -> R2E training parquet (full + skip-filtered .train.parquet)
-  swebench-hard  HF -> SWE-bench-Verified HARD subset (validation)
+  swebench-verified HF -> SWE-bench-Verified full eval set
+  swebench-hard     HF -> SWE-bench-Verified HARD subset (validation)
   skip-list      regenerate config/bad_instances.json from gate results (maintenance)
 
 Each sources from HuggingFace and reuses Uni-Agent's schema/prompt constants by
@@ -11,7 +12,8 @@ import (never copied). No dependency on the retired src-backup fork.
 Usage (from src/, HF reachable):
   PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
     uv run python scripts/build_data.py r2e          --out <path>/r2e_gym_subset_p2a.parquet
-    uv run python scripts/build_data.py swebench-hard --out <path>/swe_bench_verified_hard.parquet
+    uv run python scripts/build_data.py swebench-verified --out <path>/swe_bench_verified.parquet
+    uv run python scripts/build_data.py swebench-hard     --out <path>/swe_bench_verified_hard.parquet
     uv run python scripts/build_data.py skip-list     --gate <gate.jsonl> [--gate ...]
 """
 
@@ -26,12 +28,8 @@ from pathlib import Path
 
 import pandas as pd
 
-# r2e_gym_subset_filtered.py runs `os.getenv("DEPLOYMENT", "vefaas")` at IMPORT time and
-# rejects unknown values; we import only its prompt / post-setup CONSTANTS, never its vefaas
-# runtime — so this default merely lets that import succeed. It does NOT couple the pipeline
-# to vefaas: the compute backend is ARL (env/agent_config_arl.yaml) and ALL images (r2e and
-# swebench) are built self-contained as pair-diag refs (see MIRROR below). No vefaas API is
-# called at build time. So `DEPLOYMENT` is no longer in the run command.
+# data_preprocess example modules require a known DEPLOYMENT value at import; we use only
+# their prompt constants. Images are pair-diag refs built below, independent of this value.
 os.environ.setdefault("DEPLOYMENT", "vefaas")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/ on path
@@ -107,29 +105,27 @@ def cmd_r2e(args) -> int:
     return 0
 
 
-# ── swebench-hard ─────────────────────────────────────────────────────────────
-def cmd_swebench_hard(args) -> int:
+# ── swebench-verified / swebench-hard ─────────────────────────────────────────
+def cmd_swebench(args) -> int:
     from p2a.hf_assets import load_shared_dataset
-    # NOT `from swe_bench_verified import ...`: that module's vefaas branch imports
-    # uni_agent.deployment.vefaas.deployment, which uses typing.Self and so fails to import on
-    # Python < 3.11 (the GPU box runs 3.10). We don't use vefaas — ARL boots the pair-diag
-    # mirror of the R2E-Gym SWE-bench-Verified images (slimshetty/swebench-verified, namespace-
-    # rewritten to the pair-diag `code/` mirror), built self-contained below. The generic
-    # SWE-agent prompts are byte-identical across the two example modules, so we reuse them
-    # from the import-safe r2e_gym_subset_filtered.
-    from r2e_gym_subset_filtered import SYSTEM_PROMPT, USER_PROMPT
-
-    hard = set(args.difficulties)
+    # swe_bench_verified's modal branch is import-safe on Python <3.11; we use only its prompts.
+    os.environ["DEPLOYMENT"] = "modal"
+    from swe_bench_verified import SYSTEM_PROMPT, USER_PROMPT
 
     def reset(base: str) -> str:
         return " && ".join(["cd /testbed", "git restore .", "git reset --hard",
                             f"git checkout {base}", "git clean -fdq"])
 
-    print(f"Loading princeton-nlp/SWE-bench_Verified (difficulty in {sorted(hard)}) ...", flush=True)
+    want = set(args.difficulties) if args.difficulties is not None else None
+    # R2E-Gym/SWE-Bench-Verified carries the eval fields but no difficulty; take it from princeton.
+    difficulty = {ex["instance_id"]: ex.get("difficulty")
+                  for ex in load_shared_dataset("princeton-nlp/SWE-bench_Verified", split="test")}
+
     rows, total = [], 0
-    for ex in load_shared_dataset("princeton-nlp/SWE-bench_Verified", split="test"):
+    for ex in load_shared_dataset("R2E-Gym/SWE-Bench-Verified", split="test"):
         total += 1
-        if ex.get("difficulty") not in hard:
+        iid, d = ex["instance_id"], difficulty.get(ex["instance_id"])
+        if want is not None and d not in want:
             continue
         rows.append({
             "prompt": [
@@ -138,13 +134,13 @@ def cmd_swebench_hard(args) -> int:
             ],
             "agent_name": "swe_agent",
             "extra_info": {"tools_kwargs": {
-                "env": {"deployment": {"image": f"{MIRROR}/swebench-verified:sweb.eval.x86_64.{ex['instance_id']}"},
+                "env": {"deployment": {"image": f"{MIRROR}/swebench-verified:sweb.eval.x86_64.{iid}"},
                         "post_setup_cmd": reset(ex["base_commit"])},
-                "reward": {"name": "swe_bench", "metadata": ex},
+                "reward": {"name": "swe_bench", "metadata": {**ex, "difficulty": d}},
             }},
         })
     pd.DataFrame(rows).to_parquet(args.out, index=False)
-    print(f"hard subset: {len(rows)}/{total} -> {args.out}", flush=True)
+    print(f"swebench {'full' if want is None else sorted(want)}: {len(rows)}/{total} -> {args.out}", flush=True)
     return 0
 
 
@@ -206,10 +202,14 @@ def main() -> int:
     r.add_argument("--no-skip-filter", action="store_true")
     r.set_defaults(func=cmd_r2e)
 
-    s = sub.add_parser("swebench-hard", help="HF -> SWE-bench-Verified HARD subset")
-    s.add_argument("--out", required=True)
-    s.add_argument("--difficulties", nargs="*", default=sorted(HARD_DIFFICULTIES))
-    s.set_defaults(func=cmd_swebench_hard)
+    for name, default_diff, help_text in [
+        ("swebench-verified", None, "HF -> SWE-bench-Verified full eval set"),
+        ("swebench-hard", sorted(HARD_DIFFICULTIES), "HF -> SWE-bench-Verified HARD subset"),
+    ]:
+        sp = sub.add_parser(name, help=help_text)
+        sp.add_argument("--out", required=True)
+        sp.add_argument("--difficulties", nargs="*", default=default_diff)
+        sp.set_defaults(func=cmd_swebench)
 
     k = sub.add_parser("skip-list", help="regenerate config/bad_instances.json from gate results")
     k.add_argument("--gate", action="append", default=[], required=True)
