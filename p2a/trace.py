@@ -492,9 +492,16 @@ def generate_tracer_module(repo_path: str, alt_path: str = "") -> str:
         _seen = set()
         _REPO_PATH = "{repo_path}"
         _PATH_PREFIXES = {prefixes_tuple}
-        _TRACE_FILE = "/tmp/_swe_fault_traces.jsonl"
-        _MAX_EVENTS = int(os.environ.get("P2A_TRACE_MAX_EVENTS", "2000"))
-        _MAX_FRAMES = int(os.environ.get("P2A_TRACE_MAX_FRAMES", "80"))
+        _TRACE_FILE = "{TRACE_FILE_PATH}"
+        def _env_int(name, default):
+            try:
+                value = int(os.environ.get(name, str(default)))
+            except ValueError:
+                return default
+            return value if value >= 0 else default
+
+        _MAX_EVENTS = _env_int("P2A_TRACE_MAX_EVENTS", 2000)
+        _MAX_FRAMES = _env_int("P2A_TRACE_MAX_FRAMES", 80)
 
         def _is_test_file_path(path):
             normalized = path.replace("\\\\", "/")
@@ -1286,7 +1293,7 @@ def parse_fault_traces(
 # 6b. parse_fault_traces_from_file — JSONL-based (preferred)
 # ---------------------------------------------------------------------------
 
-TRACE_FILE_PATH = "/tmp/_swe_fault_traces.jsonl"
+TRACE_FILE_PATH = "/root/_p2a_swe_fault_traces.jsonl"
 
 
 def parse_fault_traces_from_file(

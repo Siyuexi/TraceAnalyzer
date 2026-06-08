@@ -166,8 +166,11 @@ def cmd_skip_list(args) -> int:
             if rec.get("gate_pass") is True:
                 gate_pass.add(iid)
             else:
-                gate_fail[iid] = {"id": iid, "repo": iid.split("__")[0],
-                                  "reason": _fail_reason(rec), "source": "uni_agent_gate"}
+                entry = {"id": iid, "repo": iid.split("__")[0],
+                         "reason": _fail_reason(rec), "source": args.source}
+                if args.evidence:
+                    entry["evidence"] = args.evidence
+                gate_fail[iid] = entry
     coverage = len(gate_pass) + len(gate_fail)
     may_drop = args.drop_passed_report_seed and coverage >= args.expected_total
     merged: dict[str, dict] = {}
@@ -208,6 +211,8 @@ def main() -> int:
     k.add_argument("--gate", action="append", default=[], required=True)
     k.add_argument("--drop-passed-report-seed", action="store_true")
     k.add_argument("--expected-total", type=int, default=4503)
+    k.add_argument("--source", default="uni_agent_gate")
+    k.add_argument("--evidence", default=None)
     k.set_defaults(func=cmd_skip_list)
 
     args = ap.parse_args()

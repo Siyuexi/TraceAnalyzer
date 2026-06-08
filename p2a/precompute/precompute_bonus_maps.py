@@ -23,7 +23,7 @@ Classification decision tree (evaluated top-to-bottom, first match wins):
       direct         – F2P→GT call chain, test calls GT directly (traceable=True)
 
 Usage:
-    python -m utils.p2a.precompute_bonus_maps \\
+    python -m p2a.precompute.precompute_bonus_maps \\
         data/swe/R2E_Gym_Subset.parquet \\
         --output_dir data/swe/bonus_maps --mode dynamic --n_parallel 50
 """
@@ -70,13 +70,28 @@ _FIXTURE_NAMES = frozenset(
 
 BONUS_MAP_SCHEMA_VERSION = 3
 TRACE_SIDECAR_FORMAT = "p2a_trace_sidecar_v1"
-TEST_STDOUT_PATH = "/tmp/_swe_test_stdout.txt"
-TEST_STDERR_PATH = "/tmp/_swe_test_stderr.txt"
-TEST_EXIT_PATH = "/tmp/_swe_test_exit.txt"
-TRACE_PARSE_PATH = "/tmp/_swe_fault_traces.parse.jsonl"
+TEST_STDOUT_PATH = "/root/_p2a_swe_test_stdout.txt"
+TEST_STDERR_PATH = "/root/_p2a_swe_test_stderr.txt"
+TEST_EXIT_PATH = "/root/_p2a_swe_test_exit.txt"
+TRACE_PARSE_PATH = "/root/_p2a_swe_fault_traces.parse.jsonl"
 
 
 _PRODUCER_METADATA: dict | None = None
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"[WARN] ignoring invalid {name}={raw!r}; using {default}", file=sys.stderr)
+        return default
+    if minimum is not None and value < minimum:
+        print(f"[WARN] ignoring {name}={value}; expected >= {minimum}, using {default}", file=sys.stderr)
+        return default
+    return value
 
 
 def _looks_like_bare_hash(value: str) -> bool:
@@ -174,7 +189,7 @@ def _producer_metadata() -> dict:
 
     _PRODUCER_METADATA = {
         "schema_version": BONUS_MAP_SCHEMA_VERSION,
-        "producer": "utils.p2a.precompute_bonus_maps",
+        "producer": "p2a.precompute.precompute_bonus_maps",
         "producer_commit": commit,
         "producer_branch": branch,
     }
@@ -349,6 +364,7 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 _PARAMETRIZE_SUFFIX_RE = re.compile(r"\[.*\]$")
 _TEST_FUNC_RE = re.compile(r"(?<![A-Za-z0-9_])(test[A-Za-z0-9_]*)(?=$|[^A-Za-z0-9_])")
 _PYTEST_STATUS_RE = re.compile(r"\b(PASSED|FAILED|ERROR)\b")
+_UNITTEST_FAILURE_HEADER_RE = re.compile(r"^(?:FAIL|ERROR):\s+([A-Za-z_][A-Za-z0-9_]*)\s+\(([^)]+)\)\s*$")
 
 
 def _strip_parametrize(name: str) -> str:
@@ -392,6 +408,33 @@ def _parse_pytest_status_lines(raw_output: str) -> dict[str, str]:
     return statuses
 
 
+def _looks_like_test_func(name: str) -> bool:
+    return bool(name and (name.startswith("test") or name in _FIXTURE_NAMES))
+
+
+def _swebench_unittest_failure_funcs_from_descriptions(raw_output: str, f2p_nodeids: list[str]) -> set[str]:
+    """Map SWE-bench unittest failure descriptions back to method names."""
+    selectors = [str(item or "").strip() for item in f2p_nodeids if str(item or "").strip()]
+    if not raw_output or not selectors:
+        return set()
+
+    lines = [_ANSI_ESCAPE_RE.sub("", line).strip() for line in raw_output.splitlines()]
+    funcs: set[str] = set()
+    for idx, line in enumerate(lines):
+        match = _UNITTEST_FAILURE_HEADER_RE.match(line)
+        if not match:
+            continue
+        method, qualname = match.groups()
+        header_display = f"{method} ({qualname})"
+        context = "\n".join(lines[idx : min(idx + 5, len(lines))])
+        for selector in selectors:
+            bare = _normalize_test_func_name(selector)
+            if selector == header_display or bare == method or selector in context:
+                funcs.add(method)
+                break
+    return funcs
+
+
 def _get_f2p_test_funcs(task: dict, raw_output: str, swebench_verified: bool) -> set[str] | None:
     """Identify fail-to-pass (F2P) test function names.
 
@@ -421,7 +464,10 @@ def _get_f2p_test_funcs(task: dict, raw_output: str, swebench_verified: bool) ->
                 return None
             funcs = set()
             for t in f2p_list:
-                funcs.add(_normalize_test_func_name(str(t)))
+                bare = _normalize_test_func_name(str(t))
+                if _looks_like_test_func(bare):
+                    funcs.add(bare)
+            funcs.update(_swebench_unittest_failure_funcs_from_descriptions(raw_output, f2p_list))
             return funcs  # may be empty
         return None
     else:
@@ -604,11 +650,29 @@ def _swebench_output_has_f2p_failure(raw_output: str, f2p_nodeids: list[str]) ->
     for nodeid in f2p_nodeids:
         bare = _normalize_test_func_name(nodeid)
         for line in lines:
-            if nodeid in line and re.search(r"\b(FAILED|ERROR|FAIL)\b", line):
-                return True
-            if bare and bare in line and re.search(r"\b(FAILED|ERROR|FAIL)\b", line):
+            if _swebench_line_matches_f2p_selector(line, nodeid, bare) and re.search(r"\b(FAILED|ERROR|FAIL)\b", line):
                 return True
     return False
+
+
+def _swebench_line_matches_f2p_selector(line: str, nodeid: str, bare: str) -> bool:
+    selector = str(nodeid or "").strip()
+    bare = str(bare or "").strip()
+    if not selector and not bare:
+        return False
+
+    # Full selectors and unittest display names should match exactly. Bare
+    # names need token boundaries so ``test_foo`` does not match
+    # ``test_foo_bar`` in pytest summaries.
+    if selector and selector != bare:
+        start = line.find(selector)
+        if start >= 0:
+            end = start + len(selector)
+            if end == len(line) or line[end] not in "_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789":
+                return True
+    if bare:
+        return re.search(rf"(?<![A-Za-z0-9_]){re.escape(bare)}(?:\[[^\]]+\])?(?![A-Za-z0-9_])", line) is not None
+    return selector in line
 
 
 _SIGNATURE_ENTRY_FAILURE_RE = re.compile(
@@ -1055,8 +1119,8 @@ def compute_dynamic_bonus_map(
         # Repo fixups already ran after buggy checkout (see startup_fixup_command);
         # no separate normalization shim needed here.
         timeout_env = "P2A_SWEBENCH_TEST_TIMEOUT" if env.swebench_verified else "P2A_TEST_TIMEOUT"
-        default_timeout = "900" if env.swebench_verified else "300"
-        test_timeout = int(os.getenv(timeout_env, default_timeout))
+        default_timeout = 900
+        test_timeout = _env_int(timeout_env, default_timeout, minimum=1)
         _debug_progress(instance_id, f"run_tests timeout={test_timeout}")
         stdout, stderr, test_exit, capture_diag = _run_tests_with_file_capture(env, test_script, timeout=test_timeout)
         _debug_progress(instance_id, f"run_tests_done exit={test_exit}")
@@ -1072,7 +1136,7 @@ def compute_dynamic_bonus_map(
         # ── Decision node: NO_TRACE ──────────────────────────────────
         # Parse the raw tracer output once.  raw_traces_all is for diagnostics;
         # raw_traces keeps the historical meaning: traces that entered GT.
-        trace_parse_line_cap = int(os.getenv("P2A_TRACE_PARSE_MAX_LINES", "500"))
+        trace_parse_line_cap = _env_int("P2A_TRACE_PARSE_MAX_LINES", 500, minimum=1)
         env._execute_raw(
             f"rm -f {TRACE_PARSE_PATH}; "
             f"if [ -s {TRACE_FILE_PATH} ]; then head -n {trace_parse_line_cap} {TRACE_FILE_PATH} > {TRACE_PARSE_PATH}; fi",
@@ -1114,10 +1178,14 @@ def compute_dynamic_bonus_map(
         common_diag["swebench_targeted_f2p"] = bool(re.search(r"targeted_(pytest|django|sympy)=[1-9]", patch_stdout))
         common_diag["swebench_verified"] = env.swebench_verified
         common_diag["test_timeout"] = test_timeout
-        common_diag["trace_event_cap"] = int(os.getenv("P2A_TRACE_MAX_EVENTS", "2000"))
-        common_diag["trace_frame_cap"] = int(os.getenv("P2A_TRACE_MAX_FRAMES", "80"))
+        trace_event_cap = _env_int("P2A_TRACE_MAX_EVENTS", 2000, minimum=0)
+        trace_frame_cap = _env_int("P2A_TRACE_MAX_FRAMES", 80, minimum=0)
+        common_diag["trace_event_cap"] = trace_event_cap
+        common_diag["trace_frame_cap"] = trace_frame_cap
         common_diag["trace_parse_line_cap"] = trace_parse_line_cap
         common_diag["trace_file_line_count"] = trace_file_line_count
+        common_diag["trace_event_cap_reached"] = trace_event_cap > 0 and trace_file_line_count >= trace_event_cap
+        common_diag["trace_parse_line_cap_reached"] = trace_file_line_count > trace_parse_line_cap
         common_diag["test_output_capture_detail"] = capture_diag
         common_diag["parsed_trace_count"] = parsed_trace_count
         common_diag["swebench_f2p_failure_observed"] = swebench_f2p_failure_observed

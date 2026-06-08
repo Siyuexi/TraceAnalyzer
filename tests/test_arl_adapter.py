@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -411,6 +412,148 @@ class ArlAdapterTests(unittest.TestCase):
             instrumented.index("def modify_sys_path"),
         )
         self.assertIn('globals().get("_p2a_ft") or __import__("_swe_fault_tracer")', instrumented)
+
+    def test_swebench_f2p_failure_detection_uses_test_name_boundaries(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import _swebench_output_has_f2p_failure
+
+        self.assertFalse(
+            _swebench_output_has_f2p_failure(
+                "tests/test_demo.py::test_foo_bar FAILED",
+                ["tests/test_demo.py::test_foo"],
+            )
+        )
+        self.assertTrue(
+            _swebench_output_has_f2p_failure(
+                "tests/test_demo.py::test_foo FAILED",
+                ["tests/test_demo.py::test_foo"],
+            )
+        )
+        self.assertTrue(
+            _swebench_output_has_f2p_failure(
+                "FAIL: test_edit_only (model_formsets.tests.ModelFormsetTest)",
+                ["test_edit_only (model_formsets.tests.ModelFormsetTest)"],
+            )
+        )
+
+    def test_swebench_description_f2p_maps_to_unittest_method(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import _get_f2p_test_funcs
+
+        raw_output = "\n".join(
+            [
+                "ERROR: test_loading_namespace_package (migrations.test_loader.LoaderTests)",
+                "Migration directories without an __init__.py file are loaded.",
+                "Traceback (most recent call last):",
+                "FAILED (errors=1)",
+            ]
+        )
+        funcs = _get_f2p_test_funcs(
+            {"FAIL_TO_PASS": json.dumps(["Migration directories without an __init__.py file are loaded."])},
+            raw_output,
+            swebench_verified=True,
+        )
+
+        self.assertEqual(funcs, {"test_loading_namespace_package"})
+
+    def test_swebench_exit_override_classifies_signature_mismatch(self) -> None:
+        from p2a.precompute import precompute_bonus_maps as bonus_maps
+
+        modified = [
+            {
+                "name": "demo",
+                "qualified_name": "demo",
+                "file_path": "pkg/demo.py",
+                "start_line": 10,
+                "end_line": 12,
+            }
+        ]
+
+        class FakeEnv:
+            swebench_verified = True
+            repo_path = "/testbed"
+            alt_path = "/root"
+
+            def start(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def checkout_buggy_commit(self, task, *, instance_id):
+                return {"buggy_checkout_ref": "abc123^", "buggy_checkout_exit": 0}
+
+            def _run(self, command: str, timeout: int | float | None = None):
+                return "", ""
+
+            def _execute_raw(self, command: str, timeout: int | float | None = None):
+                if "wc -l" in command:
+                    return "0\n", "", 0
+                return "", "", 0
+
+            def write_file(self, path: str, content: str) -> None:
+                pass
+
+        task = {
+            "instance_id": "django__django-1",
+            "repo": "django/django",
+            "patch": "diff --git a/pkg/demo.py b/pkg/demo.py\n",
+            "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_foo"]),
+            "extra_info": {
+                "tools_kwargs": {
+                    "reward": {"name": "swe_bench", "metadata": {}},
+                }
+            },
+        }
+        raw_output = "\n".join(
+            [
+                "tests/test_demo.py::test_foo FAILED",
+                "TypeError: demo() got an unexpected keyword argument 'value'",
+            ]
+        )
+
+        with (
+            patch.object(bonus_maps, "find_modified_callables_from_task", return_value=modified),
+            patch.object(bonus_maps, "find_newly_created_callables", return_value=[]),
+            patch.object(
+                bonus_maps,
+                "_prepare_swebench_test_script",
+                return_value={"swebench_test_script_patch_stdout": "targeted_pytest=1\n"},
+            ),
+            patch.object(
+                bonus_maps,
+                "_run_tests_with_file_capture",
+                return_value=(
+                    raw_output,
+                    "",
+                    0,
+                    {
+                        "stdout_read_exit": 0,
+                        "stderr_read_exit": 0,
+                        "exit_read_exit": 0,
+                        "wrapper_exit": 0,
+                        "exit_parse_failed": False,
+                        "all_three_read_failed": False,
+                        "trusted_test_exit": True,
+                    },
+                ),
+            ),
+            patch.object(
+                bonus_maps,
+                "_detect_import_targets",
+                return_value=[{"module": "pkg.demo", "matches_repo_path": True}],
+            ),
+            patch(
+                "p2a.precompute.uni_agent_sandbox.create_uni_agent_sandbox",
+                return_value=FakeEnv(),
+            ),
+            patch("p2a.trace.instrument_sandbox", return_value=modified),
+            patch("p2a.trace.parse_fault_traces_from_file", return_value=[]),
+        ):
+            result = bonus_maps.compute_dynamic_bonus_map(task)
+
+        self.assertEqual(result["case_type"], "signature_mismatch")
+        self.assertEqual(result["reason_code"], "signature_mismatch_before_entry")
+        self.assertEqual(result["test_exit"], 1)
+        self.assertTrue(result["test_output_capture_detail"]["test_exit_overridden_from_output"])
 
 
 if __name__ == "__main__":

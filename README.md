@@ -26,6 +26,7 @@ location.
 ```
 src/
   config/                     # ALL json/yaml config lives here
+    audits/                    #   machine-readable audit artifacts for data/skip decisions
     startup_fixups.json       #   per-repo test-startup fixups (source patches + dep pins)
     bad_instances.json        #   R2E instances to exclude from training (skip-list)
   scripts/
@@ -62,8 +63,9 @@ PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
 #   source-of-truth note: rows come from R2E-Gym/R2E-Gym-Subset, not
 #   dyyyyyyyy/r2e-gym-subset-filtered.  The Uni-Agent filtered dataset dropped 75
 #   original cases; on our pair-diag ARL audit, 39/75 passed buggy-F2P/fixed-P2P
-#   and 36/75 were added to config/bad_instances.json.  Keep using our explicit
-#   skip registry instead of the coarse Uni-Agent filter.
+#   and 36/75 were added to config/bad_instances.json.  Among the 39 recovered
+#   training cases, 33 have dynamic bonus maps and 6 are valid-reward cases
+#   without dynamic P2A supervision.  See config/audits/r2e_removed75_pairdiag_audit_20260609.json.
 
 # 2. Precompute bonus maps on ARL (pair-diag images + faithful startup fixups)
 PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl ARL_GATEWAY_URL=$ARL \
@@ -135,20 +137,28 @@ reference for validation rollouts.
 | `avg_min_distance_on_hits` | Lower is better; `0` means the model read the edited callable. |
 | `avg_best_positive_multiplier_on_hits` | The diagnostic P2A multiplier implied by the best read distance. |
 
-Current SWE-bench Verified eval-map sanity check, after the targeted F2P and
-trace-capture fixes, is:
+Current SWE-bench Verified eval-map sanity check, after the targeted F2P,
+trace-capture, and unittest-description F2P fixes, is:
 
 | Split | Rows | Dynamic (`standard+direct`) | `standard` | `direct` | `newly_created` | `no_callable` | `no_f2p` | `static_fallback` | `signature_mismatch` | `all_pass` | `no_trace` |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| hard validation | 45 | 34 (75.6%) | 27 | 7 | 4 | 0 | 3 | 1 | 0 | 3 | 0 |
-| test rest | 455 | 373 (82.0%) | 247 | 126 | 35 | 18 | 10 | 2 | 7 | 10 | 0 |
-| full Verified | 500 | 407 (81.4%) | 274 | 133 | 39 | 18 | 13 | 3 | 7 | 13 | 0 |
+| hard validation | 45 | 37 (82.2%) | 30 | 7 | 4 | 0 | 0 | 1 | 0 | 3 | 0 |
+| test rest | 455 | 381 (83.7%) | 252 | 129 | 35 | 18 | 2 | 2 | 7 | 10 | 0 |
+| full Verified | 500 | 418 (83.6%) | 282 | 136 | 39 | 18 | 2 | 3 | 7 | 13 | 0 |
 
-The full run used
-`cache/eval_bonus_verified500_f2p_targeted_20260608_220312/bonus_maps/`.
-`no_trace=0` is the main build-quality gate; the non-dynamic buckets are
-explicit abstentions such as newly created callables, signature mismatches
-before entering the patched callable, or buggy versions whose F2P tests pass.
+The full run used `cache/eval_bonus_verified500_f2p_targeted_20260608_220312/bonus_maps/`;
+the 13 former `no_f2p` Django cases were rerun under
+`cache/swe_no_f2p_rerun_20260609/maps/`, recovering 11 dynamic maps.
+`no_trace=0` is the build-quality gate.  Non-dynamic buckets now mean:
+
+| Bucket | Count | Meaning |
+|---|---:|---|
+| `newly_created` | 39 | The patched callable is absent in the buggy tree, so a function-body tracer cannot observe it dynamically. |
+| `no_callable` | 18 | The patch has no callable-level Python change for the bonus-map extractor. |
+| `signature_mismatch` | 7 | The F2P test fails during Python argument binding before entering the patched callable body. |
+| `static_fallback` | 3 | Static callable extraction found candidates, but sandbox instrumentation produced no instrumented callable. |
+| `all_pass` | 13 | The targeted buggy-version F2P run passes, so there is no failing execution to score. |
+| `no_f2p` | 2 | F2P failures remain unaligned with traces after description-to-method recovery. |
 
 ## ⚠️ TODO — verify before trusting P2A training
 
