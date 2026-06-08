@@ -1,36 +1,81 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "p2a-arl"
 version = "0.1.0"
 description = "P2A on uni-agent with an ARL-native sandbox backend (env/) + bonus-map process supervision (p2a/)."
 requires-python = ">=3.10"
 
-# Light runtime deps only — enough to import/run the ARL sandbox backend
-# (env/: deployment + runtime + smoke) and the adapter tests WITHOUT a GPU.
-# Mirrors uni-agent's own install split: the framework (uni-agent + nested verl)
-# is added as `--no-deps -e` editable installs (see [tool.uv.sources] + DEV_SETUP.md),
-# and the heavy GPU/training stack (torch/vllm/megatron) is installed separately,
-# on GPU only. This keeps the local lock GPU-free.
+# ── core: ARL sandbox runtime + data build + bonus-map precompute ──────────────
+# Everything to run scripts/build_data.py and p2a/precompute on a CPU box.
+# Deliberately NO torch / ray / hydra: the data + tracing pipeline never imports them
+# (they appear only in p2a/main.py + p2a/trainer.py → the training framework = [train]).
+# These are plain PyPI deps PLUS the uni-agent submodule (declares no deps of its own).
 dependencies = [
-    "arl-env==0.3.1",        # the ARL SDK: SandboxSession + InteractiveShellClient
-    "swe-rex",               # AbstractRuntime interface that uni-agent's AgentEnv drives
-    "websockets",            # required by InteractiveShellClient (persistent WS shell)
+    # ARL sandbox backend (env/: a swe-rex AbstractRuntime backed by the arl-env SDK)
+    "arl-env==0.3.1",
+    "swe-rex>=1.4.0",
+    "websockets",
     "loguru",
     "pydantic",
     "pydantic-settings",
     "aiohttp",
     "httpx",
+    # data build (scripts/build_data.py) + HuggingFace sourcing (latest stack is fine here:
+    # datasets 5.x / pandas 3.x / numpy 2.x). The numpy<2 / pyarrow>=19 constraints that the
+    # training framework needs come from verl (the [train] extra), not from here.
+    "datasets",
+    "huggingface-hub",
+    "pandas",
+    "pyarrow",
+    "numpy",
+    "pyyaml",
+    "tqdm",
+    "uni-agent",        # local submodule (editable, see [tool.uv.sources]); has zero deps
 ]
 
 [project.optional-dependencies]
-# GPU/training stack — installed ONLY on GPU. Locally we skip it (see DEV_SETUP.md);
-# it is sourced from uni-agent/verl/requirements.txt, not pinned here, so this
-# project's lock never drags torch onto a CPU box.
-gpu = []
+# ── train: the framework, sourced from verl ITSELF (uni-agent/verl/setup.py) ───
+# We do NOT hand-copy or pin the framework deps: listing `verl` (editable) pulls verl's own
+# install_requires — accelerate / transformers / ray[default]>=2.41 / tensordict / peft /
+# numpy<2 / pandas / pyarrow>=19 / wandb / tensorboard / …. CPU-installable (torch resolves
+# to the CPU wheel), so the trainer imports + smoke-tests run without a GPU.
+train = ["verl"]
 
-[tool.uv]
-# uni-agent and its nested verl are editable --no-deps installs (mirroring
-# uni-agent's own `pip install --no-deps -e ./verl`) + made importable via
-# PYTHONPATH=uni-agent/verl:uni-agent:.  — they are intentionally NOT resolved
-# deps here, so `uv sync` stays GPU-free for local ARL-runtime testing.
-# arl-env resolves from the default PyPI index (no custom source needed).
-package = false
+# ── gpu: the GPU accelerators, ALSO sourced from verl's OWN extras ─────────────
+# verl/setup.py defines these as extras_require, so we just turn them on (no pins of ours):
+#   vllm  → vllm>=0.8.5,<=0.12.0      gpu  → liger-kernel, flash-attn
+#   geo   → torchvision, qwen_vl_utils, mathruler
+#   mcore → mbridge (Megatron bridge; p2a/train_p2a.sh uses the Megatron PPO backend)
+#   math  → math-verify
+# CUDA-only — install on the GPU training node:  uv pip install -e '.[train,gpu]'
+gpu = ["verl[vllm,gpu,geo,mcore,math]"]
+
+dev = ["pytest", "ruff", "mypy"]
+
+# ── sources: the two submodules are installed editable from the local tree ─────
+# Honored by both `uv pip install` and `uv sync`, so `uv pip install -e '.[train]'` pulls
+# verl's real dependency graph straight from uni-agent/verl/setup.py (no drift, no copy).
+[tool.uv.sources]
+uni-agent = { path = "uni-agent", editable = true }
+verl = { path = "uni-agent/verl", editable = true }
+
+# ── deps-only project: we ship no modules; p2a/ env/ scripts/ stay on PYTHONPATH ─
+[tool.setuptools]
+packages = []
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ONE more dep is neither on PyPI nor declared by verl/uni-agent: r2e-gym (provides
+# ParsedCommit for `build_data r2e`). It is a git package pinning datasets==2.19, so it is
+# installed --no-deps (its pin is bypassed; the data pipeline runs on datasets 5.x):
+#
+#     uv pip install --no-deps git+https://github.com/R2E-Gym/R2E-Gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735
+#
+# Full recipes:
+#   CPU (data + precompute):   bash scripts/check_deps_cpu.sh          # core + r2e-gym
+#   CPU (+ framework, smoke):  bash scripts/check_deps_cpu.sh --train  # + verl (CPU torch)
+#   GPU server (training):     uv pip install -e '.[train,gpu]'
+#                              uv pip install --no-deps git+https://github.com/R2E-Gym/R2E-Gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735
+# ──────────────────────────────────────────────────────────────────────────────
