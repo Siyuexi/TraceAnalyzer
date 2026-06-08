@@ -216,12 +216,45 @@ _GREP_PATTERN = re.compile(
 _DEFAULT_CONTEXT_LINES = 50  # head/tail default context
 
 
-def _parse_bash_read_commands(text: str) -> list[dict]:
-    """Parse execute_bash commands that view file contents.
+def _extract_reads_from_command(cmd: str) -> list[dict]:
+    """Extract file-view reads (cat / head / tail / sed -n / grep) from one bash command.
 
-    Extracts cat, head, tail, sed -n, grep from bash commands.
+    Dedups by the resulting (path, start_line, end_line) so the same view is not
+    emitted twice (e.g. a ``grep -n`` that matches both grep patterns).
     """
-    # First extract bash command strings from the tool calls
+    reads: list[dict] = []
+    seen: set = set()
+
+    def add(file_path: str, start_line: int, end_line: int) -> None:
+        key = (file_path, start_line, end_line)
+        if key in seen:
+            return
+        seen.add(key)
+        reads.append({"file_path": file_path, "start_line": start_line, "end_line": end_line})
+
+    for match in _CAT_PATTERN.finditer(cmd):
+        add(_normalize_path(match.group(1)), 1, 999999)
+    for match in _HEAD_TAIL_PATTERN.finditer(cmd):
+        n_lines = int(match.group(2)) if match.group(2) else _DEFAULT_CONTEXT_LINES
+        path = _normalize_path(match.group(3))
+        # tail length is unknown, so use the full range
+        add(path, 1, n_lines if match.group(1) == "head" else 999999)
+    for match in _SED_N_PATTERN.finditer(cmd):
+        add(_normalize_path(match.group(3)), int(match.group(1)), int(match.group(2)))
+    for match in _GREP_N_PATTERN.finditer(cmd):
+        add(_normalize_path(match.group(1)), 1, 999999)
+    for match in _GREP_PATTERN.finditer(cmd):
+        add(_normalize_path(match.group(1)), 1, 999999)
+    return reads
+
+
+def _parse_bash_read_commands(text: str) -> list[dict]:
+    """Parse execute_bash file-view commands (cat/head/tail/sed -n/grep) from raw text.
+
+    Pulls the bash command strings out of execute_bash tool calls (XML or JSON),
+    falling back to treating the whole text as inline bash, then runs each through
+    :func:`_extract_reads_from_command`. Reads are deduped by (path, start, end).
+    """
     bash_commands = []
     for match in _BASH_CMD_XML_PATTERN.finditer(text):
         bash_commands.append(match.group(1).strip())
@@ -236,64 +269,17 @@ def _parse_bash_read_commands(text: str) -> list[dict]:
         except (json.JSONDecodeError, ValueError):
             continue
 
-    # If no structured bash tool calls found, the text itself might contain
-    # inline bash commands (e.g., in sweagent format where the model outputs
-    # bash commands directly). We treat the entire text as potential commands.
     if not bash_commands:
         bash_commands = [text]
 
-    reads = []
-    seen = set()  # dedup
-
+    reads: list[dict] = []
+    seen: set = set()
     for cmd in bash_commands:
-        # cat
-        for match in _CAT_PATTERN.finditer(cmd):
-            path = _normalize_path(match.group(1))
-            key = ("cat", path)
+        for read in _extract_reads_from_command(cmd):
+            key = (read["file_path"], read["start_line"], read["end_line"])
             if key not in seen:
                 seen.add(key)
-                reads.append({"file_path": path, "start_line": 1, "end_line": 999999})
-
-        # head / tail
-        for match in _HEAD_TAIL_PATTERN.finditer(cmd):
-            subcmd = match.group(1)
-            n_lines = int(match.group(2)) if match.group(2) else _DEFAULT_CONTEXT_LINES
-            path = _normalize_path(match.group(3))
-            key = (subcmd, path, n_lines)
-            if key not in seen:
-                seen.add(key)
-                if subcmd == "head":
-                    reads.append({"file_path": path, "start_line": 1, "end_line": n_lines})
-                else:
-                    # tail: we don't know the file length, use large range
-                    reads.append({"file_path": path, "start_line": 1, "end_line": 999999})
-
-        # sed -n 'START,ENDp'
-        for match in _SED_N_PATTERN.finditer(cmd):
-            start = int(match.group(1))
-            end = int(match.group(2))
-            path = _normalize_path(match.group(3))
-            key = ("sed", path, start, end)
-            if key not in seen:
-                seen.add(key)
-                reads.append({"file_path": path, "start_line": start, "end_line": end})
-
-        # grep -n (line-numbered grep → actively viewing specific content)
-        for match in _GREP_N_PATTERN.finditer(cmd):
-            path = _normalize_path(match.group(1))
-            key = ("grep_n", path)
-            if key not in seen:
-                seen.add(key)
-                reads.append({"file_path": path, "start_line": 1, "end_line": 999999})
-
-        # grep without -n (still accessing file content)
-        for match in _GREP_PATTERN.finditer(cmd):
-            path = _normalize_path(match.group(1))
-            key = ("grep", path)
-            if key not in seen:
-                seen.add(key)
-                reads.append({"file_path": path, "start_line": 1, "end_line": 999999})
-
+                reads.append(read)
     return reads
 
 
@@ -390,32 +376,7 @@ def parse_read_actions_from_tool_calls(tool_calls: list[dict]) -> list[dict]:
 
 def _parse_bash_read_commands_from_str(cmd: str) -> list[dict]:
     """Parse file-viewing bash commands from a single command string."""
-    reads = []
-    seen = set()
-
-    def add_read(kind: str, file_path: str, start_line: int, end_line: int) -> None:
-        key = (kind, file_path, start_line, end_line)
-        if key in seen:
-            return
-        seen.add(key)
-        reads.append({"file_path": file_path, "start_line": start_line, "end_line": end_line})
-
-    for match in _CAT_PATTERN.finditer(cmd):
-        add_read("cat", _normalize_path(match.group(1)), 1, 999999)
-    for match in _HEAD_TAIL_PATTERN.finditer(cmd):
-        n_lines = int(match.group(2)) if match.group(2) else _DEFAULT_CONTEXT_LINES
-        path = _normalize_path(match.group(3))
-        if match.group(1) == "head":
-            add_read("head", path, 1, n_lines)
-        else:
-            add_read("tail", path, 1, 999999)
-    for match in _SED_N_PATTERN.finditer(cmd):
-        add_read("sed", _normalize_path(match.group(3)), int(match.group(1)), int(match.group(2)))
-    for match in _GREP_N_PATTERN.finditer(cmd):
-        add_read("grep", _normalize_path(match.group(1)), 1, 999999)
-    for match in _GREP_PATTERN.finditer(cmd):
-        add_read("grep", _normalize_path(match.group(1)), 1, 999999)
-    return reads
+    return _extract_reads_from_command(cmd)
 
 
 # ---------------------------------------------------------------------------
