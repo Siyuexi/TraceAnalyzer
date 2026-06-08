@@ -324,7 +324,7 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertIn("python -m pytest -rA --color=no -vv tests/test_domain_cpp.py", text)
         self.assertNotIn("tox --current-env", text)
 
-    def test_swebench_unittest_display_names_target_django_f2p(self) -> None:
+    def test_swebench_unittest_display_names_keep_django_module_selection(self) -> None:
         from p2a.precompute.precompute_bonus_maps import _normalize_test_func_name, _prepare_swebench_test_script
 
         class FakeEnv:
@@ -374,10 +374,53 @@ class ArlAdapterTests(unittest.TestCase):
             "template_tests.filter_tests.test_floatformat.FunctionTests.test_zero_values.test_zero_values",
             diag["swebench_f2p_django_labels"],
         )
-        self.assertIn("targeted_django=1", diag["swebench_test_script_patch_stdout"])
-        self.assertIn("cache.tests.DBCacheTests.test_cull_delete_when_store_empty", text)
+        self.assertIn("targeted_django=0", diag["swebench_test_script_patch_stdout"])
         self.assertIn("git checkout abc123 tests/runtests.py tests/deprecation/test_middleware_mixin.py", text)
-        self.assertNotIn(" cache.tests\n", text)
+        self.assertIn("./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 cache.tests", text)
+
+    def test_swebench_sympy_runner_keeps_file_level_selection(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import _prepare_swebench_test_script
+
+        class FakeEnv:
+            def write_file(self, path: str, content: str) -> None:
+                Path(path).write_text(content, encoding="utf-8")
+
+            def _run(self, command: str, timeout: int | float | None = None) -> tuple[str, str]:
+                if "python - <<'PY'" not in command:
+                    return "", ""
+                result = subprocess.run(command, shell=True, text=True, capture_output=True, check=False)
+                return result.stdout, result.stderr
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = str(Path(tmp) / "run_tests.sh")
+            diag = _prepare_swebench_test_script(
+                FakeEnv(),
+                {
+                    "repo": "sympy/sympy",
+                    "FAIL_TO_PASS": '["test_MatrixElement_printing", "test_MatrixSymbol_printing"]',
+                    "run_tests": "\n".join(
+                        [
+                            "#!/bin/bash",
+                            "python -m pip install -e .",
+                            "bin/test -C --verbose sympy/printing/tests/test_latex.py",
+                        ]
+                    ),
+                },
+                script,
+            )
+
+            text = Path(script).read_text(encoding="utf-8")
+
+        self.assertIn("targeted_sympy=0", diag["swebench_test_script_patch_stdout"])
+        self.assertIn("bin/test -C --verbose sympy/printing/tests/test_latex.py", text)
+        self.assertNotIn(" -k ", text)
+
+    def test_swebench_zero_tests_output_is_detected(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import _swebench_output_has_zero_tests
+
+        self.assertTrue(_swebench_output_has_zero_tests("tests finished: 0 passed, in 0.00 seconds"))
+        self.assertTrue(_swebench_output_has_zero_tests("no tests ran in 0.01s"))
+        self.assertFalse(_swebench_output_has_zero_tests("Ran 1 test in 0.007s\n\nOK"))
 
     def test_trace_instrumentation_caches_tracer_after_future_imports(self) -> None:
         from p2a.trace import instrument_source

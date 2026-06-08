@@ -687,6 +687,18 @@ def _swebench_output_has_signature_entry_failure(raw_output: str) -> bool:
     return any(_SIGNATURE_ENTRY_FAILURE_RE.search(_ANSI_ESCAPE_RE.sub("", line)) for line in raw_output.splitlines())
 
 
+def _swebench_output_has_zero_tests(raw_output: str) -> bool:
+    """Detect successful-looking test runs that collected no tests."""
+    if not raw_output:
+        return False
+    text = _ANSI_ESCAPE_RE.sub("", raw_output)
+    return bool(
+        re.search(r"\bno tests? (?:ran|run|collected)\b", text, re.IGNORECASE)
+        or re.search(r"\b0 (?:tests? )?passed\b", text, re.IGNORECASE)
+        or re.search(r"\btests finished:\s*0 passed\b", text, re.IGNORECASE)
+    )
+
+
 def _prepare_swebench_test_script(
     env,
     task: dict,
@@ -764,27 +776,6 @@ targeted_sympy = 0
 def quote_join(items):
     return " ".join(shlex.quote(str(item)) for item in items)
 
-def django_prefix(parts):
-    prefix = []
-    j = 0
-    while j < len(parts):
-        prefix.append(parts[j])
-        if parts[j].endswith("runtests.py"):
-            j += 1
-            break
-        j += 1
-    value_options = {{"--settings", "--verbosity", "--parallel", "--tag", "--exclude-tag"}}
-    while j < len(parts):
-        tok = parts[j]
-        if not tok.startswith("-"):
-            break
-        prefix.append(tok)
-        if tok in value_options and j + 1 < len(parts):
-            j += 1
-            prefix.append(parts[j])
-        j += 1
-    return prefix
-
 for i, line in enumerate(lines):
     stripped = line.strip()
     if replace_tox_current_env and stripped.startswith("tox --current-env") and " -- " in stripped:
@@ -804,18 +795,14 @@ for i, line in enumerate(lines):
         or stripped.startswith("python tests/runtests.py")
         or stripped.startswith("python ./tests/runtests.py")
     ):
-        parts = shlex.split(stripped)
-        prefix = django_prefix(parts)
-        if prefix:
-            lines[i] = quote_join(prefix + f2p_django_labels)
-            changed = True
-            targeted_django += 1
+        # Keep Django's SWE-bench module-level selection. Some F2P entries are
+        # docstring descriptions or context-sensitive tests; narrowing to the
+        # display-name subset can skip the real failing check.
         continue
     if f2p_bare_funcs and "bin/test" in stripped:
-        expr = " or ".join(f2p_bare_funcs)
-        lines[i] = stripped + " -k " + shlex.quote(expr)
-        changed = True
-        targeted_sympy += 1
+        # SymPy's historical bin/test runners do not consistently implement
+        # pytest-style -k expressions; the SWE-bench script already narrows the
+        # run to patched test files.
         continue
     if "python -m pip install" not in line or " -e ." not in line:
         continue
@@ -1128,6 +1115,10 @@ def compute_dynamic_bonus_map(
         swebench_f2p_failure_observed = (
             env.swebench_verified and _swebench_output_has_f2p_failure(raw_output, _swebench_f2p_nodeids(task))
         )
+        if test_exit == 0 and env.swebench_verified and _swebench_output_has_zero_tests(raw_output):
+            capture_diag = dict(capture_diag)
+            capture_diag["test_exit_overridden_from_zero_tests"] = True
+            test_exit = 5
         if test_exit == 0 and swebench_f2p_failure_observed:
             capture_diag = dict(capture_diag)
             capture_diag["test_exit_overridden_from_output"] = True
@@ -1208,7 +1199,7 @@ def compute_dynamic_bonus_map(
             import_targets = _detect_import_targets(env, all_modified)
             common_diag["import_targets"] = import_targets
             imports_match = bool(import_targets) and all(item.get("matches_repo_path") for item in import_targets)
-            if env.swebench_verified and common_diag.get("swebench_targeted_f2p") and swebench_f2p_failure_observed and imports_match and _swebench_output_has_signature_entry_failure(raw_output):
+            if env.swebench_verified and swebench_f2p_failure_observed and imports_match and _swebench_output_has_signature_entry_failure(raw_output):
                 print(f"  [{instance_id}] signature_mismatch: F2P failed before instrumented callable body entry. instrumented={len(instrumented_callables)}")
                 return _make_result(
                     instance_id,
@@ -1219,7 +1210,7 @@ def compute_dynamic_bonus_map(
                     reason_code="signature_mismatch_before_entry",
                     diagnostics=common_diag,
                 )
-            if newly_created and env.swebench_verified and common_diag.get("swebench_targeted_f2p") and swebench_f2p_failure_observed and imports_match:
+            if newly_created and env.swebench_verified and swebench_f2p_failure_observed and imports_match:
                 print(f"  [{instance_id}] newly_created: F2P failed but only added callables were exercised. instrumented={len(instrumented_callables)}")
                 return _make_result(
                     instance_id,

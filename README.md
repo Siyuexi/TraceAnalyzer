@@ -145,17 +145,21 @@ reference for validation rollouts.
 | `avg_best_positive_multiplier_on_hits` | The diagnostic P2A multiplier implied by the best read distance. |
 
 Current SWE-bench Verified eval-map sanity check, after the targeted F2P,
-trace-capture, and unittest-description F2P fixes, is:
+trace-capture, unittest-description F2P, and zero-test runner fixes, is:
 
-| Split | Rows | Dynamic (`standard+direct`) | `standard` | `direct` | `newly_created` | `no_callable` | `no_f2p` | `static_fallback` | `signature_mismatch` | `all_pass` | `no_trace` |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| hard validation | 45 | 37 (82.2%) | 30 | 7 | 4 | 0 | 0 | 1 | 0 | 3 | 0 |
-| test rest | 455 | 381 (83.7%) | 252 | 129 | 35 | 18 | 2 | 2 | 7 | 10 | 0 |
-| full Verified | 500 | 418 (83.6%) | 282 | 136 | 39 | 18 | 2 | 3 | 7 | 13 | 0 |
+| Split | Rows | Dynamic (`standard+direct`) | `standard` | `direct` | `newly_created` | `no_callable` | `no_f2p` | `static_fallback` | `signature_mismatch` | `all_pass` | `no_trace` | `no_gt` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| hard validation | 45 | 39 (86.7%) | 32 | 7 | 4 | 0 | 1 | 1 | 0 | 0 | 0 | 0 |
+| test rest | 455 | 389 (85.5%) | 258 | 131 | 35 | 18 | 3 | 2 | 7 | 0 | 0 | 1 |
+| full Verified | 500 | 428 (85.6%) | 290 | 138 | 39 | 18 | 4 | 3 | 7 | 0 | 0 | 1 |
 
 The full run used `cache/eval_bonus_verified500_f2p_targeted_20260608_220312/bonus_maps/`;
 the 13 former `no_f2p` Django cases were rerun under
 `cache/swe_no_f2p_rerun_20260609/maps/`, recovering 11 dynamic maps.
+The 13 former `all_pass` cases were rerun under
+`cache/swe_allpass_rerun_20260609_004806/maps/`, recovering 10 dynamic maps
+and proving the old SymPy/Django narrowed-runner all-pass bucket was a harness
+bug.
 `no_trace=0` is the build-quality gate.  Non-dynamic buckets now mean:
 
 | Bucket | Count | Meaning |
@@ -164,8 +168,8 @@ the 13 former `no_f2p` Django cases were rerun under
 | `no_callable` | 18 | The patch has no callable-level Python change for the bonus-map extractor. |
 | `signature_mismatch` | 7 | The F2P test fails during Python argument binding before entering the patched callable body. |
 | `static_fallback` | 3 | Static callable extraction found candidates, but sandbox instrumentation produced no instrumented callable. |
-| `all_pass` | 13 | The targeted buggy-version F2P run passes, so there is no failing execution to score. |
-| `no_f2p` | 2 | F2P failures remain unaligned with traces after description-to-method recovery. |
+| `no_f2p` | 4 | F2P failures remain unaligned with traces after description-to-method recovery. |
+| `no_gt` | 1 | Tests produced traces, but none entered the patched callable set. |
 
 ## ⚠️ TODO — verify before trusting P2A training
 
