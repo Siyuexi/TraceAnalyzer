@@ -46,6 +46,7 @@ PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py r2e --out $DATA/r2e_gym_subset_p2a.parquet
 #   -> r2e_gym_subset_p2a.parquet         (full, for bonus-map precompute)
 #   -> r2e_gym_subset_p2a.train.parquet   (bad cases excluded, for training/eval)
+#   dependency note: r2e-gym is installed by uv.lock; no manual uv pip install is needed.
 
 # 2. Precompute bonus maps on ARL (pair-diag images + faithful startup fixups)
 PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl ARL_GATEWAY_URL=$ARL \

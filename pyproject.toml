@@ -33,6 +33,7 @@ dependencies = [
     "numpy",
     "pyyaml",
     "tqdm",
+    "r2e-gym",         # Git source below; metadata override keeps it no-deps
     "uni-agent",        # local submodule (editable, see [tool.uv.sources]); has zero deps
 ]
 
@@ -55,27 +56,33 @@ gpu = ["verl[vllm,gpu,geo,mcore,math]"]
 
 dev = ["pytest", "ruff", "mypy"]
 
+# ── uv resolver metadata overrides ────────────────────────────────────────────
+# R2E-Gym is a git package with a broad runtime/training dependency list and a stale
+# datasets==2.19 pin. This project only imports its lightweight data/parsing modules
+# (`ParsedCommit`, execution-log parsing), while core already declares the needed
+# runtime deps. Mirror the old `uv pip install --no-deps ...` behavior in uv's
+# project resolver so `uv run` / `uv sync` install r2e-gym without inheriting that
+# upstream dependency graph.
+[tool.uv]
+dependency-metadata = [
+    { name = "r2e-gym", version = "0.1.0", requires-python = ">=3.10", requires-dist = [] },
+]
+
 # ── sources: the two submodules are installed editable from the local tree ─────
-# Honored by both `uv pip install` and `uv sync`, so `uv pip install -e '.[train]'` pulls
+# Honored by uv project commands (`uv lock` / `uv sync` / `uv run`), so `[train]` pulls
 # verl's real dependency graph straight from uni-agent/verl/setup.py (no drift, no copy).
 [tool.uv.sources]
 uni-agent = { path = "uni-agent", editable = true }
 verl = { path = "uni-agent/verl", editable = true }
+r2e-gym = { git = "https://github.com/R2E-Gym/R2E-Gym.git", rev = "0d94c4eb9431cd195c55a7ea3abd54006c9a1735" }
 
 # ── deps-only project: we ship no modules; p2a/ env/ scripts/ stay on PYTHONPATH ─
 [tool.setuptools]
 packages = []
 
 # ──────────────────────────────────────────────────────────────────────────────
-# ONE more dep is neither on PyPI nor declared by verl/uni-agent: r2e-gym (provides
-# ParsedCommit for `build_data r2e`). It is a git package pinning datasets==2.19, so it is
-# installed --no-deps (its pin is bypassed; the data pipeline runs on datasets 5.x):
-#
-#     uv pip install --no-deps git+https://github.com/R2E-Gym/R2E-Gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735
-#
 # Full recipes:
 #   CPU (data + precompute):   bash scripts/check_deps_cpu.sh          # core + r2e-gym
 #   CPU (+ framework, smoke):  bash scripts/check_deps_cpu.sh --train  # + verl (CPU torch)
-#   GPU server (training):     uv pip install -e '.[train,gpu]'
-#                              uv pip install --no-deps git+https://github.com/R2E-Gym/R2E-Gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735
+#   GPU server (training):     uv sync --extra train --extra gpu
 # ──────────────────────────────────────────────────────────────────────────────
