@@ -655,6 +655,26 @@ def _swebench_output_has_f2p_failure(raw_output: str, f2p_nodeids: list[str]) ->
     return False
 
 
+_TEST_RESULT_LINE_RE = re.compile(r"\b(PASSED|FAILED|ERROR|FAIL|ok)\b|\.{3}\s*ok\b")
+
+
+def _swebench_f2p_collection_observation(raw_output: str, f2p_nodeids: list[str]) -> dict[str, list[str]]:
+    """Report which SWE-bench F2P selectors appear in test result lines."""
+    observed = []
+    missing = []
+    if not f2p_nodeids:
+        return {"observed": observed, "missing": missing}
+    lines = [_ANSI_ESCAPE_RE.sub("", line) for line in (raw_output or "").splitlines()]
+    result_lines = [line for line in lines if _TEST_RESULT_LINE_RE.search(line)]
+    for nodeid in f2p_nodeids:
+        bare = _normalize_test_func_name(nodeid)
+        if any(_swebench_line_matches_f2p_selector(line, nodeid, bare) for line in result_lines):
+            observed.append(nodeid)
+        else:
+            missing.append(nodeid)
+    return {"observed": observed, "missing": missing}
+
+
 def _swebench_line_matches_f2p_selector(line: str, nodeid: str, bare: str) -> bool:
     selector = str(nodeid or "").strip()
     bare = str(bare or "").strip()
@@ -1112,8 +1132,17 @@ def compute_dynamic_bonus_map(
         stdout, stderr, test_exit, capture_diag = _run_tests_with_file_capture(env, test_script, timeout=test_timeout)
         _debug_progress(instance_id, f"run_tests_done exit={test_exit}")
         raw_output = f"{stdout}\n{stderr}" if stderr else stdout
+        f2p_nodeids = _swebench_f2p_nodeids(task)
         swebench_f2p_failure_observed = (
-            env.swebench_verified and _swebench_output_has_f2p_failure(raw_output, _swebench_f2p_nodeids(task))
+            env.swebench_verified and _swebench_output_has_f2p_failure(raw_output, f2p_nodeids)
+        )
+        swebench_f2p_observation = (
+            _swebench_f2p_collection_observation(raw_output, f2p_nodeids)
+            if env.swebench_verified
+            else {"observed": [], "missing": []}
+        )
+        swebench_f2p_collection_missing = bool(
+            env.swebench_verified and f2p_nodeids and swebench_f2p_observation["missing"]
         )
         if test_exit == 0 and env.swebench_verified and _swebench_output_has_zero_tests(raw_output):
             capture_diag = dict(capture_diag)
@@ -1180,6 +1209,9 @@ def compute_dynamic_bonus_map(
         common_diag["test_output_capture_detail"] = capture_diag
         common_diag["parsed_trace_count"] = parsed_trace_count
         common_diag["swebench_f2p_failure_observed"] = swebench_f2p_failure_observed
+        common_diag["swebench_f2p_observed_nodeids"] = swebench_f2p_observation["observed"]
+        common_diag["swebench_f2p_missing_nodeids"] = swebench_f2p_observation["missing"]
+        common_diag["swebench_f2p_collection_missing"] = swebench_f2p_collection_missing
         common_diag["raw_gt_test_funcs"] = _test_func_names_from_traces(raw_traces)
         common_diag.update(
             _write_trace_sidecar(
@@ -1219,6 +1251,17 @@ def compute_dynamic_bonus_map(
                     newly_created,
                     error=False,
                     reason_code="newly_created_not_traceable",
+                    diagnostics=common_diag,
+                )
+            if test_exit == 0 and swebench_f2p_collection_missing:
+                print(f"  [{instance_id}] no_trace: F2P selectors missing from test output. instrumented={len(instrumented_callables)}")
+                return _make_result(
+                    instance_id,
+                    "no_trace",
+                    all_modified,
+                    newly_created,
+                    error=True,
+                    reason_code="f2p_collection_missing",
                     diagnostics=common_diag,
                 )
             no_trace_reason = _no_trace_reason_code(test_exit, capture_diag)
@@ -1265,8 +1308,12 @@ def compute_dynamic_bonus_map(
             # Can't parse test output at all
             parse_diag = dict(common_diag)
             parse_diag["f2p_test_funcs"] = None
-            case_type = "all_pass" if test_exit == 0 else "no_f2p"
-            reason_code = "buggy_version_passes" if test_exit == 0 else "f2p_parse_failed"
+            if test_exit == 0 and swebench_f2p_collection_missing:
+                case_type = "no_f2p"
+                reason_code = "f2p_collection_missing"
+            else:
+                case_type = "all_pass" if test_exit == 0 else "no_f2p"
+                reason_code = "buggy_version_passes" if test_exit == 0 else "f2p_parse_failed"
             print(f"  [{instance_id}] {case_type}: f2p_test_funcs=None (parse failed). Dropping all {len(raw_traces)} traces. test_exit={test_exit}")
             parse_diag.update(
                 _write_trace_sidecar(
@@ -1296,8 +1343,12 @@ def compute_dynamic_bonus_map(
             # only a true all_pass if the buggy test run also exited cleanly.
             all_pass_diag = dict(common_diag)
             all_pass_diag["f2p_test_funcs"] = []
-            case_type = "all_pass" if test_exit == 0 else "no_f2p"
-            reason_code = "buggy_version_passes" if test_exit == 0 else "test_collection_error_no_failed_nodeids"
+            if test_exit == 0 and swebench_f2p_collection_missing:
+                case_type = "no_f2p"
+                reason_code = "f2p_collection_missing"
+            else:
+                case_type = "all_pass" if test_exit == 0 else "no_f2p"
+                reason_code = "buggy_version_passes" if test_exit == 0 else "test_collection_error_no_failed_nodeids"
             print(f"  [{instance_id}] {case_type}: 0 parsed test failures. test_exit={test_exit}")
             all_pass_diag.update(
                 _write_trace_sidecar(

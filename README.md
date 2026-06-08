@@ -145,7 +145,8 @@ reference for validation rollouts.
 | `avg_best_positive_multiplier_on_hits` | The diagnostic P2A multiplier implied by the best read distance. |
 
 Current SWE-bench Verified eval-map sanity check, after the targeted F2P,
-trace-capture, unittest-description F2P, and zero-test runner fixes, is:
+trace-capture, unittest-description F2P, zero-test runner, and F2P collection
+guards, is:
 
 | Split | Rows | Dynamic (`standard+direct`) | `standard` | `direct` | `newly_created` | `no_callable` | `no_f2p` | `static_fallback` | `signature_mismatch` | `all_pass` | `no_trace` | `no_gt` |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -157,9 +158,9 @@ The full run used `cache/eval_bonus_verified500_f2p_targeted_20260608_220312/bon
 the 13 former `no_f2p` Django cases were rerun under
 `cache/swe_no_f2p_rerun_20260609/maps/`, recovering 11 dynamic maps.
 The 13 former `all_pass` cases were rerun under
-`cache/swe_allpass_rerun_20260609_004806/maps/`, recovering 10 dynamic maps
-and proving the old SymPy/Django narrowed-runner all-pass bucket was a harness
-bug.
+`cache/swe_allpass_collection_guard_20260609_005920/maps/`, recovering 10
+dynamic maps and proving the old SymPy/Django narrowed-runner all-pass bucket
+was a harness bug.
 `no_trace=0` is the build-quality gate.  Non-dynamic buckets now mean:
 
 | Bucket | Count | Meaning |
