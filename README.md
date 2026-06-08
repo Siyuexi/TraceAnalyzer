@@ -59,6 +59,11 @@ PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
 #   -> r2e_gym_subset_p2a.parquet         (full, for bonus-map precompute)
 #   -> r2e_gym_subset_p2a.train.parquet   (bad cases excluded, for training/eval)
 #   dependency note: r2e-gym is installed by uv.lock; no manual uv pip install is needed.
+#   source-of-truth note: rows come from R2E-Gym/R2E-Gym-Subset, not
+#   dyyyyyyyy/r2e-gym-subset-filtered.  The Uni-Agent filtered dataset dropped 75
+#   original cases; on our pair-diag ARL audit, 39/75 passed buggy-F2P/fixed-P2P
+#   and 36/75 were added to config/bad_instances.json.  Keep using our explicit
+#   skip registry instead of the coarse Uni-Agent filter.
 
 # 2. Precompute bonus maps on ARL (pair-diag images + faithful startup fixups)
 PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl ARL_GATEWAY_URL=$ARL \
@@ -103,6 +108,7 @@ These are knobs you set; the repo does not pin them:
 | Eval fault-localization diagnostics | `P2A_EVAL_BONUS_MAP_DIR`, `P2A_EVAL_BONUS_N_PARALLEL`, `P2A_EVAL_BONUS_LIMIT`, `P2A_EVAL_BONUS_OFFSET` |
 | ARL gateway | `ARL_GATEWAY_URL` |
 | Hard-subset criterion | `--difficulties` flag of `build_data.py swebench-hard` (default = old rLLM set) |
+| R2E bad-case policy | `config/bad_instances.json`; current registry is based on pair-diag ARL gate evidence, not Uni-Agent's filtered HF dataset |
 
 Hydra training overrides live in `scripts/train_p2a.sh`; if you move any to a json/yaml
 config, put it under `config/`.

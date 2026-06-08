@@ -44,6 +44,8 @@ def cmd_r2e(args) -> int:
     from p2a.hf_assets import load_shared_dataset
     from p2a.skip_cases import load_skip_ids
     from r2egym.commit_models.diff_classes import ParsedCommit
+    # Import Uni-Agent's prompt/setup constants only.  The row source below is
+    # the canonical R2E dataset, not dyyyyyyyy/r2e-gym-subset-filtered.
     from r2e_gym_subset_filtered import POST_SETUP_CMD, SYSTEM_PROMPT, USER_PROMPT
 
     def ident(repo, pc_json, commit):
@@ -52,19 +54,9 @@ def cmd_r2e(args) -> int:
         buggy = pc.old_commit_hash or f"{fixed}^"
         return f"{repo}__{fixed[:10]}", fixed, buggy
 
-    print("Loading relevant_files from R2E-Gym/R2E-Gym-Subset ...", flush=True)
-    rel_index: dict[str, str] = {}
-    for ex in load_shared_dataset("R2E-Gym/R2E-Gym-Subset", split="train"):
-        try:
-            iid, _, _ = ident(ex["repo_name"], ex["parsed_commit_content"], ex["commit_hash"])
-        except Exception:  # noqa: BLE001
-            continue
-        if ex.get("relevant_files") is not None:
-            rel_index[iid] = json.dumps(list(ex["relevant_files"]))
-
-    print("Loading dyyyyyyyy/r2e-gym-subset-filtered ...", flush=True)
+    print("Loading R2E-Gym/R2E-Gym-Subset ...", flush=True)
     rows, rel_hit, rel_miss = [], 0, 0
-    for ex in load_shared_dataset("dyyyyyyyy/r2e-gym-subset-filtered", split="train"):
+    for ex in load_shared_dataset("R2E-Gym/R2E-Gym-Subset", split="train"):
         repo, pc_json = ex["repo_name"], ex["parsed_commit_content"]
         iid, fixed, buggy = ident(repo, pc_json, ex["commit_hash"])
         md = {
@@ -72,7 +64,8 @@ def cmd_r2e(args) -> int:
             "new_commit_hash": fixed, "patch": ParsedCommit(**json.loads(pc_json)).get_patch(),
             "expected_output_json": ex["expected_output_json"],
         }
-        rel = rel_index.get(iid)
+        relevant_files = ex.get("relevant_files")
+        rel = json.dumps(list(relevant_files)) if relevant_files is not None else None
         rel_hit += rel is not None
         rel_miss += rel is None
         rows.append({
