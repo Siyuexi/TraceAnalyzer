@@ -39,4 +39,15 @@ GPU pins (vllm 0.8.5â€“0.12.0, flash-attn, torchvision, mbridge for Megatron, â€
 from verl's own `extras_require`. vllm/flash-attn need a CUDA toolchain on the node.
 Note: on a CPU-only `[train]` resolve, `transformers` floats to the latest; on the GPU
 `[train,gpu]` install, verl's `vllm` extra constrains it to a vllm-compatible version.
-```
+
+## Shared HuggingFace assets
+
+By default, scripts share HuggingFace assets two levels above `src/`:
+
+- Models: `../../models/<repo-name>`
+- Datasets: `../../datasets/<repo-name>/<split>`
+
+The default training model is `Qwen/Qwen3-Coder-30B-A3B-Instruct`, saved as
+`../../models/Qwen3-Coder-30B-A3B-Instruct`. Existing local directories are reused;
+missing assets are downloaded and saved there. Override with `MODEL_PATH`,
+`P2A_MODEL_REPO`, `P2A_MODELS_DIR`, `P2A_DATASETS_DIR`, or `P2A_SHARED_ROOT`.

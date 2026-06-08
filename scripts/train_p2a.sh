@@ -16,6 +16,7 @@
 set -xeuo pipefail
 
 SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${SRC_ROOT}/scripts/shared_hf.sh"
 DEFAULT_VEFAAS_ENV="${SRC_ROOT}/.secrets/vefaas_env.sh"
 if [[ -f "${DEFAULT_VEFAAS_ENV}" ]]; then
   # shellcheck source=/dev/null
@@ -29,7 +30,7 @@ project_name='P2A-SWE-Agent'
 exp_name='P2A-GRPO-R2E-Fully-Async'
 
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
-MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3-4B-Instruct-xml-template"}
+MODEL_PATH=${MODEL_PATH:-"$(default_model_path)"}
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
 TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/swe_agent/r2e_gym_subset_filtered.parquet"}
 TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified_vefaas.parquet"}
@@ -99,6 +100,8 @@ partial_rollout=True
 if [[ -n "${P2A_BONUS_MAP_DIR:-}" && -z "${UNI_AGENT_P2A_TRACE:-}" ]]; then
     export UNI_AGENT_P2A_TRACE=1
 fi
+
+ensure_model_path
 
 mkdir -p "$(dirname "${RUNTIME_ENV}")"
 if [[ ! -f "${RUNTIME_ENV}" ]]; then

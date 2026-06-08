@@ -14,6 +14,8 @@ EOF
 }
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC_ROOT="${SRC_DIR}"
+source "${SRC_DIR}/scripts/shared_hf.sh"
 UNI_AGENT_DIR="${SRC_DIR}/uni-agent"
 RAY_DATA_HOME="${RAY_DATA_HOME:-${HOME}/verl}"
 DATA_DIR="${RAY_DATA_HOME}/data/swe_agent"
@@ -132,10 +134,7 @@ debug() {
     echo "Missing $AGENT_CONFIG_PATH; run prepare first." >&2
     exit 1
   fi
-  if [[ -z "${MODEL_PATH:-}" ]]; then
-    echo "MODEL_PATH is not set; set it to the Qwen checkpoint path." >&2
-    exit 1
-  fi
+  ensure_model_path
 
   cd "$SRC_DIR"
 

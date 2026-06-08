@@ -43,7 +43,7 @@ CONFIG = Path(__file__).resolve().parents[1] / "config" / "bad_instances.json"
 
 # ── r2e ───────────────────────────────────────────────────────────────────────
 def cmd_r2e(args) -> int:
-    from datasets import load_dataset
+    from p2a.hf_assets import load_shared_dataset
     from p2a.skip_cases import load_skip_ids
     from r2egym.commit_models.diff_classes import ParsedCommit
     from r2e_gym_subset_filtered import POST_SETUP_CMD, SYSTEM_PROMPT, USER_PROMPT
@@ -56,7 +56,7 @@ def cmd_r2e(args) -> int:
 
     print("Loading relevant_files from R2E-Gym/R2E-Gym-Subset ...", flush=True)
     rel_index: dict[str, str] = {}
-    for ex in load_dataset("R2E-Gym/R2E-Gym-Subset", split="train"):
+    for ex in load_shared_dataset("R2E-Gym/R2E-Gym-Subset", split="train"):
         try:
             iid, _, _ = ident(ex["repo_name"], ex["parsed_commit_content"], ex["commit_hash"])
         except Exception:  # noqa: BLE001
@@ -66,7 +66,7 @@ def cmd_r2e(args) -> int:
 
     print("Loading dyyyyyyyy/r2e-gym-subset-filtered ...", flush=True)
     rows, rel_hit, rel_miss = [], 0, 0
-    for ex in load_dataset("dyyyyyyyy/r2e-gym-subset-filtered", split="train"):
+    for ex in load_shared_dataset("dyyyyyyyy/r2e-gym-subset-filtered", split="train"):
         repo, pc_json = ex["repo_name"], ex["parsed_commit_content"]
         iid, fixed, buggy = ident(repo, pc_json, ex["commit_hash"])
         md = {
@@ -109,7 +109,7 @@ def cmd_r2e(args) -> int:
 
 # ── swebench-hard ─────────────────────────────────────────────────────────────
 def cmd_swebench_hard(args) -> int:
-    from datasets import load_dataset
+    from p2a.hf_assets import load_shared_dataset
     from swe_bench_verified import SYSTEM_PROMPT, USER_PROMPT, get_image_name
 
     hard = set(args.difficulties)
@@ -120,7 +120,7 @@ def cmd_swebench_hard(args) -> int:
 
     print(f"Loading princeton-nlp/SWE-bench_Verified (difficulty in {sorted(hard)}) ...", flush=True)
     rows, total = [], 0
-    for ex in load_dataset("princeton-nlp/SWE-bench_Verified", split="test"):
+    for ex in load_shared_dataset("princeton-nlp/SWE-bench_Verified", split="test"):
         total += 1
         if ex.get("difficulty") not in hard:
             continue
