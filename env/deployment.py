@@ -8,7 +8,7 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Self
+from typing import Any
 
 from swerex.deployment.abstract import AbstractDeployment
 from swerex.deployment.hooks.abstract import CombinedDeploymentHook, DeploymentHook
@@ -71,7 +71,7 @@ class ArlDeployment(AbstractDeployment):
         self._stopped = False
 
     @classmethod
-    def from_config(cls, config: ArlDeploymentConfig, run_id: str | None = None) -> Self:
+    def from_config(cls, config: ArlDeploymentConfig, run_id: str | None = None) -> ArlDeployment:
         return cls(run_id=run_id or str(uuid.uuid4()), **config.__dict__)
 
     def add_hook(self, hook: DeploymentHook) -> None:

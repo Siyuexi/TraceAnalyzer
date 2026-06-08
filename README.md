@@ -65,7 +65,11 @@ PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl ARL_GATEWAY_URL=$ARL \
   uv run python p2a/precompute/precompute_bonus_maps.py \
     $DATA/r2e_gym_subset_p2a.parquet --output_dir $BONUS --mode dynamic --n_parallel 64
 
-# 3. Build the HARD validation subset (cheap eval; full SWE-bench-Verified is too slow)
+# 3. Build SWE-bench Verified eval data.
+#    HARD is the validation split used during RL to watch convergence; the
+#    remaining Verified instances are the held-out test split after training.
+PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
+  uv run python scripts/build_data.py swebench-verified --out $DATA/swe_bench_verified.parquet
 PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py swebench-hard --out $DATA/swe_bench_verified_hard.parquet
 
@@ -124,6 +128,21 @@ reference for validation rollouts.
 | `near_hit_rate_over_call_graphs` | Fraction whose best read distance is `<= --near-threshold` (default `0.5`). |
 | `avg_min_distance_on_hits` | Lower is better; `0` means the model read the edited callable. |
 | `avg_best_positive_multiplier_on_hits` | The diagnostic P2A multiplier implied by the best read distance. |
+
+Current SWE-bench Verified eval-map sanity check, after the targeted F2P and
+trace-capture fixes, is:
+
+| Split | Rows | Dynamic (`standard+direct`) | `standard` | `direct` | `newly_created` | `no_callable` | `no_f2p` | `static_fallback` | `signature_mismatch` | `all_pass` | `no_trace` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| hard validation | 45 | 34 (75.6%) | 27 | 7 | 4 | 0 | 3 | 1 | 0 | 3 | 0 |
+| test rest | 455 | 373 (82.0%) | 247 | 126 | 35 | 18 | 10 | 2 | 7 | 10 | 0 |
+| full Verified | 500 | 407 (81.4%) | 274 | 133 | 39 | 18 | 13 | 3 | 7 | 13 | 0 |
+
+The full run used
+`cache/eval_bonus_verified500_f2p_targeted_20260608_220312/bonus_maps/`.
+`no_trace=0` is the main build-quality gate; the non-dynamic buckets are
+explicit abstentions such as newly created callables, signature mismatches
+before entering the patched callable, or buggy versions whose F2P tests pass.
 
 ## ⚠️ TODO — verify before trusting P2A training
 
