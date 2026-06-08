@@ -26,12 +26,12 @@ from pathlib import Path
 
 import pandas as pd
 
-# Uni-Agent's examples/data_preprocess modules run `os.getenv("DEPLOYMENT", "vefaas")`
-# at IMPORT time and reject unknown values. We import only their prompt / post-setup /
-# schema CONSTANTS (and swebench's get_image_name), never their vefaas runtime — so this
-# default merely lets those imports succeed. It does NOT couple the pipeline to vefaas:
-# the compute backend is ARL (env/agent_config_arl.yaml) and r2e images are pair-diag.
-# No vefaas API is called at build time. So `DEPLOYMENT` is no longer in the run command.
+# r2e_gym_subset_filtered.py runs `os.getenv("DEPLOYMENT", "vefaas")` at IMPORT time and
+# rejects unknown values; we import only its prompt / post-setup CONSTANTS, never its vefaas
+# runtime — so this default merely lets that import succeed. It does NOT couple the pipeline
+# to vefaas: the compute backend is ARL (env/agent_config_arl.yaml) and ALL images (r2e and
+# swebench) are built self-contained as pair-diag refs (see MIRROR below). No vefaas API is
+# called at build time. So `DEPLOYMENT` is no longer in the run command.
 os.environ.setdefault("DEPLOYMENT", "vefaas")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/ on path
@@ -110,7 +110,14 @@ def cmd_r2e(args) -> int:
 # ── swebench-hard ─────────────────────────────────────────────────────────────
 def cmd_swebench_hard(args) -> int:
     from p2a.hf_assets import load_shared_dataset
-    from swe_bench_verified import SYSTEM_PROMPT, USER_PROMPT, get_image_name
+    # NOT `from swe_bench_verified import ...`: that module's vefaas branch imports
+    # uni_agent.deployment.vefaas.deployment, which uses typing.Self and so fails to import on
+    # Python < 3.11 (the GPU box runs 3.10). We don't use vefaas — ARL boots the pair-diag
+    # mirror of the R2E-Gym SWE-bench-Verified images (slimshetty/swebench-verified, namespace-
+    # rewritten to the pair-diag `code/` mirror), built self-contained below. The generic
+    # SWE-agent prompts are byte-identical across the two example modules, so we reuse them
+    # from the import-safe r2e_gym_subset_filtered.
+    from r2e_gym_subset_filtered import SYSTEM_PROMPT, USER_PROMPT
 
     hard = set(args.difficulties)
 
@@ -131,7 +138,7 @@ def cmd_swebench_hard(args) -> int:
             ],
             "agent_name": "swe_agent",
             "extra_info": {"tools_kwargs": {
-                "env": {"deployment": {"image": get_image_name("swe-bench-verified", ex["instance_id"])},
+                "env": {"deployment": {"image": f"{MIRROR}/swebench-verified:sweb.eval.x86_64.{ex['instance_id']}"},
                         "post_setup_cmd": reset(ex["base_commit"])},
                 "reward": {"name": "swe_bench", "metadata": ex},
             }},
