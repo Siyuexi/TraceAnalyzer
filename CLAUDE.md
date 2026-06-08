@@ -16,6 +16,10 @@ touching this tree. The research-level `CLAUDE.md` is at the repo root.
    `scripts/build_data.py`** (`r2e` / `swebench-hard` / `skip-list`). Do NOT add a
    separate `build_*.py` per dataset — building the hard subset, the skip-list, etc.
    are all "build data", so they go in `build_data.py`. 举一反三.
+   **Likewise, EVERY runnable entry/launcher script (`*.sh`, training/data launchers)
+   lives in `scripts/`, never in `p2a/`/`env/`** (module code stays there; `p2a/main.py`
+   is a `python -m p2a.main` module entry, invoked by `scripts/train_p2a.sh`).
+   `train_p2a.sh` was moved `p2a/`→`scripts/` on 2026-06-08.
 3. **All json/yaml config goes under `config/`** (`startup_fixups.json`,
    `bad_instances.json`, and any future training config).
 4. **Images = pair-diag mirror**, not enterprise. `env/images.py` routes to

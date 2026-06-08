@@ -36,7 +36,7 @@ instrumentation/parsing engine is a first-class module of this source tree,
 commit inferred from `commit_hash` or `instance_id`, instruments `/testbed`, and
 runs `/root/run_tests.sh`. This is the path intended for R2E-Gym-Subset veFaaS.
 
-For P2A training, use `src/p2a/train_p2a.sh` from the project root. That script
+For P2A training, use `src/scripts/train_p2a.sh` from the project root. That script
 creates a separate `$RAY_DATA_HOME/data/swe_agent/p2a_runtime_env.yaml` with
 `PYTHONPATH=uni-agent/verl:uni-agent:.`, because the P2A package lives in `src/`
 while Uni-Agent and verl live under `src/uni-agent/`.

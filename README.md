@@ -21,11 +21,11 @@ src/
     build_data.py             # SINGLE data builder, subcommands: r2e | swebench-hard | skip-list
     uni_agent_arl.sh          # prepare/data/smoke/debug launcher (ARL config)
     ray_setup.sh              # bring up Ray
+    train_p2a.sh              # training launcher (baseline OR P2A)
   p2a/
     core.py                   # bonus-map load + read->callgraph match + m(d)=m_max^(1-d) multiplier
     trainer.py                # apply_p2a_reshape: capture agent reads -> reshape advantage   [see TODO]
     main.py                   # training entry; P2AFullyAsyncTrainer (vanilla if P2A_BONUS_MAP_DIR unset)
-    train_p2a.sh              # training launcher (baseline OR P2A)
     test_setup.py             # startup_fixup_command(repo) — loads config/startup_fixups.json
     trace.py                  # instrumentation + call-graph build (bonus-map precompute)
     precompute/precompute_bonus_maps.py  # build bonus maps on the ARL backend
@@ -58,7 +58,7 @@ PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
 
 # 4. Train.  Baseline (no P2A): leave P2A_BONUS_MAP_DIR unset.  P2A: set it.
 TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
-  MODEL_PATH=$MODEL P2A_BONUS_MAP_DIR=$BONUS P2A_M_MAX=3.0 bash p2a/train_p2a.sh
+  MODEL_PATH=$MODEL P2A_BONUS_MAP_DIR=$BONUS P2A_M_MAX=3.0 bash scripts/train_p2a.sh
 ```
 
 ## What you configure yourself
@@ -67,14 +67,14 @@ These are knobs you set; the repo does not pin them:
 
 | What | Where |
 |---|---|
-| Model | `MODEL_PATH` env var (e.g. a local `qwen3-coder-30b-a3b-instruct` checkout) in `p2a/train_p2a.sh` |
+| Model | `MODEL_PATH` env var (e.g. a local `qwen3-coder-30b-a3b-instruct` checkout) in `scripts/train_p2a.sh` |
 | Train / val data | `TRAIN_FILE` / `TEST_FILE` env vars (point at the parquets built above) |
 | GPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (e.g. 4×8 H20 → `NNODES=4`, `NGPUS_PER_NODE=8`) |
 | P2A on/off + strength | `P2A_BONUS_MAP_DIR` (unset = baseline), `P2A_M_MAX` |
 | ARL gateway | `ARL_GATEWAY_URL` |
 | Hard-subset criterion | `--difficulties` flag of `build_data.py swebench-hard` (default = old rLLM set) |
 
-Hydra training overrides live in `p2a/train_p2a.sh`; if you move any to a json/yaml
+Hydra training overrides live in `scripts/train_p2a.sh`; if you move any to a json/yaml
 config, put it under `config/`.
 
 ## ⚠️ TODO — verify before trusting P2A training

@@ -9,10 +9,10 @@
 #
 # Usage:
 #   # Baseline (no P2A):
-#   bash src/p2a/train_p2a.sh
+#   bash src/scripts/train_p2a.sh
 #
 #   # With P2A:
-#   P2A_BONUS_MAP_DIR=/path/to/bonus_maps P2A_M_MAX=3.0 bash src/p2a/train_p2a.sh
+#   P2A_BONUS_MAP_DIR=/path/to/bonus_maps P2A_M_MAX=3.0 bash src/scripts/train_p2a.sh
 set -xeuo pipefail
 
 SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -57,7 +57,7 @@ overlong_buffer_len=$((1024 * 4))
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
-loss_mode=${P2A_LOSS_MODE:-vanilla}
+loss_mode=${P2A_LOSS_MODE:-gspo}   # match the uni-agent example; override with P2A_LOSS_MODE
 
 temperature=1.0
 top_p=1.0
