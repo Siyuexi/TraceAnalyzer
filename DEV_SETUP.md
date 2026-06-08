@@ -7,17 +7,13 @@ sourced from verl itself** — not hand-copied. `[tool.uv.sources]` installs the
 
 | install | what | runs on |
 |---------|------|---------|
-| `uv pip install -e .`          | core: ARL runtime + data build + precompute + `uni-agent` | **CPU** |
-| `uv pip install -e '.[train]'` | + `verl` (its framework deps: accelerate/ray/tensordict/numpy<2/…) | CPU (smoke) / GPU |
-| `uv pip install -e '.[train,gpu]'` | + verl's GPU extras (`verl[vllm,gpu,geo,mcore,math]`) | **GPU only** |
+| `uv sync --locked` | core: ARL runtime + data build + precompute + `uni-agent` + `r2e-gym` | **CPU** |
+| `uv sync --locked --extra train` | + `verl` (its framework deps: accelerate/ray/tensordict/numpy<2/...) | CPU (smoke) / GPU |
+| `uv sync --locked --extra train --extra gpu` | + verl's GPU extras (`verl[vllm,gpu,geo,mcore,math]`) | **GPU only** |
 
 `uni-agent` declares zero deps; `verl` is the source of truth for the framework (base +
-GPU). The only thing neither covers is **`r2e-gym`** (ParsedCommit for `build_data r2e`):
-a git package pinning `datasets==2.19`, installed `--no-deps`:
-
-```bash
-uv pip install --no-deps git+https://github.com/R2E-Gym/R2E-Gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735
-```
+GPU). `r2e-gym` is a pinned Git source in `pyproject.toml`; uv metadata override keeps
+it no-deps so its upstream `datasets==2.19` pin does not override this repo's data stack.
 
 `pyproject.toml` is **deps-only** (`[tool.setuptools] packages = []`): `p2a/`, `env/`,
 `scripts/` stay importable via `PYTHONPATH=uni-agent/verl:uni-agent:.` (as the launchers set).
@@ -37,8 +33,7 @@ bash scripts/check_deps_cpu.sh --train  # + verl framework (heavy; downgrades nu
 ## GPU (training)
 ```bash
 cd src
-uv pip install -e '.[train,gpu]'
-uv pip install --no-deps git+https://github.com/R2E-Gym/R2E-Gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735
+uv sync --locked --extra train --extra gpu
 ```
 GPU pins (vllm 0.8.5–0.12.0, flash-attn, torchvision, mbridge for Megatron, …) all come
 from verl's own `extras_require`. vllm/flash-attn need a CUDA toolchain on the node.
