@@ -1,12 +1,9 @@
 """Repo-specific startup fixups + test-setup normalization for R2E reproduction.
 
-Canonical, self-contained fixup adapter. The per-repo fixup commands in
-``_startup_fixups.json`` are a **faithful, behavior-equivalent port** of the old
-``rllm`` ``utils/p2a/test_startup_fixups.apply_test_startup_fixups`` — generated
-by running that exact code's command builders, then baked to data so there is no
-runtime dependency on the retired ``src-backup`` tree. Do NOT trim entries: the
-migration goal is equivalence, not redesign. Any future removal needs a separate
-ablation proving the full gate is unchanged (Claude+Codex, 2026-06-05).
+Canonical, self-contained fixup adapter. The per-repo fixup commands live as data
+in ``config/startup_fixups.json`` (no runtime dependency on any external tree). Do
+NOT trim entries — they are required for faithful R2E reproduction; removing one
+needs a full-gate ablation proving classification is unchanged.
 
 Runs AFTER checkout to the buggy commit and BEFORE P2A instrumentation/test, so
 the instrumented + tested source is the fixed-up source. Consumed identically by

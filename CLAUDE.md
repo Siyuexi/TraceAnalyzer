@@ -55,5 +55,10 @@ proving P2A works on the Uni-Agent tool set and actually captures actions
 ## Reminders
 
 - Every Python invocation inside `src/` uses `uv run` (pinned `uv.lock`).
+- **Comments describe the present design, not the code's history.** Do NOT write
+  changelog/defensive comments ("previously did X, it was a bug, changed to Y",
+  "reverted the … switch", dated attributions, PR/issue numbers as narrative). Git
+  log is the history; the code is not your history book. Keep present-tense WHY
+  comments; delete or rewrite the rest.
 - Migration validated on a 26-case stratified sample: dynamic signal (standard/direct)
   reproduces the old report 8/8; full case_type ~24/26 (residual = non-dynamic edges).
