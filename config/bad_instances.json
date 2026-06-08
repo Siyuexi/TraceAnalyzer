@@ -12,6 +12,12 @@
   },
   "skip": [
     {
+      "id": "aiohttp__216e082807",
+      "repo": "aiohttp",
+      "reason": "all_pass_buggy_version_passes",
+      "source": "report_2026-06-08_ws404fix"
+    },
+    {
       "id": "aiohttp__2e4b0337e1",
       "repo": "aiohttp",
       "reason": "unresolved_no_trace_no_pre_entry_evidence",
@@ -20,6 +26,12 @@
       "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
       "skip_training": true,
       "skip_bonus": true
+    },
+    {
+      "id": "aiohttp__42d30d52b7",
+      "repo": "aiohttp",
+      "reason": "all_pass_buggy_version_passes",
+      "source": "report_2026-06-08_ws404fix"
     },
     {
       "id": "aiohttp__8f881a7ad8",
@@ -42,21 +54,29 @@
       "skip_bonus": true
     },
     {
+      "id": "aiohttp__ba9b33e63a",
+      "repo": "aiohttp",
+      "reason": "all_pass_buggy_version_passes",
+      "source": "report_2026-06-08_ws404fix"
+    },
+    {
+      "id": "aiohttp__dfaafac078",
+      "repo": "aiohttp",
+      "reason": "all_pass_buggy_version_passes",
+      "source": "report_2026-06-08_ws404fix"
+    },
+    {
+      "id": "aiohttp__ee87a049be",
+      "repo": "aiohttp",
+      "reason": "all_pass_buggy_version_passes",
+      "source": "report_2026-06-08_ws404fix"
+    },
+    {
       "id": "coveragepy__25311c6caa",
       "repo": "coveragepy",
       "reason": "unresolved_no_trace_no_pre_entry_evidence",
       "source": "report_2026-06-05",
       "report_id": "coveragepy__25311c6c",
-      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
-      "skip_training": true,
-      "skip_bonus": true
-    },
-    {
-      "id": "coveragepy__80bfea74c1",
-      "repo": "coveragepy",
-      "reason": "unresolved_no_trace_no_pre_entry_evidence",
-      "source": "report_2026-06-05",
-      "report_id": "coveragepy__80bfea74",
       "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
       "skip_training": true,
       "skip_bonus": true
@@ -207,16 +227,6 @@
       "reason": "unresolved_no_trace_no_pre_entry_evidence",
       "source": "report_2026-06-05",
       "report_id": "orange3__3cb2f093",
-      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
-      "skip_training": true,
-      "skip_bonus": true
-    },
-    {
-      "id": "orange3__406db69bf0",
-      "repo": "orange3",
-      "reason": "unresolved_class_level_no_attribute_evidence",
-      "source": "report_2026-06-05",
-      "report_id": "orange3__406db69b",
       "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
       "skip_training": true,
       "skip_bonus": true
@@ -407,16 +417,6 @@
       "reason": "unresolved_no_trace_no_pre_entry_evidence",
       "source": "report_2026-06-05",
       "report_id": "orange3__f813020a",
-      "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
-      "skip_training": true,
-      "skip_bonus": true
-    },
-    {
-      "id": "orange3__f961edaeed",
-      "repo": "orange3",
-      "reason": "unresolved_startup_fixup_failed",
-      "source": "report_2026-06-05",
-      "report_id": "orange3__f961edae",
       "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
       "skip_training": true,
       "skip_bonus": true
