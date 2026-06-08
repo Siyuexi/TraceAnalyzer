@@ -10,6 +10,13 @@ Everything is **self-contained**: data comes from HuggingFace, images from the
 pair-diag mirror of the original R2E images. There is **no dependency on the old
 `src-backup` fork**.
 
+> **ARL is the sandbox, not a "remote".** The `arl-env` SDK connects directly to the
+> ARL Gateway (`ARL_GATEWAY_URL`) to boot a per-instance container sandbox where tests
+> and P2A instrumentation run (bonus-map precompute, training rollouts); it is reachable
+> directly from CPU hosts. This is separate from VRC's `remote` facility, which targets
+> the **GPU server** for command debugging — ARL gateway reachability is independent of
+> `vrc remote`.
+
 Default HuggingFace assets are shared across sibling projects:
 
 | Asset | Default location from `src/` | Override |
