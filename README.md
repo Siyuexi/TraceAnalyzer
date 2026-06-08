@@ -38,7 +38,11 @@ src/
 
 ```bash
 # 1. Build R2E training data from HuggingFace (full + skip-filtered .train.parquet)
-DEPLOYMENT=vefaas PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
+#    NOTE: this does NOT use vefaas. Compute backend is ARL (env/agent_config_arl.yaml)
+#    and r2e images are pair-diag. PYTHONPATH includes uni-agent/examples/data_preprocess
+#    only so build_data.py can reuse its prompt/schema CONSTANTS by import; the script
+#    sets DEPLOYMENT internally just to satisfy that import. No vefaas API is called.
+PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py r2e --out $DATA/r2e_gym_subset_p2a.parquet
 #   -> r2e_gym_subset_p2a.parquet         (full, for bonus-map precompute)
 #   -> r2e_gym_subset_p2a.train.parquet   (bad cases excluded, for training/eval)
@@ -49,7 +53,7 @@ PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl ARL_GATEWAY_URL=$ARL \
     $DATA/r2e_gym_subset_p2a.parquet --output_dir $BONUS --mode dynamic --n_parallel 64
 
 # 3. Build the HARD validation subset (cheap eval; full SWE-bench-Verified is too slow)
-DEPLOYMENT=vefaas PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
+PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py swebench-hard --out $DATA/swe_bench_verified_hard.parquet
 
 # 4. Train.  Baseline (no P2A): leave P2A_BONUS_MAP_DIR unset.  P2A: set it.

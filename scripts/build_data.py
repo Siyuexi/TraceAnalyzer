@@ -9,7 +9,7 @@ Each sources from HuggingFace and reuses Uni-Agent's schema/prompt constants by
 import (never copied). No dependency on the retired src-backup fork.
 
 Usage (from src/, HF reachable):
-  DEPLOYMENT=vefaas PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
+  PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
     uv run python scripts/build_data.py r2e          --out <path>/r2e_gym_subset_p2a.parquet
     uv run python scripts/build_data.py swebench-hard --out <path>/swe_bench_verified_hard.parquet
     uv run python scripts/build_data.py skip-list     --gate <gate.jsonl> [--gate ...]
@@ -19,11 +19,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import sys
 from pathlib import Path
 
 import pandas as pd
+
+# Uni-Agent's examples/data_preprocess modules run `os.getenv("DEPLOYMENT", "vefaas")`
+# at IMPORT time and reject unknown values. We import only their prompt / post-setup /
+# schema CONSTANTS (and swebench's get_image_name), never their vefaas runtime — so this
+# default merely lets those imports succeed. It does NOT couple the pipeline to vefaas:
+# the compute backend is ARL (env/agent_config_arl.yaml) and r2e images are pair-diag.
+# No vefaas API is called at build time. So `DEPLOYMENT` is no longer in the run command.
+os.environ.setdefault("DEPLOYMENT", "vefaas")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/ on path
 
