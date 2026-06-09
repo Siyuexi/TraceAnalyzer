@@ -15,9 +15,10 @@ Classification decision tree (evaluated top-to-bottom, first match wins):
       signature_mismatch – F2P call fails before entering the callable body
 
     Dynamic layer (instrument → run tests → parse traces):
+      instrumentation_failed – instrumentation produced no instrumented callable (error=True)
+      all_pass       – buggy F2P run exited cleanly before trace-volume classification (error=True)
       no_trace       – 0 traces captured after instrumentation (error=True)
       no_gt          – traces exist but none contain a GT callable (error=True)
-      all_pass       – GT traces exist but all tests pass on buggy code (error=True)
       no_f2p         – GT traces exist, tests fail, but F2P filter removed all (error=True)
       standard       – F2P→GT call chain with intermediate nodes (traceable=True)
       direct         – F2P→GT call chain, test calls GT directly (traceable=True)
@@ -931,6 +932,19 @@ def _no_trace_reason_code(test_exit: int | None, capture_diag: dict | None = Non
     return "no_trace"
 
 
+def _all_pass_reason_code(
+    test_exit: int | None,
+    capture_diag: dict | None = None,
+    *,
+    swebench_f2p_collection_missing: bool = False,
+) -> str | None:
+    if test_exit != 0:
+        return None
+    if _capture_failed(capture_diag) or swebench_f2p_collection_missing:
+        return None
+    return "buggy_version_passes"
+
+
 # ---------------------------------------------------------------------------
 # Static bonus map
 # ---------------------------------------------------------------------------
@@ -1008,7 +1022,7 @@ def compute_dynamic_bonus_map(
 
     Implements the decision tree:
       1. newly_created / no_callable  (static layer)
-      2. no_trace → no_gt → all_pass / no_f2p → standard / direct  (dynamic layer)
+      2. instrumentation_failed → all_pass → no_trace → no_gt → no_f2p → standard / direct
     """
     from p2a.test_setup import parse_fixups, startup_fixup_command
     from p2a.trace import (
@@ -1102,10 +1116,10 @@ def compute_dynamic_bonus_map(
         _debug_progress(instance_id, "instrument")
         instrumented_callables = instrument_sandbox(env, all_modified)
         if not instrumented_callables:
-            print(f"  [{instance_id}] static_fallback: instrumentation produced 0 callables")
+            print(f"  [{instance_id}] instrumentation_failed: instrumentation produced 0 callables")
             return _make_result(
                 instance_id,
-                "static_fallback",
+                "instrumentation_failed",
                 all_modified,
                 newly_created,
                 error=True,
@@ -1227,6 +1241,23 @@ def compute_dynamic_bonus_map(
             )
         )
 
+        all_pass_reason = _all_pass_reason_code(
+            test_exit,
+            capture_diag,
+            swebench_f2p_collection_missing=swebench_f2p_collection_missing,
+        )
+        if all_pass_reason:
+            print(f"  [{instance_id}] all_pass: buggy F2P run exited cleanly. test_exit={test_exit}")
+            return _make_result(
+                instance_id,
+                "all_pass",
+                all_modified,
+                newly_created,
+                error=True,
+                reason_code=all_pass_reason,
+                diagnostics=common_diag,
+            )
+
         if parsed_trace_count == 0:
             import_targets = _detect_import_targets(env, all_modified)
             common_diag["import_targets"] = import_targets
@@ -1265,17 +1296,6 @@ def compute_dynamic_bonus_map(
                     diagnostics=common_diag,
                 )
             no_trace_reason = _no_trace_reason_code(test_exit, capture_diag)
-            if test_exit == 0 and not _capture_failed(capture_diag):
-                print(f"  [{instance_id}] all_pass: tests passed and 0 trace entries. instrumented={len(instrumented_callables)}")
-                return _make_result(
-                    instance_id,
-                    "all_pass",
-                    all_modified,
-                    newly_created,
-                    error=True,
-                    reason_code="buggy_version_passes_no_trace",
-                    diagnostics=common_diag,
-                )
             print(f"  [{instance_id}] no_trace: 0 trace entries. test_exit={test_exit}, instrumented={len(instrumented_callables)}")
             return _make_result(
                 instance_id,
@@ -1301,7 +1321,7 @@ def compute_dynamic_bonus_map(
                 diagnostics=common_diag,
             )
 
-        # ── Decision node: NO_F2P / ALL_PASS ──────────────────────────
+        # ── Decision node: NO_F2P ────────────────────────────────────
         f2p_test_funcs = _get_f2p_test_funcs(task, raw_output, env.swebench_verified)
 
         if f2p_test_funcs is None:
@@ -1312,8 +1332,8 @@ def compute_dynamic_bonus_map(
                 case_type = "no_f2p"
                 reason_code = "f2p_collection_missing"
             else:
-                case_type = "all_pass" if test_exit == 0 else "no_f2p"
-                reason_code = "buggy_version_passes" if test_exit == 0 else "f2p_parse_failed"
+                case_type = "no_f2p"
+                reason_code = "f2p_parse_failed"
             print(f"  [{instance_id}] {case_type}: f2p_test_funcs=None (parse failed). Dropping all {len(raw_traces)} traces. test_exit={test_exit}")
             parse_diag.update(
                 _write_trace_sidecar(
@@ -1339,24 +1359,22 @@ def compute_dynamic_bonus_map(
             )
 
         if len(f2p_test_funcs) == 0:
-            # Tests parsed OK but no failing tests were identified.  This is
-            # only a true all_pass if the buggy test run also exited cleanly.
-            all_pass_diag = dict(common_diag)
-            all_pass_diag["f2p_test_funcs"] = []
+            no_f2p_diag = dict(common_diag)
+            no_f2p_diag["f2p_test_funcs"] = []
             if test_exit == 0 and swebench_f2p_collection_missing:
                 case_type = "no_f2p"
                 reason_code = "f2p_collection_missing"
             else:
-                case_type = "all_pass" if test_exit == 0 else "no_f2p"
-                reason_code = "buggy_version_passes" if test_exit == 0 else "test_collection_error_no_failed_nodeids"
+                case_type = "no_f2p"
+                reason_code = "test_collection_error_no_failed_nodeids"
             print(f"  [{instance_id}] {case_type}: 0 parsed test failures. test_exit={test_exit}")
-            all_pass_diag.update(
+            no_f2p_diag.update(
                 _write_trace_sidecar(
                     instance_id=instance_id,
                     sidecar_dir=trace_sidecar_dir,
                     raw_traces=raw_traces_all,
                     raw_gt_traces=raw_traces,
-                    diagnostics=all_pass_diag,
+                    diagnostics=no_f2p_diag,
                     stdout=stdout,
                     stderr=stderr,
                     max_sidecar_traces=max_sidecar_traces,
@@ -1370,7 +1388,7 @@ def compute_dynamic_bonus_map(
                 newly_created,
                 error=True,
                 reason_code=reason_code,
-                diagnostics=all_pass_diag,
+                diagnostics=no_f2p_diag,
             )
 
         f2p_traces = _filter_traces_to_f2p(raw_traces, f2p_test_funcs)
@@ -1731,9 +1749,9 @@ def main():
     print(f"\nuntraceable/        {total - traceable:5d}  ({100 * (total - traceable) / total:.1f}%)")
     print(f"  newly_created      {case_counts['newly_created']:5d}")
     print(f"  no_callable        {case_counts['no_callable']:5d}")
-    if case_counts["static"] or case_counts["static_fallback"]:
+    if case_counts["static"] or case_counts["instrumentation_failed"]:
         print(f"  static             {case_counts['static']:5d}")
-        print(f"  static_fallback    {case_counts['static_fallback']:5d}")
+        print(f"  instrumentation_failed {case_counts['instrumentation_failed']:5d}")
     if case_counts["signature_mismatch"]:
         print(f"  signature_mismatch {case_counts['signature_mismatch']:5d}")
     print(f"  all_pass  (error)  {case_counts['all_pass']:5d}")
