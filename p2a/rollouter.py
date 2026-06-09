@@ -184,4 +184,4 @@ def create_p2a_rollouter_cls(base_rollouter_cls):
                 metric_dict["val-p2a/error"] = 1.0
             return metric_dict
 
-    return ray.remote(num_cpus=10)(P2AFullyAsyncRollouter)
+    return ray.remote(num_cpus=10, max_concurrency=100)(P2AFullyAsyncRollouter)
