@@ -5,7 +5,8 @@ Usage:
     python3 -m p2a.main --config-name='fully_async_ppo_megatron_trainer.yaml' ...
 
 The ONLY difference from the upstream entry point: _create_trainer() uses
-P2AFullyAsyncTrainer instead of FullyAsyncTrainer.
+P2AFullyAsyncTrainer instead of FullyAsyncTrainer, and _create_rollouter()
+uses P2AFullyAsyncRollouter for optional validation process metrics.
 
 When P2A_BONUS_MAP_DIR is not set, the trainer runs in vanilla mode
 (no advantage reshaping), so this entry point works for baseline too.
@@ -15,18 +16,39 @@ import hydra
 import ray
 
 from verl.experimental.fully_async_policy.fully_async_main import FullyAsyncTaskRunner as _BaseTaskRunner
+from verl.experimental.fully_async_policy.fully_async_rollouter import FullyAsyncRollouter
 from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncTrainer
 from verl.experimental.separation.utils import create_resource_pool_manager
 from verl.trainer.ppo.utils import Role
 
+from p2a.rollouter import create_p2a_rollouter_cls
 from p2a.trainer import create_p2a_trainer_cls
 
 P2AFullyAsyncTrainer = create_p2a_trainer_cls(FullyAsyncTrainer)
+P2AFullyAsyncRollouter = create_p2a_rollouter_cls(FullyAsyncRollouter)
 _BaseTaskRunnerClass = getattr(getattr(_BaseTaskRunner, "__ray_metadata__", None), "modified_class", _BaseTaskRunner)
 
 
 @ray.remote(num_cpus=1)
 class P2ATaskRunner(_BaseTaskRunnerClass):
+    def _create_rollouter(self, config) -> None:
+        print("[P2A MAIN] Creating P2AFullyAsyncRollouter...")
+        rollouter = P2AFullyAsyncRollouter.remote(
+            config=config,
+            tokenizer=self.components["tokenizer"],
+            role_worker_mapping=None,
+            resource_pool_manager=create_resource_pool_manager(config, roles=[Role.Rollout]),
+            ray_worker_group_cls=self.components["ray_worker_group_cls"],
+            processor=self.components["processor"],
+            device_name=config.trainer.device,
+        )
+
+        ray.get(rollouter.init_workers.remote())
+        ray.get(rollouter.set_max_required_samples.remote())
+
+        self.components["rollouter"] = rollouter
+        print("[P2A MAIN] P2AFullyAsyncRollouter created and initialized successfully")
+
     def _create_trainer(self, config) -> None:
         print("[P2A MAIN] Creating P2AFullyAsyncTrainer...")
         trainer_role_mapping = {

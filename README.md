@@ -106,7 +106,7 @@ These are knobs you set; the repo does not pin them:
 | Train / val data | `TRAIN_FILE` / `TEST_FILE` env vars (point at the parquets built above) |
 | GPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (e.g. 4×8 H20 → `NNODES=4`, `NGPUS_PER_NODE=8`) |
 | Bonus maps (read + write) | `P2A_BONUS_MAP_DIR` — one dir for both precompute output and training input; default `../../p2a/bonus_maps`. Training treats it as the P2A on/off switch (unset = baseline). `P2A_M_MAX` sets strength. |
-| Eval fault-localization diagnostics | `P2A_EVAL_BONUS_MAP_DIR`, `P2A_EVAL_BONUS_N_PARALLEL`, `P2A_EVAL_BONUS_LIMIT`, `P2A_EVAL_BONUS_OFFSET` |
+| Eval fault-localization diagnostics | `P2A_EVAL_BONUS_MAP_DIR`, `P2A_EVAL_NEAR_THRESHOLD`, `P2A_EVAL_DETAILS_DIR`, `P2A_EVAL_BONUS_N_PARALLEL`, `P2A_EVAL_BONUS_LIMIT`, `P2A_EVAL_BONUS_OFFSET` |
 | ARL gateway | `ARL_GATEWAY_URL` |
 | Hard-subset criterion | `--difficulties` flag of `build_data.py swebench-hard` (default = the `1-4 hours` / `>4 hours` difficulty set) |
 | R2E bad-case policy | `config/bad_instances.json` (pair-diag ARL gate evidence) |
@@ -135,6 +135,13 @@ reference for validation rollouts.
 | `near_hit_rate_over_call_graphs` | Fraction whose best read distance is `<= --near-threshold` (default `0.5`). |
 | `avg_min_distance_on_hits` | Lower is better; `0` means the model read the edited callable. |
 | `avg_best_positive_multiplier_on_hits` | The diagnostic P2A multiplier implied by the best read distance. |
+
+For live training dashboards, set `P2A_EVAL_BONUS_MAP_DIR` when launching
+`scripts/train_p2a.sh`.  The local `P2AFullyAsyncRollouter` keeps the validation
+path otherwise unchanged, scores validation rollouts against those eval maps,
+and logs the same aggregate signals under `val-p2a/<data_source>/...` at each
+validation step.  `P2A_EVAL_DETAILS_DIR` optionally writes per-case JSONL files
+named by validation step for debugging individual instances.
 
 Current SWE-bench Verified eval-map sanity check, after the targeted F2P,
 trace-capture, unittest-description F2P, zero-test runner, and F2P collection
