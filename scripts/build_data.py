@@ -38,6 +38,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/ on path
 MIRROR = "pair-diag-cn-guangzhou.cr.volces.com/code"
 HARD_DIFFICULTIES = {"1-4 hours", ">4 hours"}
 CONFIG = Path(__file__).resolve().parents[1] / "config" / "bad_instances.json"
+R2E_DATA_SOURCE = "r2e-gym-subset"
+SWEBENCH_VERIFIED_DATA_SOURCE = "swebench-verified"
+SWEBENCH_HARD_DATA_SOURCE = "swebench-hard"
 
 
 # ── r2e ───────────────────────────────────────────────────────────────────────
@@ -69,17 +72,24 @@ def cmd_r2e(args) -> int:
         rel = json.dumps(list(relevant_files)) if relevant_files is not None else None
         rel_hit += rel is not None
         rel_miss += rel is None
+        data_source = R2E_DATA_SOURCE
+        tools_kwargs = {
+            "env": {
+                "deployment": {"image": f"{MIRROR}/{repo}_final:{fixed}"},
+                "post_setup_cmd": POST_SETUP_CMD.format(base_commit=shlex.quote(buggy)),
+            },
+            "reward": {"name": "r2e_gym", "metadata": md},
+        }
         rows.append({
             "prompt": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": USER_PROMPT.format(problem_statement=ex["problem_statement"])},
             ],
+            "data_source": data_source,
+            "instance_id": iid,
             "agent_name": "swe_agent",
-            "extra_info": {"tools_kwargs": {
-                "env": {"deployment": {"image": f"{MIRROR}/{repo}_final:{fixed}"},
-                        "post_setup_cmd": POST_SETUP_CMD.format(base_commit=shlex.quote(buggy))},
-                "reward": {"name": "r2e_gym", "metadata": md},
-            }},
+            "reward_model": {"ground_truth": md},
+            "extra_info": {"data_source": data_source, "instance_id": iid, "tools_kwargs": tools_kwargs},
             "parsed_commit_content": pc_json,   # flat top-level (avoids nested-chunk read error)
             "relevant_files": rel,              # JSON string; normalize_task decodes it
         })
@@ -115,23 +125,31 @@ def cmd_swebench(args) -> int:
     difficulty = {ex["instance_id"]: ex.get("difficulty")
                   for ex in load_shared_dataset("princeton-nlp/SWE-bench_Verified", split="test")}
 
+    data_source = SWEBENCH_VERIFIED_DATA_SOURCE if want is None else SWEBENCH_HARD_DATA_SOURCE
     rows, total = [], 0
     for ex in load_shared_dataset("R2E-Gym/SWE-Bench-Verified", split="test"):
         total += 1
         iid, d = ex["instance_id"], difficulty.get(ex["instance_id"])
         if want is not None and d not in want:
             continue
+        metadata = {**ex, "difficulty": d}
+        tools_kwargs = {
+            "env": {
+                "deployment": {"image": f"{MIRROR}/swebench-verified:sweb.eval.x86_64.{iid}"},
+                "post_setup_cmd": reset(ex["base_commit"]),
+            },
+            "reward": {"name": "swe_bench", "metadata": metadata},
+        }
         rows.append({
             "prompt": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": USER_PROMPT.format(problem_statement=ex["problem_statement"])},
             ],
+            "data_source": data_source,
+            "instance_id": iid,
             "agent_name": "swe_agent",
-            "extra_info": {"tools_kwargs": {
-                "env": {"deployment": {"image": f"{MIRROR}/swebench-verified:sweb.eval.x86_64.{iid}"},
-                        "post_setup_cmd": reset(ex["base_commit"])},
-                "reward": {"name": "swe_bench", "metadata": {**ex, "difficulty": d}},
-            }},
+            "reward_model": {"ground_truth": metadata},
+            "extra_info": {"data_source": data_source, "instance_id": iid, "tools_kwargs": tools_kwargs},
         })
     pd.DataFrame(rows).to_parquet(args.out, index=False)
     print(f"swebench {'full' if want is None else sorted(want)}: {len(rows)}/{total} -> {args.out}", flush=True)

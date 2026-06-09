@@ -4,7 +4,7 @@
 # Differences from vanilla Uni-Agent training:
 # 1. Uses `python3 -m p2a.main` instead of `python3 -m verl.experimental.fully_async_policy.fully_async_main`
 # 2. Passes P2A env vars: P2A_BONUS_MAP_DIR, P2A_M_MAX, P2A_TRACKING_MODE,
-#    P2A_EVAL_BONUS_MAP_DIR, P2A_EVAL_NEAR_THRESHOLD
+#    P2A_EVAL_BONUS_MAP_DIR, P2A_EVAL_NEAR_THRESHOLD, P2A_EVAL_DETAILS_DIR
 #
 # To run vanilla baseline (no P2A), simply unset P2A_BONUS_MAP_DIR.
 #

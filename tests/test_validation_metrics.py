@@ -80,3 +80,64 @@ def test_validation_records_from_extra_fields_and_metric_flattening(tmp_path):
     assert metrics["val-p2a/swebench/graph_hit_rate_over_call_graphs"] == 1.0
     assert metrics["val-p2a/swebench/ground_truth_hit_rate_over_call_graphs"] == 1.0
     assert metrics["val-p2a/swebench/avg_min_distance_on_hits"] == 0.0
+
+
+def test_validation_records_fall_back_to_extra_info_metadata(tmp_path):
+    bonus_dir = tmp_path / "bonus_maps"
+    bonus_dir.mkdir()
+    (bonus_dir / "django__1234567890.json").write_text(
+        json.dumps(
+            {
+                "instance_id": "django__1234567890",
+                "case_type": "standard",
+                "traceable": True,
+                "call_graph_nodes": {
+                    "django.core:target": {
+                        "file_path": "django/core.py",
+                        "start_line": 10,
+                        "end_line": 20,
+                        "normalized_distance": 0.0,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    batch = FakeBatch(
+        {
+            "uid": np.array(["rollout-1"], dtype=object),
+            "extra_info": np.array(
+                [
+                    {
+                        "data_source": "swebench-hard",
+                        "tools_kwargs": {
+                            "reward": {
+                                "metadata": {
+                                    "instance_id": "django__1234567890",
+                                }
+                            }
+                        },
+                    }
+                ],
+                dtype=object,
+            ),
+            "response_text": np.array(["cat /testbed/django/core.py"], dtype=object),
+        }
+    )
+
+    records = validation_records_from_batch(batch, output_texts=[""], scores=[0.0])
+    assert records[0]["instance_id"] == "django__1234567890"
+    assert records[0]["data_source"] == "swebench-hard"
+
+    metrics, details = compute_validation_p2a_metrics(
+        records,
+        bonus_map_dir=str(bonus_dir),
+        tracking_mode="view_and_bash",
+        near_threshold=0.5,
+        m_max=3.0,
+    )
+
+    assert details[0]["hit_call_graph"] is True
+    assert metrics["val-p2a/swebench-hard/bonus_map_coverage"] == 1.0
+    assert metrics["val-p2a/swebench-hard/graph_hit_rate_over_call_graphs"] == 1.0

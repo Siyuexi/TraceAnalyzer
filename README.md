@@ -86,22 +86,28 @@ PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
 PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py swebench-hard --out $DATA/swe_bench_verified_hard.parquet
 
-# 4. Optional diagnostics: eval-set bonus maps for fault-localization metrics
-#    (scoring eval rollouts only; never used for training reshape).
+# 4. Precompute eval-set bonus maps for live validation graph metrics.
+#    These maps score eval rollouts only; they are never used for training reshape.
 TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
   P2A_EVAL_BONUS_MAP_DIR=$DATA/eval_bonus_maps bash scripts/precompute_eval_bonus_maps.sh
-# Optional offline analysis for an already-dumped rollout file.  `summary-out`
-# is aggregate JSON; `details-out` is per-instance JSONL for debugging misses.
-# Pure training/evaluation does not read these files.  Live validation dashboards
-# instead use P2A_EVAL_BONUS_MAP_DIR and optionally P2A_EVAL_DETAILS_DIR.
+
+# Optional offline analysis for an already-dumped rollout file. These files are
+# post-hoc artifacts only: summary-out is aggregate JSON; details-out is
+# per-instance JSONL for debugging misses. Training/validation does not read
+# them. Live dashboards read P2A_EVAL_BONUS_MAP_DIR instead, and optionally write
+# per-validation-step details through P2A_EVAL_DETAILS_DIR.
 uv run python -m p2a.eval_fault_localization $ROLLOUT_JSONL \
   --bonus-map-dir $DATA/eval_bonus_maps \
   --summary-out $DATA/eval_faultloc_summary.json \
   --details-out $DATA/eval_faultloc_details.jsonl
 
-# 5. Train.  Baseline (no P2A): leave P2A_BONUS_MAP_DIR unset.  P2A: point it at the maps dir.
+# 5. Train. Baseline (no P2A): leave P2A_BONUS_MAP_DIR unset. P2A: point it at
+#    training maps. In both cases, P2A_EVAL_BONUS_MAP_DIR enables validation
+#    dashboard metrics for the 45 hard examples.
 TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
-  MODEL_PATH=$MODEL P2A_BONUS_MAP_DIR=../../p2a/bonus_maps P2A_M_MAX=3.0 bash scripts/train_p2a.sh
+  MODEL_PATH=$MODEL P2A_EVAL_BONUS_MAP_DIR=$DATA/eval_bonus_maps \
+  P2A_EVAL_DETAILS_DIR=$DATA/eval_details \
+  P2A_BONUS_MAP_DIR=../../p2a/bonus_maps P2A_M_MAX=3.0 bash scripts/train_p2a.sh
 ```
 
 ## What you configure yourself
@@ -145,11 +151,27 @@ reference for validation rollouts.
 | `avg_best_positive_multiplier_on_hits` | The diagnostic P2A multiplier implied by the best read distance. |
 
 For live training dashboards, set `P2A_EVAL_BONUS_MAP_DIR` when launching
-`scripts/train_p2a.sh`.  The local `P2AFullyAsyncRollouter` keeps the validation
-path otherwise unchanged, scores validation rollouts against those eval maps,
-and logs the same aggregate signals under `val-p2a/<data_source>/...` at each
-validation step.  `P2A_EVAL_DETAILS_DIR` optionally writes per-case JSONL files
-named by validation step for debugging individual instances.
+`scripts/train_p2a.sh`. The local `P2AFullyAsyncRollouter` is the dashboard
+wrapper: it keeps the validation path otherwise unchanged, scores validation
+rollouts against those eval maps, and returns the same aggregate signals to the
+trainer logger at each validation step. For the hard split built by this repo,
+the W&B/console keys are:
+
+```
+val-p2a/swebench-hard/bonus_map_coverage
+val-p2a/swebench-hard/call_graph_coverage
+val-p2a/swebench-hard/read_rate
+val-p2a/swebench-hard/graph_hit_rate_over_call_graphs
+val-p2a/swebench-hard/ground_truth_hit_rate_over_call_graphs
+val-p2a/swebench-hard/near_hit_rate_over_call_graphs
+val-p2a/swebench-hard/avg_min_distance_on_hits
+val-p2a/swebench-hard/avg_best_positive_multiplier_on_hits
+```
+
+`P2A_EVAL_DETAILS_DIR` optionally writes per-case JSONL files named by validation
+step for debugging individual instances. Those files are an auxiliary dump; the
+dashboard metrics above are returned directly from validation and do not depend
+on `summary-out` / `details-out` from the offline CLI.
 
 Current SWE-bench Verified eval-map sanity check, after the targeted F2P,
 trace-capture, unittest-description F2P, zero-test runner, and F2P collection
