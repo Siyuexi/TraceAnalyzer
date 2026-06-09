@@ -3,7 +3,8 @@
 #
 # Differences from vanilla Uni-Agent training:
 # 1. Uses `python3 -m p2a.main` instead of `python3 -m verl.experimental.fully_async_policy.fully_async_main`
-# 2. Passes P2A env vars: P2A_BONUS_MAP_DIR, P2A_M_MAX, P2A_TRACKING_MODE
+# 2. Passes P2A env vars: P2A_BONUS_MAP_DIR, P2A_M_MAX, P2A_TRACKING_MODE,
+#    P2A_EVAL_BONUS_MAP_DIR, P2A_EVAL_NEAR_THRESHOLD
 #
 # To run vanilla baseline (no P2A), simply unset P2A_BONUS_MAP_DIR.
 #
@@ -97,7 +98,7 @@ trigger_parameter_sync_step=4
 require_batches=1
 partial_rollout=True
 
-if [[ -n "${P2A_BONUS_MAP_DIR:-}" && -z "${UNI_AGENT_P2A_TRACE:-}" ]]; then
+if [[ -n "${P2A_BONUS_MAP_DIR:-}${P2A_EVAL_BONUS_MAP_DIR:-}" && -z "${UNI_AGENT_P2A_TRACE:-}" ]]; then
     export UNI_AGENT_P2A_TRACE=1
 fi
 
@@ -124,7 +125,15 @@ with open(path, "r", encoding="utf-8") as fh:
 
 text = re.sub(r'(^\s*PYTHONPATH:\s*).+$', r'\1"uni-agent/verl:uni-agent:."', text, flags=re.MULTILINE)
 
-for key in ("P2A_BONUS_MAP_DIR", "P2A_M_MAX", "P2A_TRACKING_MODE", "UNI_AGENT_P2A_TRACE"):
+for key in (
+    "P2A_BONUS_MAP_DIR",
+    "P2A_M_MAX",
+    "P2A_TRACKING_MODE",
+    "P2A_EVAL_BONUS_MAP_DIR",
+    "P2A_EVAL_NEAR_THRESHOLD",
+    "P2A_EVAL_DETAILS_DIR",
+    "UNI_AGENT_P2A_TRACE",
+):
     value = os.environ.get(key)
     if not value:
         continue
