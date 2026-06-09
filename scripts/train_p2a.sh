@@ -26,9 +26,14 @@ TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified_hard.
 RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/swe_agent/runtime_env_arl.yaml"}
 DEFAULT_AGENT_CONFIG_PATH="${RAY_DATA_HOME}/data/swe_agent/agent_config_arl.yaml"
 AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-"${DEFAULT_AGENT_CONFIG_PATH}"}
+UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT:-"${RAY_DATA_HOME}/uv_envs/p2a-train"}
+export UV_PROJECT_ENVIRONMENT
+UV_BIN=${UV_BIN:-"$(command -v uv)"}
+UV_RUN=("${UV_BIN}" run --locked)
+UV_TRAIN_RUN=("${UV_BIN}" run --locked --extra train --extra gpu)
 
 rollout_mode="async"
-rollout_name="sglang"
+rollout_name="vllm"
 
 # Uni-Agent's GSPO recipe keeps GRPO advantage estimation and switches the
 # actor policy loss to GSPO below.
@@ -62,10 +67,10 @@ val_top_k=-1
 use_dynamic_bsz=True
 offload=True
 gen_tp=4
-train_tp=2
+train_tp=4
 train_pp=1
-train_cp=1
-train_ep=1
+train_cp=4
+train_ep=8
 train_etp=1
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) / train_cp))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / train_cp))
@@ -75,9 +80,9 @@ optimizer_offload_fraction=1.0
 USE_MBRIDGE=True
 USE_DIST_CKPT=False
 
-NNODES_ROLLOUT=${NNODES_ROLLOUT:-1}
-NNODES_TRAIN=${NNODES_TRAIN:-1}
-NGPUS_PER_NODE=${NGPUS_PER_NODE:-4}
+NNODES_ROLLOUT=${NNODES_ROLLOUT:-4}
+NNODES_TRAIN=${NNODES_TRAIN:-4}
+NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 
 train_prompt_bsz=0
 n_resp_per_prompt=8
@@ -104,7 +109,7 @@ if [[ "${AGENT_CONFIG_PATH}" == "${DEFAULT_AGENT_CONFIG_PATH}" || ! -f "${AGENT_
     cp "${SRC_ROOT}/env/agent_config_arl.yaml" "${AGENT_CONFIG_PATH}"
 fi
 
-python3 - "${RUNTIME_ENV}" <<'PY'
+"${UV_RUN[@]}" python - "${RUNTIME_ENV}" <<'PY'
 import json
 import os
 import re
@@ -152,6 +157,7 @@ for key in (
     "P2A_EVAL_NEAR_THRESHOLD",
     "P2A_EVAL_DETAILS_DIR",
     "UNI_AGENT_P2A_TRACE",
+    "UV_PROJECT_ENVIRONMENT",
 ):
     value = os.environ.get(key)
     if not value:
@@ -172,8 +178,8 @@ PY
 
 # p2a.main wraps Uni-Agent's fully async trainer and stays vanilla when
 # P2A_BONUS_MAP_DIR is unset.
-ray job submit --no-wait --runtime-env $RUNTIME_ENV \
-    -- python3 -m p2a.main \
+"${UV_TRAIN_RUN[@]}" ray job submit --no-wait --runtime-env "${RUNTIME_ENV}" \
+    -- "${UV_TRAIN_RUN[@]}" python -m p2a.main \
     --config-name='fully_async_ppo_megatron_trainer.yaml' \
     hydra.searchpath=[pkg://verl.trainer.config] \
     data.train_files="${TRAIN_FILE}" \
@@ -226,9 +232,15 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     +actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.deallocate_pipeline_outputs=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.persist_layer_norm=True \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm=True \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type="alltoall" \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32 \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
+    actor_rollout_ref.actor.router_replay.mode="R3" \
+    actor_rollout_ref.rollout.enable_rollout_routing_replay=True \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
@@ -272,7 +284,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     trainer.logger=['console','wandb'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     trainer.save_freq=-1 \
     trainer.total_epochs=20 \
     trainer.resume_mode=auto \
