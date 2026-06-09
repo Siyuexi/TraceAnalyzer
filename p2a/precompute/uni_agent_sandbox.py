@@ -111,6 +111,21 @@ def _parsed_commit_content_dict(*sources: Any) -> dict[str, Any]:
     return {}
 
 
+def _old_file_contents_from_task(task: dict[str, Any]) -> dict[str, str]:
+    """Return R2E old source contents keyed by repo-relative path."""
+    metadata = extract_reward_metadata(task)
+    pcc = _parsed_commit_content_dict(task, metadata)
+    old_sources: dict[str, str] = {}
+    for fd in pcc.get("file_diffs", []) or []:
+        if not isinstance(fd, dict) or "old_file_content" not in fd:
+            continue
+        path = fd.get("header", {}).get("file", {}).get("path")
+        old_content = fd.get("old_file_content")
+        if isinstance(path, str) and path and isinstance(old_content, str):
+            old_sources[path] = old_content
+    return old_sources
+
+
 def infer_commit_ref(task: dict[str, Any], instance_id: str | None = None) -> str | None:
     metadata = extract_reward_metadata(task)
     # R2E stores the buggy ref as parsed_commit_content.old_commit_hash (= commit_hash^).
@@ -317,13 +332,42 @@ class UniAgentSandboxAdapter:
     def write_file(self, path: str | Path, content: str) -> None:
         self.agent_env.write_file(path, content)
 
+    def _materialize_old_file_contents(self, task: dict[str, Any]) -> dict[str, Any]:
+        old_sources = _old_file_contents_from_task(task)
+        if not old_sources:
+            return {
+                "buggy_source_materialized": False,
+                "buggy_materialize_source": None,
+                "buggy_materialized_files": [],
+            }
+
+        for rel_path, content in sorted(old_sources.items()):
+            abs_path = f"{self.repo_path}/{rel_path}"
+            self._execute_raw(f"mkdir -p {shlex.quote(str(Path(abs_path).parent))}", timeout=30)
+            self.write_file(abs_path, content)
+        return {
+            "buggy_source_materialized": True,
+            "buggy_materialize_source": "parsed_commit_content.old_file_content",
+            "buggy_materialized_files": sorted(old_sources),
+        }
+
     def checkout_buggy_commit(self, task: dict[str, Any], *, instance_id: str) -> dict[str, Any]:
         """Restore the buggy commit even when the image starts at a fixed HEAD."""
         commit_ref = infer_commit_ref(task, instance_id)
         if not commit_ref:
-            return {"buggy_checkout_ref": None, "buggy_checkout_exit": None, "buggy_checkout_skipped": True}
+            diag = {"buggy_checkout_ref": None, "buggy_checkout_exit": None, "buggy_checkout_skipped": True}
+            materialize_diag = self._materialize_old_file_contents(task)
+            diag.update(materialize_diag)
+            if materialize_diag.get("buggy_source_materialized"):
+                diag["sandbox_code_state"] = "old_sources_materialized"
+            return diag
 
         quoted_ref = shlex.quote(commit_ref)
+        expected, expected_err, expected_exit = self._execute_raw(
+            f"cd {self.repo_path} && git rev-parse --verify {quoted_ref}^{{commit}}",
+            timeout=30,
+        )
+        expected_commit = expected.strip().splitlines()[-1] if expected_exit == 0 and expected.strip() else None
         # PLAIN checkout only — never `--force` / `git reset --hard`. Those discard the image's
         # install-time worktree fixups (e.g. pandas setup.cfg without --strict-data-files, aiohttp
         # source-compat rewrites) and break test collection.
@@ -332,15 +376,35 @@ class UniAgentSandboxAdapter:
             "git rev-parse --is-inside-work-tree >/dev/null 2>&1 && "
             f"git checkout {quoted_ref}"
         )
-        output, _, exit_code = self._execute_raw(cmd, timeout=120)
-        head, _, head_exit = self._execute_raw(f"cd {self.repo_path} && git rev-parse --short=12 HEAD", timeout=30)
-        if exit_code != 0:
-            raise RuntimeError(f"buggy checkout failed for {instance_id} ({commit_ref}): {output}")
-        return {
+        output, stderr, exit_code = self._execute_raw(cmd, timeout=120)
+        head, _, head_exit = self._execute_raw(f"cd {self.repo_path} && git rev-parse HEAD", timeout=30)
+        actual_head = head.strip().splitlines()[-1] if head_exit == 0 and head.strip() else None
+        diag = {
             "buggy_checkout_ref": commit_ref,
             "buggy_checkout_exit": exit_code,
-            "buggy_checkout_head": head.strip() if head_exit == 0 else None,
+            "buggy_checkout_expected_head": expected_commit,
+            "buggy_checkout_expected_exit": expected_exit,
+            "buggy_checkout_expected_stderr": expected_err.strip()[-500:] if expected_exit != 0 else "",
+            "buggy_checkout_head": actual_head[:12] if actual_head else None,
+            "buggy_checkout_head_full": actual_head,
+            "buggy_checkout_stderr": stderr.strip()[-500:] if exit_code != 0 else "",
         }
+        if exit_code == 0 and expected_commit and actual_head == expected_commit:
+            diag["buggy_checkout_verified"] = True
+            diag["sandbox_code_state"] = "git_checkout_verified"
+            return diag
+
+        diag["buggy_checkout_verified"] = False
+        diag["buggy_checkout_stdout"] = output.strip()[-500:] if exit_code != 0 else ""
+        materialize_diag = self._materialize_old_file_contents(task)
+        diag.update(materialize_diag)
+        if materialize_diag.get("buggy_source_materialized"):
+            diag["sandbox_code_state"] = "old_sources_materialized"
+            return diag
+
+        diag["sandbox_code_state"] = "mismatch"
+        diag["sandbox_code_state_mismatch"] = True
+        return diag
 
 
 def create_uni_agent_sandbox(task: dict[str, Any], *, instance_id: str) -> UniAgentSandboxAdapter:

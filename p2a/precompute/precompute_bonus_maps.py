@@ -1057,6 +1057,16 @@ def compute_dynamic_bonus_map(
             _debug_progress(instance_id, "checkout_buggy")
             env_diag.update(env.checkout_buggy_commit(task, instance_id=instance_id))
             _debug_progress(instance_id, "checkout_done")
+            if env_diag.get("sandbox_code_state_mismatch"):
+                return _make_result(
+                    instance_id,
+                    "no_trace",
+                    all_modified,
+                    newly_created,
+                    error=True,
+                    reason_code="sandbox_code_state_mismatch",
+                    diagnostics=env_diag,
+                )
 
             # Repo startup fixups (source patches + dep pins) run AFTER buggy
             # checkout and BEFORE instrumentation, so the instrumented + tested

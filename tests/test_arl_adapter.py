@@ -214,6 +214,79 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertIn("PIP_CACHE_DIR", config["env_variables"])
         self.assertIn("ln -s /testbed/.venv", config["post_setup_cmd"])
 
+    def test_r2e_buggy_checkout_materializes_old_sources_on_head_mismatch(self) -> None:
+        from p2a.precompute.uni_agent_sandbox import UniAgentSandboxAdapter
+
+        class FakeSandbox(UniAgentSandboxAdapter):
+            repo_path = "/testbed"
+
+            def __init__(self):
+                self.writes = {}
+
+            def _execute_raw(self, command: str, timeout: int | float | None = None):
+                if "git rev-parse --verify" in command:
+                    return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", "", 0
+                if "git checkout" in command:
+                    return "", "", 0
+                if "git rev-parse HEAD" in command:
+                    return "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", "", 0
+                return "", "", 0
+
+            def write_file(self, path: str | Path, content: str) -> None:
+                self.writes[str(path)] = content
+
+        task = {
+            "base_commit": "abc123",
+            "parsed_commit_content": {
+                "file_diffs": [
+                    {
+                        "header": {"file": {"path": "pkg/demo.py"}},
+                        "old_file_content": "def demo():\n    return 'old'\n",
+                        "new_file_content": "def demo():\n    return 'new'\n",
+                    }
+                ]
+            },
+        }
+
+        sandbox = FakeSandbox()
+        diag = sandbox.checkout_buggy_commit(task, instance_id="demo__abc123")
+
+        self.assertFalse(diag["buggy_checkout_verified"])
+        self.assertEqual(diag["sandbox_code_state"], "old_sources_materialized")
+        self.assertTrue(diag["buggy_source_materialized"])
+        self.assertEqual(diag["buggy_materialized_files"], ["pkg/demo.py"])
+        self.assertEqual(sandbox.writes["/testbed/pkg/demo.py"], "def demo():\n    return 'old'\n")
+        self.assertNotIn("sandbox_code_state_mismatch", diag)
+
+    def test_r2e_buggy_checkout_reports_code_state_mismatch_without_fallback(self) -> None:
+        from p2a.precompute.uni_agent_sandbox import UniAgentSandboxAdapter
+
+        class FakeSandbox(UniAgentSandboxAdapter):
+            repo_path = "/testbed"
+
+            def __init__(self):
+                pass
+
+            def _execute_raw(self, command: str, timeout: int | float | None = None):
+                if "git rev-parse --verify" in command:
+                    return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n", "", 0
+                if "git checkout" in command:
+                    return "", "pathspec not found", 1
+                if "git rev-parse HEAD" in command:
+                    return "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n", "", 0
+                return "", "", 0
+
+            def write_file(self, path: str | Path, content: str) -> None:
+                raise AssertionError("no old sources should be written")
+
+        diag = FakeSandbox().checkout_buggy_commit({"base_commit": "abc123"}, instance_id="demo__abc123")
+
+        self.assertFalse(diag["buggy_checkout_verified"])
+        self.assertFalse(diag["buggy_source_materialized"])
+        self.assertTrue(diag["sandbox_code_state_mismatch"])
+        self.assertEqual(diag["sandbox_code_state"], "mismatch")
+        self.assertIn("pathspec not found", diag["buggy_checkout_stderr"])
+
     def test_swebench_prepare_uses_metadata_and_skips_scikit_editable_install(self) -> None:
         from p2a.precompute.precompute_bonus_maps import _prepare_swebench_test_script
 
