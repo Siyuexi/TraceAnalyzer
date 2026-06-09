@@ -33,7 +33,6 @@ location.
 ```
 src/
   config/                     # ALL json/yaml config lives here
-    audits/                    #   machine-readable audit artifacts for data/skip decisions
     startup_fixups.json       #   per-repo test-startup fixups (source patches + dep pins)
     bad_instances.json        #   R2E instances to exclude from training (skip-list)
   scripts/
