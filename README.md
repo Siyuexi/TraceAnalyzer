@@ -112,8 +112,10 @@ the cluster first, then point `RAY_API_SERVER_ADDRESS` at the Ray Jobs endpoint.
 The launcher runs both submission and the Ray driver through
 `uv run --locked --extra train --extra gpu`, so the job uses this repo's locked
 training environment instead of the system Python. It also defaults
-`UV_PYTHON=3.11` and `UV_PROJECT_ENVIRONMENT=$RAY_DATA_HOME/uv_envs/p2a-train`
-so repeated Ray submissions use a stable Python/uv environment.
+`UV_PYTHON=3.11`, `UV_PROJECT_ENVIRONMENT=$RAY_DATA_HOME/uv_envs/p2a-train`,
+`UV_CACHE_DIR=$RAY_DATA_HOME/uv_cache`, and `UV_HTTP_TIMEOUT=300` so repeated
+Ray submissions use a stable Python/uv environment and tolerate large wheel
+downloads.
 The launcher defaults to the Uni-Agent Qwen3 30B MoE 64-GPU shape. For a
 4-node x 8-GPU cluster, override it with this 32-GPU starter profile:
 

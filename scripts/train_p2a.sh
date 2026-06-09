@@ -30,6 +30,10 @@ UV_PYTHON=${UV_PYTHON:-3.11}
 export UV_PYTHON
 UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT:-"${RAY_DATA_HOME}/uv_envs/p2a-train"}
 export UV_PROJECT_ENVIRONMENT
+UV_CACHE_DIR=${UV_CACHE_DIR:-"${RAY_DATA_HOME}/uv_cache"}
+export UV_CACHE_DIR
+UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT:-300}
+export UV_HTTP_TIMEOUT
 UV_BIN=${UV_BIN:-"$(command -v uv)"}
 UV_RUN=("${UV_BIN}" run --locked)
 UV_TRAIN_RUN=("${UV_BIN}" run --locked --extra train --extra gpu)
@@ -159,6 +163,8 @@ for key in (
     "P2A_EVAL_NEAR_THRESHOLD",
     "P2A_EVAL_DETAILS_DIR",
     "UNI_AGENT_P2A_TRACE",
+    "UV_CACHE_DIR",
+    "UV_HTTP_TIMEOUT",
     "UV_PYTHON",
     "UV_PROJECT_ENVIRONMENT",
 ):
