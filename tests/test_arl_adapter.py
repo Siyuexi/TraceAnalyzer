@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 import os
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import unittest
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
@@ -210,6 +213,498 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertNotIn("command", deployment)
         self.assertIn("PIP_CACHE_DIR", config["env_variables"])
         self.assertIn("ln -s /testbed/.venv", config["post_setup_cmd"])
+
+    def test_swebench_prepare_uses_metadata_and_skips_scikit_editable_install(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import _prepare_swebench_test_script
+
+        class FakeEnv:
+            def write_file(self, path: str, content: str) -> None:
+                Path(path).write_text(content, encoding="utf-8")
+
+            def _run(self, command: str, timeout: int | float | None = None) -> tuple[str, str]:
+                if "python - <<'PY'" not in command:
+                    return "", ""
+                result = subprocess.run(command, shell=True, text=True, capture_output=True, check=False)
+                return result.stdout, result.stderr
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = str(Path(tmp) / "run_tests.sh")
+            diag = _prepare_swebench_test_script(
+                FakeEnv(),
+                {
+                    "repo": "scikit-learn/scikit-learn",
+                    "run_tests": "\n".join(
+                        [
+                            "#!/bin/bash",
+                            "python -m pip install -v --no-use-pep517 --no-build-isolation -e .",
+                            "pytest sklearn/tests",
+                        ]
+                    ),
+                },
+                script,
+            )
+
+            text = Path(script).read_text(encoding="utf-8")
+
+        self.assertEqual(diag["swebench_run_tests_source"], "metadata")
+        self.assertIn("changed=True", diag["swebench_test_script_patch_stdout"])
+        self.assertIn("skipped_editable=1", diag["swebench_test_script_patch_stdout"])
+        self.assertIn("skip editable install; sklearn=", text)
+        self.assertNotIn("pip install -v --no-use-pep517 --no-build-isolation -e .", text)
+
+    def test_swebench_prepare_adds_no_build_isolation_for_regular_editable_install(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import _prepare_swebench_test_script
+
+        class FakeEnv:
+            def write_file(self, path: str, content: str) -> None:
+                Path(path).write_text(content, encoding="utf-8")
+
+            def _run(self, command: str, timeout: int | float | None = None) -> tuple[str, str]:
+                if "python - <<'PY'" not in command:
+                    return "", ""
+                result = subprocess.run(command, shell=True, text=True, capture_output=True, check=False)
+                return result.stdout, result.stderr
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = str(Path(tmp) / "run_tests.sh")
+            diag = _prepare_swebench_test_script(
+                FakeEnv(),
+                {
+                    "repo": "django/django",
+                    "run_tests": "\n".join(
+                        [
+                            "#!/bin/bash",
+                            "python -m pip install -e .",
+                            "pytest tests",
+                        ]
+                    ),
+                },
+                script,
+            )
+
+            text = Path(script).read_text(encoding="utf-8")
+
+        self.assertIn("changed=True", diag["swebench_test_script_patch_stdout"])
+        self.assertIn("skipped_editable=0", diag["swebench_test_script_patch_stdout"])
+        self.assertIn("python -m pip install --no-build-isolation -e .", text)
+
+    def test_swebench_prepare_replaces_sphinx_tox_current_env(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import _prepare_swebench_test_script
+
+        class FakeEnv:
+            def write_file(self, path: str, content: str) -> None:
+                Path(path).write_text(content, encoding="utf-8")
+
+            def _run(self, command: str, timeout: int | float | None = None) -> tuple[str, str]:
+                if "python - <<'PY'" not in command:
+                    return "", ""
+                result = subprocess.run(command, shell=True, text=True, capture_output=True, check=False)
+                return result.stdout, result.stderr
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = str(Path(tmp) / "run_tests.sh")
+            diag = _prepare_swebench_test_script(
+                FakeEnv(),
+                {
+                    "repo": "sphinx-doc/sphinx",
+                    "run_tests": "\n".join(
+                        [
+                            "#!/bin/bash",
+                            "python -m pip install -e .[test]",
+                            "tox --current-env -epy39 -v -- tests/test_domain_cpp.py",
+                        ]
+                    ),
+                },
+                script,
+            )
+
+            text = Path(script).read_text(encoding="utf-8")
+
+        self.assertIn("replaced_tox=1", diag["swebench_test_script_patch_stdout"])
+        self.assertIn("python -m pytest -rA --color=no -vv tests/test_domain_cpp.py", text)
+        self.assertNotIn("tox --current-env", text)
+
+    def test_swebench_unittest_display_names_keep_django_module_selection(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import _normalize_test_func_name, _prepare_swebench_test_script
+
+        class FakeEnv:
+            def write_file(self, path: str, content: str) -> None:
+                Path(path).write_text(content, encoding="utf-8")
+
+            def _run(self, command: str, timeout: int | float | None = None) -> tuple[str, str]:
+                if "python - <<'PY'" not in command:
+                    return "", ""
+                result = subprocess.run(command, shell=True, text=True, capture_output=True, check=False)
+                return result.stdout, result.stderr
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = str(Path(tmp) / "run_tests.sh")
+            diag = _prepare_swebench_test_script(
+                FakeEnv(),
+                {
+                    "repo": "django/django",
+                    "FAIL_TO_PASS": (
+                        '["test_cull_delete_when_store_empty (cache.tests.DBCacheTests)", '
+                        '"test_zero_values (template_tests.filter_tests.test_floatformat.FunctionTests.test_zero_values)"]'
+                    ),
+                    "run_tests": "\n".join(
+                        [
+                            "#!/bin/bash",
+                            "python -m pip install -e .",
+                            "git checkout abc123 tests/runtests.py tests/deprecation/test_middleware_mixin.py",
+                            "./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 cache.tests",
+                        ]
+                    ),
+                },
+                script,
+            )
+
+            text = Path(script).read_text(encoding="utf-8")
+
+        self.assertEqual(
+            _normalize_test_func_name("test_cull_delete_when_store_empty (cache.tests.DBCacheTests)"),
+            "test_cull_delete_when_store_empty",
+        )
+        self.assertIn("cache.tests.DBCacheTests.test_cull_delete_when_store_empty", diag["swebench_f2p_django_labels"])
+        self.assertIn(
+            "template_tests.filter_tests.test_floatformat.FunctionTests.test_zero_values",
+            diag["swebench_f2p_django_labels"],
+        )
+        self.assertNotIn(
+            "template_tests.filter_tests.test_floatformat.FunctionTests.test_zero_values.test_zero_values",
+            diag["swebench_f2p_django_labels"],
+        )
+        self.assertIn("targeted_django=0", diag["swebench_test_script_patch_stdout"])
+        self.assertIn("git checkout abc123 tests/runtests.py tests/deprecation/test_middleware_mixin.py", text)
+        self.assertIn("./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 cache.tests", text)
+
+    def test_swebench_sympy_runner_keeps_file_level_selection(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import _prepare_swebench_test_script
+
+        class FakeEnv:
+            def write_file(self, path: str, content: str) -> None:
+                Path(path).write_text(content, encoding="utf-8")
+
+            def _run(self, command: str, timeout: int | float | None = None) -> tuple[str, str]:
+                if "python - <<'PY'" not in command:
+                    return "", ""
+                result = subprocess.run(command, shell=True, text=True, capture_output=True, check=False)
+                return result.stdout, result.stderr
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = str(Path(tmp) / "run_tests.sh")
+            diag = _prepare_swebench_test_script(
+                FakeEnv(),
+                {
+                    "repo": "sympy/sympy",
+                    "FAIL_TO_PASS": '["test_MatrixElement_printing", "test_MatrixSymbol_printing"]',
+                    "run_tests": "\n".join(
+                        [
+                            "#!/bin/bash",
+                            "python -m pip install -e .",
+                            "bin/test -C --verbose sympy/printing/tests/test_latex.py",
+                        ]
+                    ),
+                },
+                script,
+            )
+
+            text = Path(script).read_text(encoding="utf-8")
+
+        self.assertIn("targeted_sympy=0", diag["swebench_test_script_patch_stdout"])
+        self.assertIn("bin/test -C --verbose sympy/printing/tests/test_latex.py", text)
+        self.assertNotIn(" -k ", text)
+
+    def test_swebench_zero_tests_output_is_detected(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import _swebench_output_has_zero_tests
+
+        self.assertTrue(_swebench_output_has_zero_tests("tests finished: 0 passed, in 0.00 seconds"))
+        self.assertTrue(_swebench_output_has_zero_tests("no tests ran in 0.01s"))
+        self.assertFalse(_swebench_output_has_zero_tests("Ran 1 test in 0.007s\n\nOK"))
+
+    def test_trace_instrumentation_caches_tracer_after_future_imports(self) -> None:
+        from p2a.trace import instrument_source
+
+        source = (
+            '"""demo module"""\n'
+            "from __future__ import annotations\n"
+            "\n"
+            "def modify_sys_path():\n"
+            "    return 1\n"
+        )
+        instrumented = instrument_source(
+            source,
+            [
+                {
+                    "name": "modify_sys_path",
+                    "qualified_name": "modify_sys_path",
+                    "file_path": "pylint/__init__.py",
+                    "start_line": 4,
+                    "end_line": 5,
+                }
+            ],
+        )
+
+        compile(instrumented, "<instrumented>", "exec")
+        self.assertLess(
+            instrumented.index("from __future__ import annotations"),
+            instrumented.index("import _swe_fault_tracer as _p2a_ft"),
+        )
+        self.assertLess(
+            instrumented.index("import _swe_fault_tracer as _p2a_ft"),
+            instrumented.index("def modify_sys_path"),
+        )
+        self.assertIn('globals().get("_p2a_ft") or __import__("_swe_fault_tracer")', instrumented)
+
+    def test_swebench_f2p_failure_detection_uses_test_name_boundaries(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import (
+            _swebench_f2p_collection_observation,
+            _swebench_output_has_f2p_failure,
+        )
+
+        self.assertFalse(
+            _swebench_output_has_f2p_failure(
+                "tests/test_demo.py::test_foo_bar FAILED",
+                ["tests/test_demo.py::test_foo"],
+            )
+        )
+        self.assertTrue(
+            _swebench_output_has_f2p_failure(
+                "tests/test_demo.py::test_foo FAILED",
+                ["tests/test_demo.py::test_foo"],
+            )
+        )
+        self.assertTrue(
+            _swebench_output_has_f2p_failure(
+                "FAIL: test_edit_only (model_formsets.tests.ModelFormsetTest)",
+                ["test_edit_only (model_formsets.tests.ModelFormsetTest)"],
+            )
+        )
+        self.assertEqual(
+            _swebench_f2p_collection_observation(
+                "\n".join(
+                    [
+                        "+def test_foo():",
+                        "tests/test_demo.py::test_foo_bar PASSED",
+                        "tests/test_demo.py::test_foo PASSED",
+                    ]
+                ),
+                ["tests/test_demo.py::test_foo", "tests/test_demo.py::test_missing"],
+            ),
+            {
+                "observed": ["tests/test_demo.py::test_foo"],
+                "missing": ["tests/test_demo.py::test_missing"],
+            },
+        )
+
+    def test_swebench_description_f2p_maps_to_unittest_method(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import _get_f2p_test_funcs
+
+        raw_output = "\n".join(
+            [
+                "ERROR: test_loading_namespace_package (migrations.test_loader.LoaderTests)",
+                "Migration directories without an __init__.py file are loaded.",
+                "Traceback (most recent call last):",
+                "FAILED (errors=1)",
+            ]
+        )
+        funcs = _get_f2p_test_funcs(
+            {"FAIL_TO_PASS": json.dumps(["Migration directories without an __init__.py file are loaded."])},
+            raw_output,
+            swebench_verified=True,
+        )
+
+        self.assertEqual(funcs, {"test_loading_namespace_package"})
+
+    def test_swebench_exit_override_classifies_signature_mismatch(self) -> None:
+        from p2a.precompute import precompute_bonus_maps as bonus_maps
+
+        modified = [
+            {
+                "name": "demo",
+                "qualified_name": "demo",
+                "file_path": "pkg/demo.py",
+                "start_line": 10,
+                "end_line": 12,
+            }
+        ]
+
+        class FakeEnv:
+            swebench_verified = True
+            repo_path = "/testbed"
+            alt_path = "/root"
+
+            def start(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def checkout_buggy_commit(self, task, *, instance_id):
+                return {"buggy_checkout_ref": "abc123^", "buggy_checkout_exit": 0}
+
+            def _run(self, command: str, timeout: int | float | None = None):
+                return "", ""
+
+            def _execute_raw(self, command: str, timeout: int | float | None = None):
+                if "wc -l" in command:
+                    return "0\n", "", 0
+                return "", "", 0
+
+            def write_file(self, path: str, content: str) -> None:
+                pass
+
+        task = {
+            "instance_id": "django__django-1",
+            "repo": "django/django",
+            "patch": "diff --git a/pkg/demo.py b/pkg/demo.py\n",
+            "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_foo"]),
+            "extra_info": {
+                "tools_kwargs": {
+                    "reward": {"name": "swe_bench", "metadata": {}},
+                }
+            },
+        }
+        raw_output = "\n".join(
+            [
+                "tests/test_demo.py::test_foo FAILED",
+                "TypeError: demo() got an unexpected keyword argument 'value'",
+            ]
+        )
+
+        with (
+            patch.object(bonus_maps, "find_modified_callables_from_task", return_value=modified),
+            patch.object(bonus_maps, "find_newly_created_callables", return_value=[]),
+            patch.object(
+                bonus_maps,
+                "_prepare_swebench_test_script",
+                return_value={"swebench_test_script_patch_stdout": "targeted_pytest=1\n"},
+            ),
+            patch.object(
+                bonus_maps,
+                "_run_tests_with_file_capture",
+                return_value=(
+                    raw_output,
+                    "",
+                    0,
+                    {
+                        "stdout_read_exit": 0,
+                        "stderr_read_exit": 0,
+                        "exit_read_exit": 0,
+                        "wrapper_exit": 0,
+                        "exit_parse_failed": False,
+                        "all_three_read_failed": False,
+                        "trusted_test_exit": True,
+                    },
+                ),
+            ),
+            patch.object(
+                bonus_maps,
+                "_detect_import_targets",
+                return_value=[{"module": "pkg.demo", "matches_repo_path": True}],
+            ),
+            patch(
+                "p2a.precompute.uni_agent_sandbox.create_uni_agent_sandbox",
+                return_value=FakeEnv(),
+            ),
+            patch("p2a.trace.instrument_sandbox", return_value=modified),
+            patch("p2a.trace.parse_fault_traces_from_file", return_value=[]),
+        ):
+            result = bonus_maps.compute_dynamic_bonus_map(task)
+
+        self.assertEqual(result["case_type"], "signature_mismatch")
+        self.assertEqual(result["reason_code"], "signature_mismatch_before_entry")
+        self.assertEqual(result["test_exit"], 1)
+        self.assertTrue(result["test_output_capture_detail"]["test_exit_overridden_from_output"])
+
+    def test_swebench_missing_f2p_collection_is_not_all_pass(self) -> None:
+        from p2a.precompute import precompute_bonus_maps as bonus_maps
+
+        modified = [
+            {
+                "name": "demo",
+                "qualified_name": "demo",
+                "file_path": "pkg/demo.py",
+                "start_line": 10,
+                "end_line": 12,
+            }
+        ]
+
+        class FakeEnv:
+            swebench_verified = True
+            repo_path = "/testbed"
+            alt_path = "/root"
+
+            def start(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def checkout_buggy_commit(self, task, *, instance_id):
+                return {"buggy_checkout_ref": "abc123^", "buggy_checkout_exit": 0}
+
+            def _run(self, command: str, timeout: int | float | None = None):
+                return "", ""
+
+            def _execute_raw(self, command: str, timeout: int | float | None = None):
+                if "wc -l" in command:
+                    return "0\n", "", 0
+                return "", "", 0
+
+            def write_file(self, path: str, content: str) -> None:
+                pass
+
+        task = {
+            "instance_id": "pytest__pytest-1",
+            "repo": "pytest-dev/pytest",
+            "patch": "diff --git a/pkg/demo.py b/pkg/demo.py\n",
+            "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_foo"]),
+            "extra_info": {
+                "tools_kwargs": {
+                    "reward": {"name": "swe_bench", "metadata": {}},
+                }
+            },
+        }
+
+        with (
+            patch.object(bonus_maps, "find_modified_callables_from_task", return_value=modified),
+            patch.object(bonus_maps, "find_newly_created_callables", return_value=[]),
+            patch.object(
+                bonus_maps,
+                "_prepare_swebench_test_script",
+                return_value={"swebench_test_script_patch_stdout": "targeted_pytest=1\n"},
+            ),
+            patch.object(
+                bonus_maps,
+                "_run_tests_with_file_capture",
+                return_value=(
+                    "tests/test_demo.py::test_unrelated PASSED\n",
+                    "",
+                    0,
+                    {
+                        "stdout_read_exit": 0,
+                        "stderr_read_exit": 0,
+                        "exit_read_exit": 0,
+                        "wrapper_exit": 0,
+                        "exit_parse_failed": False,
+                        "all_three_read_failed": False,
+                        "trusted_test_exit": True,
+                    },
+                ),
+            ),
+            patch(
+                "p2a.precompute.uni_agent_sandbox.create_uni_agent_sandbox",
+                return_value=FakeEnv(),
+            ),
+            patch("p2a.trace.instrument_sandbox", return_value=modified),
+            patch("p2a.trace.parse_fault_traces_from_file", return_value=[]),
+        ):
+            result = bonus_maps.compute_dynamic_bonus_map(task)
+
+        self.assertEqual(result["case_type"], "no_trace")
+        self.assertEqual(result["reason_code"], "f2p_collection_missing")
+        self.assertEqual(result["swebench_f2p_missing_nodeids"], ["tests/test_demo.py::test_foo"])
 
 
 if __name__ == "__main__":

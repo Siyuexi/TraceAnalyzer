@@ -21,8 +21,8 @@ RAY_DATA_HOME="${RAY_DATA_HOME:-${HOME}/verl}"
 DATA_DIR="${RAY_DATA_HOME}/data/swe_agent"
 RUNTIME_ENV="${RUNTIME_ENV:-${DATA_DIR}/runtime_env_arl.yaml}"
 AGENT_CONFIG_PATH="${AGENT_CONFIG_PATH:-${DATA_DIR}/agent_config_arl.yaml}"
-TRAIN_FILE="${TRAIN_FILE:-${DATA_DIR}/r2e_gym_subset_filtered.parquet}"
-TEST_FILE="${TEST_FILE:-${DATA_DIR}/r2e_gym_subset_filtered.parquet}"
+TRAIN_FILE="${TRAIN_FILE:-${DATA_DIR}/r2e_gym_subset_p2a.train.parquet}"
+TEST_FILE="${TEST_FILE:-${DATA_DIR}/r2e_gym_subset_p2a.train.parquet}"
 
 require_uni_agent() {
   if [[ ! -d "${UNI_AGENT_DIR}/uni_agent" || ! -d "${UNI_AGENT_DIR}/verl" ]]; then
@@ -48,9 +48,7 @@ keys = [
     "ARL_STARTUP_TIMEOUT",
     "ARL_MIRROR_REGISTRY",
     "ARL_MIRROR_NAMESPACE",
-    "P2A_ARL_ENTERPRISE_REPOS",
     "P2A_ARL_IMAGE_OVERRIDES_JSON",
-    "P2A_ARL_DISABLE_MIRROR",
     "UNI_AGENT_P2A_TRACE",
     "P2A_BONUS_MAP_DIR",
     "P2A_M_MAX",
@@ -109,19 +107,34 @@ EOF
 data() {
   require_uni_agent
   mkdir -p "$DATA_DIR"
-  # Reuse uni-agent's stock R2E data prep verbatim (submodule unmodified). The
-  # `deployment.type: arl` is supplied by agent_config_arl.yaml and deep-merged
-  # in at agent-loop init; the parquet only carries per-instance image +
-  # post_setup_cmd + reward, exactly uni-agent's shape.
-  cd "$UNI_AGENT_DIR"
-  DEPLOYMENT=vefaas python examples/data_preprocess/r2e_gym_subset_filtered.py --local-save-dir "$DATA_DIR"
+  # Build via the canonical self-contained builder: it writes the full parquet plus a
+  # skip-filtered *.train.parquet (bad_instances excluded), with pair-diag image refs.
+  # deployment.type: arl is supplied by agent_config_arl.yaml and deep-merged at
+  # agent-loop init; the parquet carries per-instance image + post_setup_cmd + reward.
+  cd "$SRC_DIR"
+  PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
+    uv run python scripts/build_data.py r2e --out "${DATA_DIR}/r2e_gym_subset_p2a.parquet"
 }
 
 smoke() {
   require_uni_agent
   cd "$SRC_DIR"
-  local image="${ARL_SMOKE_IMAGE:-enterprise-public-cn-beijing.cr.volces.com/r2e-gym-subset/a95245e37f:latest}"
-  python -m env.smoke --image "$image"
+  # Default to a real pair-diag image taken from the built R2E parquet (build_data.py
+  # writes pair-diag refs); otherwise require ARL_SMOKE_IMAGE. Never default to enterprise.
+  local image="${ARL_SMOKE_IMAGE:-}"
+  if [[ -z "$image" && -f "$TRAIN_FILE" ]]; then
+    image="$(uv run python -c "
+import json, pandas as pd
+ei = pd.read_parquet('$TRAIN_FILE')['extra_info'].iloc[0]
+ei = json.loads(ei) if isinstance(ei, str) else ei
+print(ei['tools_kwargs']['env']['deployment']['image'])
+" 2>/dev/null || true)"
+  fi
+  if [[ -z "$image" ]]; then
+    echo "Set ARL_SMOKE_IMAGE to a pair-diag image, or run '${BASH_SOURCE[0]} data' first to build ${TRAIN_FILE}." >&2
+    exit 1
+  fi
+  uv run python -m env.smoke --image "$image"
 }
 
 debug() {

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "p2a-arl"
 version = "0.1.0"
 description = "P2A on uni-agent with an ARL-native sandbox backend (env/) + bonus-map process supervision (p2a/)."
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 # ── core: ARL sandbox runtime + data build + bonus-map precompute ──────────────
 # Everything to run scripts/build_data.py and p2a/precompute on a CPU box.

@@ -12,6 +12,13 @@
   },
   "skip": [
     {
+      "id": "aiohttp__0415a4ca18",
+      "repo": "aiohttp",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
       "id": "aiohttp__216e082807",
       "repo": "aiohttp",
       "reason": "all_pass_buggy_version_passes",
@@ -28,10 +35,38 @@
       "skip_bonus": true
     },
     {
+      "id": "aiohttp__41968f892d",
+      "repo": "aiohttp",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
       "id": "aiohttp__42d30d52b7",
       "repo": "aiohttp",
       "reason": "all_pass_buggy_version_passes",
       "source": "report_2026-06-08_ws404fix"
+    },
+    {
+      "id": "aiohttp__43f3e23b1c",
+      "repo": "aiohttp",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "aiohttp__62173bea1e",
+      "repo": "aiohttp",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "aiohttp__7e16dd198e",
+      "repo": "aiohttp",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
     },
     {
       "id": "aiohttp__8f881a7ad8",
@@ -72,6 +107,27 @@
       "source": "report_2026-06-08_ws404fix"
     },
     {
+      "id": "coveragepy__1a27df4c76",
+      "repo": "coveragepy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "coveragepy__1b19799edf",
+      "repo": "coveragepy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "coveragepy__2094909df3",
+      "repo": "coveragepy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
       "id": "coveragepy__25311c6caa",
       "repo": "coveragepy",
       "reason": "unresolved_no_trace_no_pre_entry_evidence",
@@ -82,6 +138,62 @@
       "skip_bonus": true
     },
     {
+      "id": "coveragepy__28c29a7224",
+      "repo": "coveragepy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "coveragepy__341e737bd5",
+      "repo": "coveragepy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "coveragepy__6bb1c275ba",
+      "repo": "coveragepy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "coveragepy__89f44c1246",
+      "repo": "coveragepy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "coveragepy__933ef836fc",
+      "repo": "coveragepy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "coveragepy__94920c01e8",
+      "repo": "coveragepy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "coveragepy__afe6cf34d0",
+      "repo": "coveragepy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "coveragepy__e6df5b39be",
+      "repo": "coveragepy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
       "id": "coveragepy__f12672d370",
       "repo": "coveragepy",
       "reason": "unresolved_no_trace_no_pre_entry_evidence",
@@ -90,6 +202,20 @@
       "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
       "skip_training": true,
       "skip_bonus": true
+    },
+    {
+      "id": "coveragepy__f668d6f32e",
+      "repo": "coveragepy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "datalad__22948af54d",
+      "repo": "datalad",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
     },
     {
       "id": "datalad__27bfd015eb",
@@ -122,6 +248,20 @@
       "skip_bonus": true
     },
     {
+      "id": "datalad__f16c5086c9",
+      "repo": "datalad",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "numpy__02355b4ce4",
+      "repo": "numpy",
+      "reason": "collection_failed_zero_tests",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
       "id": "numpy__0655cb9e24",
       "repo": "numpy",
       "reason": "unresolved_no_trace_no_pre_entry_evidence",
@@ -130,6 +270,13 @@
       "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
       "skip_training": true,
       "skip_bonus": true
+    },
+    {
+      "id": "numpy__156cd054e0",
+      "repo": "numpy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
     },
     {
       "id": "numpy__27bfcdbe13",
@@ -142,6 +289,13 @@
       "skip_bonus": true
     },
     {
+      "id": "numpy__3b03c2ab12",
+      "repo": "numpy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
       "id": "numpy__4ec016784b",
       "repo": "numpy",
       "reason": "unresolved_no_trace_no_pre_entry_evidence",
@@ -152,6 +306,20 @@
       "skip_bonus": true
     },
     {
+      "id": "numpy__54811204a6",
+      "repo": "numpy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "numpy__5db1c6a48c",
+      "repo": "numpy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
       "id": "numpy__5fd25ab98c",
       "repo": "numpy",
       "reason": "unresolved_no_trace_no_pre_entry_evidence",
@@ -160,6 +328,27 @@
       "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
       "skip_training": true,
       "skip_bonus": true
+    },
+    {
+      "id": "numpy__7127cdfb85",
+      "repo": "numpy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "numpy__76f0eafbab",
+      "repo": "numpy",
+      "reason": "collection_failed_zero_tests",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "numpy__76f1edbe09",
+      "repo": "numpy",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
     },
     {
       "id": "orange3__14c32060df",
@@ -270,6 +459,13 @@
       "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
       "skip_training": true,
       "skip_bonus": true
+    },
+    {
+      "id": "orange3__6f25bda8b1",
+      "repo": "orange3",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
     },
     {
       "id": "orange3__8226727eec",
@@ -432,6 +628,20 @@
       "skip_bonus": true
     },
     {
+      "id": "pandas__107c64f340",
+      "repo": "pandas",
+      "reason": "collection_failed_zero_tests",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "pandas__1605bdfd40",
+      "repo": "pandas",
+      "reason": "collection_failed_zero_tests",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
       "id": "pandas__1fc9d7e3b3",
       "repo": "pandas",
       "reason": "unresolved_no_trace_no_pre_entry_evidence",
@@ -440,6 +650,27 @@
       "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
       "skip_training": true,
       "skip_bonus": true
+    },
+    {
+      "id": "pandas__36a67f6c99",
+      "repo": "pandas",
+      "reason": "collection_failed_zero_tests",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "pandas__3adfcff164",
+      "repo": "pandas",
+      "reason": "fixed_did_not_pass_p2p",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "pandas__3cfd8685ee",
+      "repo": "pandas",
+      "reason": "collection_failed_zero_tests",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
     },
     {
       "id": "pandas__3e4a2179db",
@@ -452,6 +683,13 @@
       "skip_bonus": true
     },
     {
+      "id": "pandas__53430f2299",
+      "repo": "pandas",
+      "reason": "collection_failed_zero_tests",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
       "id": "pandas__76f0dad185",
       "repo": "pandas",
       "reason": "unresolved_no_trace_no_pre_entry_evidence",
@@ -460,6 +698,20 @@
       "evidence": "report/2026-06-05_rllm-arl-bonus-map-analysis.html (unresolved-cases table)",
       "skip_training": true,
       "skip_bonus": true
+    },
+    {
+      "id": "pandas__7c01e13076",
+      "repo": "pandas",
+      "reason": "collection_failed_zero_tests",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
+    },
+    {
+      "id": "pandas__91af4faf39",
+      "repo": "pandas",
+      "reason": "collection_failed_zero_tests",
+      "source": "r2e_filtered_audit_20260608_pairdiag_arl",
+      "evidence": "config/audits/r2e_removed75_pairdiag_audit_20260609.json"
     },
     {
       "id": "pandas__d2f376bc99",

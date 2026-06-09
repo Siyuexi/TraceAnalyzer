@@ -1,14 +1,12 @@
 """Image routing for ARL-backed R2E/Uni-Agent runs.
 
 R2E instances boot the **pair-diag mirror** of the original R2E ``namanjain12``
-images: ``pair-diag-cn-guangzhou.cr.volces.com/code/{repo}_final:{commit}``. This
-is the reference the old bonus-map report reproduces on, and the build wrapper
+images: ``pair-diag-cn-guangzhou.cr.volces.com/code/{repo}_final:{commit}`` — the
+reference the bonus-map report reproduces on. The build wrapper
 (``scripts/build_data.py r2e``) writes the full pair-diag ref into each row's
-``deployment.image`` — so this module normally just passes that through (or
-mirrors a raw ``namanjain12`` ref). The 2026-06-05 all-enterprise switch was
-reverted: enterprise-public is a separate rebuild with divergent Python for
-orange3/coveragepy/numpy. ``P2A_ARL_IMAGE_OVERRIDES_JSON`` pins an exact image
-per instance.
+``deployment.image``, so this module normally just passes it through (or mirrors a
+raw ``namanjain12`` ref). ``P2A_ARL_IMAGE_OVERRIDES_JSON`` pins an exact image per
+instance.
 """
 
 from __future__ import annotations

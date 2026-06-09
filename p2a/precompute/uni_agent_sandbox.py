@@ -264,11 +264,11 @@ class UniAgentSandboxAdapter:
 
     repo_path = "/testbed"
     alt_path = "/root"
-    swebench_verified = False
 
-    def __init__(self, agent_env, *, default_timeout: int = 300):
+    def __init__(self, agent_env, *, default_timeout: int = 300, swebench_verified: bool = False):
         self.agent_env = agent_env
         self.default_timeout = default_timeout
+        self.swebench_verified = swebench_verified
 
     def start(self) -> None:
         self.agent_env.start()
@@ -347,6 +347,7 @@ def create_uni_agent_sandbox(task: dict[str, Any], *, instance_id: str) -> UniAg
     from uni_agent.interaction import AgentEnv, AgentEnvConfig
 
     config = build_agent_env_config(task, instance_id=instance_id)
+    swebench_verified = _is_swebench_verified_task(task)
     if config["deployment"].get("type") == "arl":
         from env.deployment import make_env_config
 
@@ -359,7 +360,19 @@ def create_uni_agent_sandbox(task: dict[str, Any], *, instance_id: str) -> UniAg
     else:
         env_config = AgentEnvConfig(**config)
     env = AgentEnv(run_id=f"p2a-bonus-{uuid.uuid4()}", env_config=env_config)
-    return UniAgentSandboxAdapter(env)
+    return UniAgentSandboxAdapter(env, swebench_verified=swebench_verified)
+
+
+def _is_swebench_verified_task(task: dict[str, Any]) -> bool:
+    tools_kwargs = extract_tools_kwargs(task)
+    reward = tools_kwargs.get("reward") if isinstance(tools_kwargs.get("reward"), dict) else {}
+    metadata = extract_reward_metadata(task)
+    reward_name = reward.get("name")
+    if reward_name == "swe_bench":
+        return True
+    if metadata.get("FAIL_TO_PASS") is not None or task.get("FAIL_TO_PASS") is not None:
+        return True
+    return False
 
 
 def _read_old_sources(env: UniAgentSandboxAdapter, files: set[str]) -> tuple[dict[str, str], set[str]]:

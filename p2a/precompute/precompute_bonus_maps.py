@@ -12,6 +12,7 @@ Classification decision tree (evaluated top-to-bottom, first match wins):
     Static layer (AST diff of old vs new content):
       newly_created  – all GT callables only exist in new_file_content
       no_callable    – patch has no callable-level changes
+      signature_mismatch – F2P call fails before entering the callable body
 
     Dynamic layer (instrument → run tests → parse traces):
       no_trace       – 0 traces captured after instrumentation (error=True)
@@ -22,7 +23,7 @@ Classification decision tree (evaluated top-to-bottom, first match wins):
       direct         – F2P→GT call chain, test calls GT directly (traceable=True)
 
 Usage:
-    python -m utils.p2a.precompute_bonus_maps \\
+    python -m p2a.precompute.precompute_bonus_maps \\
         data/swe/R2E_Gym_Subset.parquet \\
         --output_dir data/swe/bonus_maps --mode dynamic --n_parallel 50
 """
@@ -69,12 +70,28 @@ _FIXTURE_NAMES = frozenset(
 
 BONUS_MAP_SCHEMA_VERSION = 3
 TRACE_SIDECAR_FORMAT = "p2a_trace_sidecar_v1"
-TEST_STDOUT_PATH = "/tmp/_swe_test_stdout.txt"
-TEST_STDERR_PATH = "/tmp/_swe_test_stderr.txt"
-TEST_EXIT_PATH = "/tmp/_swe_test_exit.txt"
+TEST_STDOUT_PATH = "/root/_p2a_swe_test_stdout.txt"
+TEST_STDERR_PATH = "/root/_p2a_swe_test_stderr.txt"
+TEST_EXIT_PATH = "/root/_p2a_swe_test_exit.txt"
+TRACE_PARSE_PATH = "/root/_p2a_swe_fault_traces.parse.jsonl"
 
 
 _PRODUCER_METADATA: dict | None = None
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"[WARN] ignoring invalid {name}={raw!r}; using {default}", file=sys.stderr)
+        return default
+    if minimum is not None and value < minimum:
+        print(f"[WARN] ignoring {name}={value}; expected >= {minimum}, using {default}", file=sys.stderr)
+        return default
+    return value
 
 
 def _looks_like_bare_hash(value: str) -> bool:
@@ -172,11 +189,16 @@ def _producer_metadata() -> dict:
 
     _PRODUCER_METADATA = {
         "schema_version": BONUS_MAP_SCHEMA_VERSION,
-        "producer": "utils.p2a.precompute_bonus_maps",
+        "producer": "p2a.precompute.precompute_bonus_maps",
         "producer_commit": commit,
         "producer_branch": branch,
     }
     return dict(_PRODUCER_METADATA)
+
+
+def _debug_progress(instance_id: str, step: str) -> None:
+    if os.getenv("P2A_DEBUG_PROGRESS"):
+        print(f"  [{instance_id}] {step}", flush=True)
 
 
 def _with_metadata(result: dict, *, reason_code: str | None = None, diagnostics: dict | None = None) -> dict:
@@ -342,6 +364,7 @@ _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 _PARAMETRIZE_SUFFIX_RE = re.compile(r"\[.*\]$")
 _TEST_FUNC_RE = re.compile(r"(?<![A-Za-z0-9_])(test[A-Za-z0-9_]*)(?=$|[^A-Za-z0-9_])")
 _PYTEST_STATUS_RE = re.compile(r"\b(PASSED|FAILED|ERROR)\b")
+_UNITTEST_FAILURE_HEADER_RE = re.compile(r"^(?:FAIL|ERROR):\s+([A-Za-z_][A-Za-z0-9_]*)\s+\(([^)]+)\)\s*$")
 
 
 def _strip_parametrize(name: str) -> str:
@@ -352,6 +375,9 @@ def _strip_parametrize(name: str) -> str:
 def _normalize_test_func_name(name: str) -> str:
     """Return the bare pytest test function name from a nodeid/qualname."""
     cleaned = _ANSI_ESCAPE_RE.sub("", str(name or "")).strip()
+    unittest_display = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+\([^)]+\)$", cleaned)
+    if unittest_display:
+        return unittest_display.group(1)
     cleaned = cleaned.split(" - ", 1)[0]
     matches = _TEST_FUNC_RE.findall(cleaned)
     if matches:
@@ -380,6 +406,33 @@ def _parse_pytest_status_lines(raw_output: str) -> dict[str, str]:
             if "::" in node:
                 statuses[node] = status
     return statuses
+
+
+def _looks_like_test_func(name: str) -> bool:
+    return bool(name and (name.startswith("test") or name in _FIXTURE_NAMES))
+
+
+def _swebench_unittest_failure_funcs_from_descriptions(raw_output: str, f2p_nodeids: list[str]) -> set[str]:
+    """Map SWE-bench unittest failure descriptions back to method names."""
+    selectors = [str(item or "").strip() for item in f2p_nodeids if str(item or "").strip()]
+    if not raw_output or not selectors:
+        return set()
+
+    lines = [_ANSI_ESCAPE_RE.sub("", line).strip() for line in raw_output.splitlines()]
+    funcs: set[str] = set()
+    for idx, line in enumerate(lines):
+        match = _UNITTEST_FAILURE_HEADER_RE.match(line)
+        if not match:
+            continue
+        method, qualname = match.groups()
+        header_display = f"{method} ({qualname})"
+        context = "\n".join(lines[idx : min(idx + 5, len(lines))])
+        for selector in selectors:
+            bare = _normalize_test_func_name(selector)
+            if selector == header_display or bare == method or selector in context:
+                funcs.add(method)
+                break
+    return funcs
 
 
 def _get_f2p_test_funcs(task: dict, raw_output: str, swebench_verified: bool) -> set[str] | None:
@@ -411,7 +464,10 @@ def _get_f2p_test_funcs(task: dict, raw_output: str, swebench_verified: bool) ->
                 return None
             funcs = set()
             for t in f2p_list:
-                funcs.add(_normalize_test_func_name(str(t)))
+                bare = _normalize_test_func_name(str(t))
+                if _looks_like_test_func(bare):
+                    funcs.add(bare)
+            funcs.update(_swebench_unittest_failure_funcs_from_descriptions(raw_output, f2p_list))
             return funcs  # may be empty
         return None
     else:
@@ -502,8 +558,11 @@ def _run_tests_with_file_capture(env, test_script: str, timeout: int = 300) -> t
     env._run(f"rm -f {TEST_STDOUT_PATH} {TEST_STDERR_PATH} {TEST_EXIT_PATH}")
     quoted_script = shlex.quote(test_script)
     cmd = (
+        "set +e; "
         "export PY_COLORS=0 NO_COLOR=1 TERM=dumb; "
-        'export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -rA --color=no -vv"; '
+        'export P2A_TRACE_MAX_EVENTS="${P2A_TRACE_MAX_EVENTS:-2000}"; '
+        'export P2A_TRACE_MAX_FRAMES="${P2A_TRACE_MAX_FRAMES:-80}"; '
+        'export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -rA --color=no -vv -W ignore::pytest.PytestWarning"; '
         f"bash {quoted_script} > {TEST_STDOUT_PATH} 2> {TEST_STDERR_PATH}; "
         f"code=$?; printf '%s\\n' \"$code\" > {TEST_EXIT_PATH}; true"
     )
@@ -543,11 +602,267 @@ def _run_tests_with_file_capture(env, test_script: str, timeout: int = 300) -> t
     return stdout, stderr, test_exit, capture
 
 
+def _swebench_f2p_nodeids(task: dict) -> list[str]:
+    """Return raw SWE-bench FAIL_TO_PASS selectors in dataset order."""
+    f2p_raw = task.get("FAIL_TO_PASS")
+    if not f2p_raw:
+        return []
+    if isinstance(f2p_raw, str):
+        try:
+            f2p_list = json.loads(f2p_raw)
+        except (json.JSONDecodeError, TypeError):
+            f2p_list = [f2p_raw]
+    elif isinstance(f2p_raw, list):
+        f2p_list = f2p_raw
+    else:
+        return []
+    out = []
+    seen = set()
+    for item in f2p_list:
+        nodeid = str(item).strip()
+        if nodeid and nodeid not in seen:
+            seen.add(nodeid)
+            out.append(nodeid)
+    return out
+
+
+def _django_labels_from_f2p(nodeids: list[str]) -> list[str]:
+    """Convert unittest display names to Django runtests labels."""
+    labels = []
+    seen = set()
+    for nodeid in nodeids:
+        match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+\(([^)]+)\)$", nodeid.strip())
+        if not match:
+            continue
+        method, qual = match.groups()
+        label = qual if qual.rsplit(".", 1)[-1] == method else f"{qual}.{method}"
+        if label not in seen:
+            seen.add(label)
+            labels.append(label)
+    return labels
+
+
+def _swebench_output_has_f2p_failure(raw_output: str, f2p_nodeids: list[str]) -> bool:
+    """Detect F2P failures when run_tests cleanup masks pytest's exit code."""
+    if not raw_output or not f2p_nodeids:
+        return False
+    lines = [_ANSI_ESCAPE_RE.sub("", line) for line in raw_output.splitlines()]
+    for nodeid in f2p_nodeids:
+        bare = _normalize_test_func_name(nodeid)
+        for line in lines:
+            if _swebench_line_matches_f2p_selector(line, nodeid, bare) and re.search(r"\b(FAILED|ERROR|FAIL)\b", line):
+                return True
+    return False
+
+
+_TEST_RESULT_LINE_RE = re.compile(r"\b(PASSED|FAILED|ERROR|FAIL|ok)\b|\.{3}\s*ok\b")
+
+
+def _swebench_f2p_collection_observation(raw_output: str, f2p_nodeids: list[str]) -> dict[str, list[str]]:
+    """Report which SWE-bench F2P selectors appear in test result lines."""
+    observed = []
+    missing = []
+    if not f2p_nodeids:
+        return {"observed": observed, "missing": missing}
+    lines = [_ANSI_ESCAPE_RE.sub("", line) for line in (raw_output or "").splitlines()]
+    result_lines = [line for line in lines if _TEST_RESULT_LINE_RE.search(line)]
+    for nodeid in f2p_nodeids:
+        bare = _normalize_test_func_name(nodeid)
+        if any(_swebench_line_matches_f2p_selector(line, nodeid, bare) for line in result_lines):
+            observed.append(nodeid)
+        else:
+            missing.append(nodeid)
+    return {"observed": observed, "missing": missing}
+
+
+def _swebench_line_matches_f2p_selector(line: str, nodeid: str, bare: str) -> bool:
+    selector = str(nodeid or "").strip()
+    bare = str(bare or "").strip()
+    if not selector and not bare:
+        return False
+
+    # Full selectors and unittest display names should match exactly. Bare
+    # names need token boundaries so ``test_foo`` does not match
+    # ``test_foo_bar`` in pytest summaries.
+    if selector and selector != bare:
+        start = line.find(selector)
+        if start >= 0:
+            end = start + len(selector)
+            if end == len(line) or line[end] not in "_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789":
+                return True
+    if bare:
+        return re.search(rf"(?<![A-Za-z0-9_]){re.escape(bare)}(?:\[[^\]]+\])?(?![A-Za-z0-9_])", line) is not None
+    return selector in line
+
+
+_SIGNATURE_ENTRY_FAILURE_RE = re.compile(
+    r"TypeError: .*(got an unexpected keyword argument|missing .*required positional argument|takes .*positional arguments?)"
+)
+
+
+def _swebench_output_has_signature_entry_failure(raw_output: str) -> bool:
+    """Detect failures raised by Python argument binding before body entry."""
+    if not raw_output:
+        return False
+    return any(_SIGNATURE_ENTRY_FAILURE_RE.search(_ANSI_ESCAPE_RE.sub("", line)) for line in raw_output.splitlines())
+
+
+def _swebench_output_has_zero_tests(raw_output: str) -> bool:
+    """Detect successful-looking test runs that collected no tests."""
+    if not raw_output:
+        return False
+    text = _ANSI_ESCAPE_RE.sub("", raw_output)
+    return bool(
+        re.search(r"\bno tests? (?:ran|run|collected)\b", text, re.IGNORECASE)
+        or re.search(r"\b0 (?:tests? )?passed\b", text, re.IGNORECASE)
+        or re.search(r"\btests finished:\s*0 passed\b", text, re.IGNORECASE)
+    )
+
+
+def _prepare_swebench_test_script(
+    env,
+    task: dict,
+    test_script: str,
+    patched_callables: list[dict] | None = None,
+) -> dict:
+    """Prepare the SWE-bench eval script for preinstalled image environments."""
+    diag: dict[str, str | int] = {}
+    run_tests = task.get("run_tests")
+    if isinstance(run_tests, str) and run_tests.strip():
+        env.write_file(test_script, run_tests if run_tests.endswith("\n") else f"{run_tests}\n")
+        diag["swebench_run_tests_source"] = "metadata"
+    else:
+        diag["swebench_run_tests_source"] = "image"
+
+    repo = str(task.get("repo") or task.get("repo_name") or "")
+    f2p_nodeids = _swebench_f2p_nodeids(task)
+    f2p_django_labels = _django_labels_from_f2p(f2p_nodeids)
+    f2p_bare_funcs = sorted({_normalize_test_func_name(nodeid) for nodeid in f2p_nodeids if _normalize_test_func_name(nodeid)})
+    diag["swebench_f2p_nodeids"] = f2p_nodeids
+    diag["swebench_f2p_django_labels"] = f2p_django_labels
+    diag["swebench_f2p_bare_funcs"] = f2p_bare_funcs
+    skip_editable_module = {
+        "scikit-learn": "sklearn",
+        "scikit-learn/scikit-learn": "sklearn",
+    }.get(repo)
+    skip_editable_reason = "repo_override" if skip_editable_module else None
+    import_targets = _detect_import_targets(env, patched_callables or [])
+    diag["swebench_import_targets_before_install"] = import_targets
+    if not skip_editable_module:
+        source_target = next((item for item in import_targets if item.get("matches_repo_path")), None)
+        if source_target:
+            skip_editable_module = source_target.get("module")
+            skip_editable_reason = "preinstalled_source_tree"
+    skip_probe_code = None
+    if skip_editable_module:
+        skip_probe_code = (
+            "import importlib.util; "
+            f"spec = importlib.util.find_spec({skip_editable_module!r}); "
+            "origin = getattr(spec, 'origin', None) if spec else None; "
+            f"print('skip editable install; {skip_editable_module}=' + str(origin) + "
+            f"' reason={skip_editable_reason}')"
+        )
+    replace_tox_current_env = repo in {"sphinx", "sphinx-doc/sphinx"}
+
+    setup_stdout, setup_stderr = env._run(
+        "ln -sfn /opt/miniconda3/envs/testbed /root/.venv && "
+        "python -c 'import chardet' >/dev/null 2>&1 || "
+        "PIP_ROOT_USER_ACTION=ignore python -m pip install -q chardet",
+        timeout=120,
+    )
+    diag["swebench_prepare_stdout"] = setup_stdout
+    diag["swebench_prepare_stderr"] = setup_stderr
+
+    patch_script = f"""python - <<'PY'
+import shlex
+from pathlib import Path
+
+path = Path({test_script!r})
+skip_module = {skip_editable_module!r}
+skip_probe_code = {skip_probe_code!r}
+replace_tox_current_env = {replace_tox_current_env!r}
+f2p_nodeids = {f2p_nodeids!r}
+f2p_django_labels = {f2p_django_labels!r}
+f2p_bare_funcs = {f2p_bare_funcs!r}
+before = path.read_text()
+lines = before.splitlines()
+changed = False
+skipped_editable = 0
+replaced_tox = 0
+targeted_pytest = 0
+targeted_django = 0
+targeted_sympy = 0
+
+def quote_join(items):
+    return " ".join(shlex.quote(str(item)) for item in items)
+
+for i, line in enumerate(lines):
+    stripped = line.strip()
+    if replace_tox_current_env and stripped.startswith("tox --current-env") and " -- " in stripped:
+        test_args = quote_join(f2p_nodeids) if f2p_nodeids else stripped.split(" -- ", 1)[1].strip()
+        lines[i] = "python -m pytest -rA --color=no -vv " + test_args
+        changed = True
+        replaced_tox += 1
+        targeted_pytest += int(bool(f2p_nodeids))
+        continue
+    if f2p_nodeids and (stripped.startswith("pytest ") or stripped.startswith("python -m pytest ")):
+        lines[i] = "python -m pytest -rA --color=no -vv " + quote_join(f2p_nodeids)
+        changed = True
+        targeted_pytest += 1
+        continue
+    if f2p_django_labels and (
+        stripped.startswith("./tests/runtests.py")
+        or stripped.startswith("python tests/runtests.py")
+        or stripped.startswith("python ./tests/runtests.py")
+    ):
+        # Keep Django's SWE-bench module-level selection. Some F2P entries are
+        # docstring descriptions or context-sensitive tests; narrowing to the
+        # display-name subset can skip the real failing check.
+        continue
+    if f2p_bare_funcs and "bin/test" in stripped:
+        # SymPy's historical bin/test runners do not consistently implement
+        # pytest-style -k expressions; the SWE-bench script already narrows the
+        # run to patched test files.
+        continue
+    if "python -m pip install" not in line or " -e ." not in line:
+        continue
+    if skip_module:
+        lines[i] = "python -c " + repr(skip_probe_code)
+        changed = True
+        skipped_editable += 1
+        continue
+    if "--no-build-isolation" in line:
+        continue
+    lines[i] = line.replace("python -m pip install", "python -m pip install --no-build-isolation", 1)
+    changed = True
+text = "\\n".join(lines) + "\\n"
+if changed and text != before:
+    path.write_text(text)
+print("changed=" + str(changed))
+print("skipped_editable=" + str(skipped_editable))
+print("replaced_tox=" + str(replaced_tox))
+print("targeted_pytest=" + str(targeted_pytest))
+print("targeted_django=" + str(targeted_django))
+print("targeted_sympy=" + str(targeted_sympy))
+PY"""
+    stdout, stderr = env._run(f"chmod +x {shlex.quote(test_script)} && {patch_script}", timeout=60)
+    diag.update({
+        "swebench_test_script_patch_stdout": stdout,
+        "swebench_test_script_patch_stderr": stderr,
+    })
+    return diag
+
+
 def _module_name_from_file_path(file_path: str) -> str | None:
     """Best-effort Python module name for import-target diagnostics."""
     if not file_path.endswith(".py"):
         return None
-    module = file_path[:-3].replace("/", ".")
+    module_path = file_path[:-3]
+    for prefix in ("lib/", "src/"):
+        if module_path.startswith(prefix):
+            module_path = module_path[len(prefix) :]
+            break
+    module = module_path.replace("/", ".")
     if module.endswith(".__init__"):
         module = module[: -len(".__init__")]
     return module or None
@@ -736,13 +1051,18 @@ def compute_dynamic_bonus_map(
             )
 
             env = create_uni_agent_sandbox(task, instance_id=instance_id)
+            _debug_progress(instance_id, "sandbox_start")
             env.start()
+            _debug_progress(instance_id, "sandbox_started")
+            _debug_progress(instance_id, "checkout_buggy")
             env_diag.update(env.checkout_buggy_commit(task, instance_id=instance_id))
+            _debug_progress(instance_id, "checkout_done")
 
             # Repo startup fixups (source patches + dep pins) run AFTER buggy
             # checkout and BEFORE instrumentation, so the instrumented + tested
             # source is the fixed-up source (same adapter the gate uses).
             _repo = instance_id.split("__", 1)[0] if instance_id and "__" in instance_id else ""
+            _debug_progress(instance_id, "startup_fixups")
             _fix_out, _ = env._run(startup_fixup_command(_repo), timeout=300)
             _fixups = parse_fixups(_fix_out)
             env_diag["startup_fixups_applied"] = _fixups
@@ -753,6 +1073,7 @@ def compute_dynamic_bonus_map(
             # parsed old/new file contents. Recover callable diffs from the
             # actual buggy sandbox plus the golden patch.
             if not all_modified and task.get("patch"):
+                _debug_progress(instance_id, "recover_patch_callables")
                 patch_modified, patch_newly_created, patch_diag = find_changed_callables_via_patch(env, task)
                 all_modified = patch_modified
                 newly_created = patch_newly_created or newly_created
@@ -778,6 +1099,7 @@ def compute_dynamic_bonus_map(
 
         # ── Dynamic layer: instrument → run → parse ───────────────────────
 
+        _debug_progress(instance_id, "instrument")
         instrumented_callables = instrument_sandbox(env, all_modified)
         if not instrumented_callables:
             print(f"  [{instance_id}] static_fallback: instrumentation produced 0 callables")
@@ -795,23 +1117,61 @@ def compute_dynamic_bonus_map(
         env._run(f"rm -f {TRACE_FILE_PATH}")
 
         test_script = "/run_tests.sh" if env.swebench_verified else f"{env.alt_path}/run_tests.sh"
+        test_script_diag = {}
+        if env.swebench_verified:
+            _debug_progress(instance_id, "prepare_swebench_test_script")
+            test_script_diag = _prepare_swebench_test_script(env, task, test_script, all_modified)
         if not env.swebench_verified:
             env._run(f"sed -i '/pytest/{{/-rA/!s/pytest/pytest -rA/}}' {test_script}")
         # Repo fixups already ran after buggy checkout (see startup_fixup_command);
         # no separate normalization shim needed here.
-        stdout, stderr, test_exit, capture_diag = _run_tests_with_file_capture(env, test_script, timeout=300)
+        timeout_env = "P2A_SWEBENCH_TEST_TIMEOUT" if env.swebench_verified else "P2A_TEST_TIMEOUT"
+        default_timeout = 900
+        test_timeout = _env_int(timeout_env, default_timeout, minimum=1)
+        _debug_progress(instance_id, f"run_tests timeout={test_timeout}")
+        stdout, stderr, test_exit, capture_diag = _run_tests_with_file_capture(env, test_script, timeout=test_timeout)
+        _debug_progress(instance_id, f"run_tests_done exit={test_exit}")
         raw_output = f"{stdout}\n{stderr}" if stderr else stdout
+        f2p_nodeids = _swebench_f2p_nodeids(task)
+        swebench_f2p_failure_observed = (
+            env.swebench_verified and _swebench_output_has_f2p_failure(raw_output, f2p_nodeids)
+        )
+        swebench_f2p_observation = (
+            _swebench_f2p_collection_observation(raw_output, f2p_nodeids)
+            if env.swebench_verified
+            else {"observed": [], "missing": []}
+        )
+        swebench_f2p_collection_missing = bool(
+            env.swebench_verified and f2p_nodeids and swebench_f2p_observation["missing"]
+        )
+        if test_exit == 0 and env.swebench_verified and _swebench_output_has_zero_tests(raw_output):
+            capture_diag = dict(capture_diag)
+            capture_diag["test_exit_overridden_from_zero_tests"] = True
+            test_exit = 5
+        if test_exit == 0 and swebench_f2p_failure_observed:
+            capture_diag = dict(capture_diag)
+            capture_diag["test_exit_overridden_from_output"] = True
+            test_exit = 1
 
         # ── Decision node: NO_TRACE ──────────────────────────────────
         # Parse the raw tracer output once.  raw_traces_all is for diagnostics;
         # raw_traces keeps the historical meaning: traces that entered GT.
+        trace_parse_line_cap = _env_int("P2A_TRACE_PARSE_MAX_LINES", 500, minimum=1)
+        env._execute_raw(
+            f"rm -f {TRACE_PARSE_PATH}; "
+            f"if [ -s {TRACE_FILE_PATH} ]; then head -n {trace_parse_line_cap} {TRACE_FILE_PATH} > {TRACE_PARSE_PATH}; fi",
+            timeout=60,
+        )
+        _debug_progress(instance_id, f"parse_traces cap={trace_parse_line_cap}")
         raw_traces_all = parse_fault_traces_from_file(
             env,
             instrumented_callables,
             env.repo_path,
             env.alt_path,
             require_patched=False,
+            trace_file_path=TRACE_PARSE_PATH,
         )
+        _debug_progress(instance_id, f"parse_traces_done parsed={len(raw_traces_all)}")
         raw_traces = [trace for trace in raw_traces_all if any(frame.get("is_patched") for frame in trace)]
 
         # Also check the raw trace file for total entry count (including
@@ -833,9 +1193,25 @@ def compute_dynamic_bonus_map(
             test_output_capture="file",
         )
         common_diag.update(env_diag)
+        common_diag.update(test_script_diag)
+        patch_stdout = str(test_script_diag.get("swebench_test_script_patch_stdout") or "")
+        common_diag["swebench_targeted_f2p"] = bool(re.search(r"targeted_(pytest|django|sympy)=[1-9]", patch_stdout))
+        common_diag["swebench_verified"] = env.swebench_verified
+        common_diag["test_timeout"] = test_timeout
+        trace_event_cap = _env_int("P2A_TRACE_MAX_EVENTS", 2000, minimum=0)
+        trace_frame_cap = _env_int("P2A_TRACE_MAX_FRAMES", 80, minimum=0)
+        common_diag["trace_event_cap"] = trace_event_cap
+        common_diag["trace_frame_cap"] = trace_frame_cap
+        common_diag["trace_parse_line_cap"] = trace_parse_line_cap
         common_diag["trace_file_line_count"] = trace_file_line_count
+        common_diag["trace_event_cap_reached"] = trace_event_cap > 0 and trace_file_line_count >= trace_event_cap
+        common_diag["trace_parse_line_cap_reached"] = trace_file_line_count > trace_parse_line_cap
         common_diag["test_output_capture_detail"] = capture_diag
         common_diag["parsed_trace_count"] = parsed_trace_count
+        common_diag["swebench_f2p_failure_observed"] = swebench_f2p_failure_observed
+        common_diag["swebench_f2p_observed_nodeids"] = swebench_f2p_observation["observed"]
+        common_diag["swebench_f2p_missing_nodeids"] = swebench_f2p_observation["missing"]
+        common_diag["swebench_f2p_collection_missing"] = swebench_f2p_collection_missing
         common_diag["raw_gt_test_funcs"] = _test_func_names_from_traces(raw_traces)
         common_diag.update(
             _write_trace_sidecar(
@@ -854,6 +1230,40 @@ def compute_dynamic_bonus_map(
         if parsed_trace_count == 0:
             import_targets = _detect_import_targets(env, all_modified)
             common_diag["import_targets"] = import_targets
+            imports_match = bool(import_targets) and all(item.get("matches_repo_path") for item in import_targets)
+            if env.swebench_verified and swebench_f2p_failure_observed and imports_match and _swebench_output_has_signature_entry_failure(raw_output):
+                print(f"  [{instance_id}] signature_mismatch: F2P failed before instrumented callable body entry. instrumented={len(instrumented_callables)}")
+                return _make_result(
+                    instance_id,
+                    "signature_mismatch",
+                    all_modified,
+                    newly_created,
+                    error=False,
+                    reason_code="signature_mismatch_before_entry",
+                    diagnostics=common_diag,
+                )
+            if newly_created and env.swebench_verified and swebench_f2p_failure_observed and imports_match:
+                print(f"  [{instance_id}] newly_created: F2P failed but only added callables were exercised. instrumented={len(instrumented_callables)}")
+                return _make_result(
+                    instance_id,
+                    "newly_created",
+                    all_modified,
+                    newly_created,
+                    error=False,
+                    reason_code="newly_created_not_traceable",
+                    diagnostics=common_diag,
+                )
+            if test_exit == 0 and swebench_f2p_collection_missing:
+                print(f"  [{instance_id}] no_trace: F2P selectors missing from test output. instrumented={len(instrumented_callables)}")
+                return _make_result(
+                    instance_id,
+                    "no_trace",
+                    all_modified,
+                    newly_created,
+                    error=True,
+                    reason_code="f2p_collection_missing",
+                    diagnostics=common_diag,
+                )
             no_trace_reason = _no_trace_reason_code(test_exit, capture_diag)
             if test_exit == 0 and not _capture_failed(capture_diag):
                 print(f"  [{instance_id}] all_pass: tests passed and 0 trace entries. instrumented={len(instrumented_callables)}")
@@ -898,8 +1308,12 @@ def compute_dynamic_bonus_map(
             # Can't parse test output at all
             parse_diag = dict(common_diag)
             parse_diag["f2p_test_funcs"] = None
-            case_type = "all_pass" if test_exit == 0 else "no_f2p"
-            reason_code = "buggy_version_passes" if test_exit == 0 else "f2p_parse_failed"
+            if test_exit == 0 and swebench_f2p_collection_missing:
+                case_type = "no_f2p"
+                reason_code = "f2p_collection_missing"
+            else:
+                case_type = "all_pass" if test_exit == 0 else "no_f2p"
+                reason_code = "buggy_version_passes" if test_exit == 0 else "f2p_parse_failed"
             print(f"  [{instance_id}] {case_type}: f2p_test_funcs=None (parse failed). Dropping all {len(raw_traces)} traces. test_exit={test_exit}")
             parse_diag.update(
                 _write_trace_sidecar(
@@ -929,8 +1343,12 @@ def compute_dynamic_bonus_map(
             # only a true all_pass if the buggy test run also exited cleanly.
             all_pass_diag = dict(common_diag)
             all_pass_diag["f2p_test_funcs"] = []
-            case_type = "all_pass" if test_exit == 0 else "no_f2p"
-            reason_code = "buggy_version_passes" if test_exit == 0 else "test_collection_error_no_failed_nodeids"
+            if test_exit == 0 and swebench_f2p_collection_missing:
+                case_type = "no_f2p"
+                reason_code = "f2p_collection_missing"
+            else:
+                case_type = "all_pass" if test_exit == 0 else "no_f2p"
+                reason_code = "buggy_version_passes" if test_exit == 0 else "test_collection_error_no_failed_nodeids"
             print(f"  [{instance_id}] {case_type}: 0 parsed test failures. test_exit={test_exit}")
             all_pass_diag.update(
                 _write_trace_sidecar(
@@ -972,6 +1390,13 @@ def compute_dynamic_bonus_map(
                 f2p_diag["f2p_trace_count"] = len(f2p_traces)
                 f2p_diag["f2p_recovery_source"] = "newly_created_tests"
                 f2p_diag["f2p_recovery_test_funcs"] = sorted(added_test_funcs)
+
+        if not f2p_traces and env.swebench_verified and common_diag.get("swebench_targeted_f2p"):
+            print(f"  [{instance_id}] F2P recovery via targeted SWE-bench run: {len(raw_traces)} traces")
+            f2p_traces = raw_traces
+            f2p_diag["f2p_trace_count"] = len(f2p_traces)
+            f2p_diag["f2p_recovery_source"] = "targeted_swebench_run"
+            f2p_diag["f2p_recovery_test_funcs"] = sorted(f2p_test_funcs)
 
         if not f2p_traces:
             print(f"  [{instance_id}] no_f2p: F2P filter removed all traces")
@@ -1296,6 +1721,8 @@ def main():
     if case_counts["static"] or case_counts["static_fallback"]:
         print(f"  static             {case_counts['static']:5d}")
         print(f"  static_fallback    {case_counts['static_fallback']:5d}")
+    if case_counts["signature_mismatch"]:
+        print(f"  signature_mismatch {case_counts['signature_mismatch']:5d}")
     print(f"  all_pass  (error)  {case_counts['all_pass']:5d}")
     print(f"  no_trace  (error)  {case_counts['no_trace']:5d}")
     print(f"  no_gt     (error)  {case_counts['no_gt']:5d}")

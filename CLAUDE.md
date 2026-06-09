@@ -7,13 +7,17 @@ touching this tree. The research-level `CLAUDE.md` is at the repo root.
 
 1. **Self-contained — never depend on `src-backup`** (code or data). All data is
    sourced from HuggingFace:
-   - R2E training: `dyyyyyyyy/r2e-gym-subset-filtered` (instances + parsed_commit_content)
-     joined with `R2E-Gym/R2E-Gym-Subset` for `relevant_files`.
-   - SWE-bench validation: `princeton-nlp/SWE-bench_Verified` (has `difficulty`).
+   - R2E training: `R2E-Gym/R2E-Gym-Subset` (instances + parsed_commit_content +
+     relevant_files). Cases that genuinely fail F2P/P2P on the pair-diag ARL images
+     are recorded in `config/bad_instances.json` and excluded from training; the
+     `dyyyyyyyy/r2e-gym-subset-filtered` set is not used (its filtering was built for
+     a different enterprise registry).
+   - SWE-bench eval: `R2E-Gym/SWE-Bench-Verified` (rows + eval fields), with the
+     `difficulty` label cross-indexed from `princeton-nlp/SWE-bench_Verified`.
    Old code may be **read for reference only**, never imported/run.
 2. **No throwaway / one-off scripts as the pipeline, no post-hoc enrichment.** 不要写冗余代码.
    In particular, **ALL "build data" jobs are subcommands of the single
-   `scripts/build_data.py`** (`r2e` / `swebench-hard` / `skip-list`). Do NOT add a
+   `scripts/build_data.py`** (`r2e` / `swebench-verified` / `swebench-hard` / `skip-list`). Do NOT add a
    separate `build_*.py` per dataset — building the hard subset, the skip-list, etc.
    are all "build data", so they go in `build_data.py`. 举一反三.
    **Likewise, EVERY runnable entry/launcher script (`*.sh`, training/data launchers)
@@ -54,6 +58,18 @@ proving P2A works on the Uni-Agent tool set and actually captures actions
 
 ## Reminders
 
+- **ARL is the sandbox backend, not a VRC remote.** The `arl-env` SDK connects
+  directly to the ARL Gateway (`ARL_GATEWAY_URL`, e.g. `http://118.145.210.10:8080`)
+  to boot a per-instance container sandbox where tests + P2A instrumentation run
+  (bonus-map precompute, training rollouts); it is reachable directly from CPU hosts.
+  This is unrelated to VRC's `remote` facility — `vrc remote` targets the **GPU
+  server** for command debugging. ARL gateway reachability is independent of
+  `vrc remote health`; do not infer one from the other.
 - Every Python invocation inside `src/` uses `uv run` (pinned `uv.lock`).
+- **Comments describe the present design, not the code's history.** Do NOT write
+  changelog/defensive comments ("previously did X, it was a bug, changed to Y",
+  "reverted the … switch", dated attributions, PR/issue numbers as narrative). Git
+  log is the history; the code is not your history book. Keep present-tense WHY
+  comments; delete or rewrite the rest.
 - Migration validated on a 26-case stratified sample: dynamic signal (standard/direct)
   reproduces the old report 8/8; full case_type ~24/26 (residual = non-dynamic edges).

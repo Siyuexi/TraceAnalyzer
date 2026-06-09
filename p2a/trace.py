@@ -484,7 +484,7 @@ def generate_tracer_module(repo_path: str, alt_path: str = "") -> str:
 
     return textwrap.dedent(f"""\
         import json
-        import linecache
+        import os
         import sys
         import threading
 
@@ -492,7 +492,28 @@ def generate_tracer_module(repo_path: str, alt_path: str = "") -> str:
         _seen = set()
         _REPO_PATH = "{repo_path}"
         _PATH_PREFIXES = {prefixes_tuple}
-        _TRACE_FILE = "/tmp/_swe_fault_traces.jsonl"
+        _TRACE_FILE = "{TRACE_FILE_PATH}"
+        def _env_int(name, default):
+            try:
+                value = int(os.environ.get(name, str(default)))
+            except ValueError:
+                return default
+            return value if value >= 0 else default
+
+        _MAX_EVENTS = _env_int("P2A_TRACE_MAX_EVENTS", 2000)
+        _MAX_FRAMES = _env_int("P2A_TRACE_MAX_FRAMES", 80)
+
+        def _is_test_file_path(path):
+            normalized = path.replace("\\\\", "/")
+            parts = normalized.split("/")
+            filename = parts[-1] if parts else normalized
+            if "/r2e_tests/" in normalized:
+                return True
+            if filename in {{"conftest.py", "pytest_plugin.py", "pytest_plugins.py"}}:
+                return True
+            if filename.startswith("test_") or filename.endswith("_test.py"):
+                return True
+            return any(part in ("tests", "test", "testing") for part in parts)
 
         def _resolve_qualname(frame):
             code = frame.f_code
@@ -535,13 +556,20 @@ def generate_tracer_module(repo_path: str, alt_path: str = "") -> str:
                 ]
                 if not repo_frames:
                     return
+                test_frame_indexes = [
+                    i for i, f in enumerate(repo_frames)
+                    if _is_test_file_path(f.f_code.co_filename)
+                ]
+                if test_frame_indexes:
+                    repo_frames = repo_frames[test_frame_indexes[0]:]
+                if _MAX_FRAMES > 0 and len(repo_frames) > _MAX_FRAMES:
+                    repo_frames = repo_frames[:1] + repo_frames[-(_MAX_FRAMES - 1):]
 
                 frame_entries = [
                     {{
                         "file": f.f_code.co_filename,
                         "line": f.f_lineno,
                         "name": _resolve_qualname(f),
-                        "code": linecache.getline(f.f_code.co_filename, f.f_lineno).strip(),
                     }}
                     for f in repo_frames
                 ]
@@ -549,6 +577,8 @@ def generate_tracer_module(repo_path: str, alt_path: str = "") -> str:
                        tuple((f["file"], f["line"], f["name"]) for f in frame_entries))
                 with _lock:
                     if key in _seen:
+                        return
+                    if len(_seen) >= _MAX_EVENTS:
                         return
                     _seen.add(key)
                     entry = {{
@@ -720,10 +750,43 @@ def instrument_source(source: str, callables: list[dict]) -> str:
             return "\n"
         return ""
 
+    def _module_prelude_insert_idx() -> int:
+        """Return a safe insertion point after docstring/future imports."""
+        idx = 0
+        if lines and lines[0].startswith("#!"):
+            idx = 1
+        coding_re = re.compile(r"coding[:=]\s*[-\w.]+")
+        if idx < len(lines) and coding_re.search(lines[idx]):
+            idx += 1
+
+        body_idx = 0
+        if tree.body and _is_docstring_stmt(tree.body[0]):
+            idx = max(idx, tree.body[0].end_lineno or tree.body[0].lineno)
+            body_idx = 1
+
+        while body_idx < len(tree.body):
+            node = tree.body[body_idx]
+            if not (isinstance(node, ast.ImportFrom) and node.module == "__future__"):
+                break
+            idx = max(idx, node.end_lineno or node.lineno)
+            body_idx += 1
+
+        return idx
+
+    def _module_trace_prelude(ending: str) -> str:
+        return (
+            f"{ending}"
+            f"try:{ending}"
+            f"    import _swe_fault_tracer as _p2a_ft{ending}"
+            f"except Exception:{ending}"
+            f"    _p2a_ft = None{ending}"
+        )
+
     _visit(tree)
 
     # Sort by start_line descending so insertions don't shift earlier lines
     sorted_callables = sorted(callables, key=lambda c: c["start_line"], reverse=True)
+    inserted_trace = False
 
     for c in sorted_callables:
         function_node = _find_function_node_at_line("".join(lines), c)
@@ -789,9 +852,18 @@ def instrument_source(source: str, callables: list[dict]) -> str:
         # Wrap in try/except so import or trace failures don't crash the
         # instrumented function — the function must still behave normally
         # (tests should fail for the original bug, not our instrumentation).
-        trace_line = f'{body_indent}try:\n{body_indent}    import _swe_fault_tracer as _ft; _ft.trace("{c["qualified_name"]}", "{c["file_path"]}", {c["start_line"]})\n{body_indent}except Exception:\n{body_indent}    pass\n'
+        trace_line = f'{body_indent}try:\n{body_indent}    _ft = globals().get("_p2a_ft") or __import__("_swe_fault_tracer"); _ft.trace("{c["qualified_name"]}", "{c["file_path"]}", {c["start_line"]})\n{body_indent}except Exception:\n{body_indent}    pass\n'
 
         lines.insert(insert_idx, trace_line)
+        inserted_trace = True
+
+    if inserted_trace and "_p2a_ft" not in source:
+        ending = "\n"
+        for line in lines:
+            ending = _line_ending(line) or ending
+            if ending:
+                break
+        lines.insert(_module_prelude_insert_idx(), _module_trace_prelude(ending))
 
     return "".join(lines)
 
@@ -1221,7 +1293,7 @@ def parse_fault_traces(
 # 6b. parse_fault_traces_from_file — JSONL-based (preferred)
 # ---------------------------------------------------------------------------
 
-TRACE_FILE_PATH = "/tmp/_swe_fault_traces.jsonl"
+TRACE_FILE_PATH = "/root/_p2a_swe_fault_traces.jsonl"
 
 
 def parse_fault_traces_from_file(
@@ -1231,6 +1303,7 @@ def parse_fault_traces_from_file(
     alt_path: str = "",
     *,
     require_patched: bool = True,
+    trace_file_path: str = TRACE_FILE_PATH,
 ) -> list[list[dict]]:
     """Read ``/tmp/_swe_fault_traces.jsonl`` from the sandbox and parse traces.
 
@@ -1248,7 +1321,7 @@ def parse_fault_traces_from_file(
     if not modified_callables:
         return []
 
-    stdout, exit_code = _read_sandbox_file(env, TRACE_FILE_PATH)
+    stdout, exit_code = _read_sandbox_file(env, trace_file_path)
     if exit_code != 0 or not stdout.strip():
         logger.info("No trace file found or empty: exit_code=%d", exit_code)
         return []

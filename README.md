@@ -10,6 +10,13 @@ Everything is **self-contained**: data comes from HuggingFace, images from the
 pair-diag mirror of the original R2E images. There is **no dependency on the old
 `src-backup` fork**.
 
+> **ARL is the sandbox, not a "remote".** The `arl-env` SDK connects directly to the
+> ARL Gateway (`ARL_GATEWAY_URL`) to boot a per-instance container sandbox where tests
+> and P2A instrumentation run (bonus-map precompute, training rollouts); it is reachable
+> directly from CPU hosts. This is separate from VRC's `remote` facility, which targets
+> the **GPU server** for command debugging — ARL gateway reachability is independent of
+> `vrc remote`.
+
 Default HuggingFace assets are shared across sibling projects:
 
 | Asset | Default location from `src/` | Override |
@@ -26,6 +33,7 @@ location.
 ```
 src/
   config/                     # ALL json/yaml config lives here
+    audits/                    #   machine-readable audit artifacts for data/skip decisions
     startup_fixups.json       #   per-repo test-startup fixups (source patches + dep pins)
     bad_instances.json        #   R2E instances to exclude from training (skip-list)
   scripts/
@@ -39,6 +47,7 @@ src/
     main.py                   # training entry; P2AFullyAsyncTrainer (vanilla if P2A_BONUS_MAP_DIR unset)
     test_setup.py             # startup_fixup_command(repo) — loads config/startup_fixups.json
     trace.py                  # instrumentation + call-graph build (bonus-map precompute)
+    eval_fault_localization.py # offline eval rollout read->fault-localization metrics
     precompute/precompute_bonus_maps.py  # build bonus maps on the ARL backend
     skip_cases.py             # load_skip_ids() from config/bad_instances.json
   env/                        # ARL deployment + runtime (implements swe-rex AbstractRuntime; no swe-rex server)
@@ -58,17 +67,39 @@ PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
 #   -> r2e_gym_subset_p2a.parquet         (full, for bonus-map precompute)
 #   -> r2e_gym_subset_p2a.train.parquet   (bad cases excluded, for training/eval)
 #   dependency note: r2e-gym is installed by uv.lock; no manual uv pip install is needed.
+#   source-of-truth note: rows come from R2E-Gym/R2E-Gym-Subset, not
+#   dyyyyyyyy/r2e-gym-subset-filtered.  The Uni-Agent filtered dataset dropped 75
+#   original cases; on our pair-diag ARL audit, 39/75 passed buggy-F2P/fixed-P2P
+#   and 36/75 were added to config/bad_instances.json.  Among the 39 recovered
+#   training cases, 33 have dynamic bonus maps and 6 are valid-reward cases
+#   without dynamic P2A supervision.  See config/audits/r2e_removed75_pairdiag_audit_20260609.json.
 
 # 2. Precompute bonus maps on ARL (pair-diag images + faithful startup fixups)
 PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl ARL_GATEWAY_URL=$ARL \
   uv run python p2a/precompute/precompute_bonus_maps.py \
     $DATA/r2e_gym_subset_p2a.parquet --output_dir $BONUS --mode dynamic --n_parallel 64
 
-# 3. Build the HARD validation subset (cheap eval; full SWE-bench-Verified is too slow)
+# 3. Build SWE-bench Verified eval data.
+#    HARD is the validation split used during RL to watch convergence; the
+#    remaining Verified instances are the held-out test split after training.
+PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
+  uv run python scripts/build_data.py swebench-verified --out $DATA/swe_bench_verified.parquet
 PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py swebench-hard --out $DATA/swe_bench_verified_hard.parquet
 
-# 4. Train.  Baseline (no P2A): leave P2A_BONUS_MAP_DIR unset.  P2A: set it.
+# 4. Optional diagnostics: build eval-set bonus maps for fault-localization metrics.
+#    These maps are NOT used for training.  They only score eval rollouts.
+TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
+  P2A_EVAL_BONUS_MAP_DIR=$DATA/eval_bonus_maps bash scripts/precompute_eval_bonus_maps.sh
+
+# After a validation rollout dump exists, score whether the model read files on/near
+# the eval fault-propagation graph.
+uv run python -m p2a.eval_fault_localization $ROLLOUT_JSONL \
+  --bonus-map-dir $DATA/eval_bonus_maps \
+  --summary-out $DATA/eval_faultloc_summary.json \
+  --details-out $DATA/eval_faultloc_details.jsonl
+
+# 5. Train.  Baseline (no P2A): leave P2A_BONUS_MAP_DIR unset.  P2A: set it.
 TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
   MODEL_PATH=$MODEL P2A_BONUS_MAP_DIR=$BONUS P2A_M_MAX=3.0 bash scripts/train_p2a.sh
 ```
@@ -83,11 +114,63 @@ These are knobs you set; the repo does not pin them:
 | Train / val data | `TRAIN_FILE` / `TEST_FILE` env vars (point at the parquets built above) |
 | GPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (e.g. 4×8 H20 → `NNODES=4`, `NGPUS_PER_NODE=8`) |
 | P2A on/off + strength | `P2A_BONUS_MAP_DIR` (unset = baseline), `P2A_M_MAX` |
+| Eval fault-localization diagnostics | `P2A_EVAL_BONUS_MAP_DIR`, `P2A_EVAL_BONUS_N_PARALLEL`, `P2A_EVAL_BONUS_LIMIT`, `P2A_EVAL_BONUS_OFFSET` |
 | ARL gateway | `ARL_GATEWAY_URL` |
 | Hard-subset criterion | `--difficulties` flag of `build_data.py swebench-hard` (default = old rLLM set) |
+| R2E bad-case policy | `config/bad_instances.json`; current registry is based on pair-diag ARL gate evidence, not Uni-Agent's filtered HF dataset |
 
 Hydra training overrides live in `scripts/train_p2a.sh`; if you move any to a json/yaml
 config, put it under `config/`.
+
+## Eval Fault-Localization Metrics
+
+`scripts/precompute_eval_bonus_maps.sh` reuses the same dynamic precompute path as
+training bonus maps, but points it at `TEST_FILE` / `EVAL_FILE`.  The resulting
+eval maps should stay out of `P2A_BONUS_MAP_DIR`; they are only a diagnostic
+reference for validation rollouts.
+
+`p2a.eval_fault_localization` accepts rollout dumps in `.jsonl`, `.json`, or
+`.parquet` format.  It first reads `p2a_step_traces`, then structured
+`tool_calls`, then response text / assistant messages, and reports:
+
+| Metric | Meaning |
+|---|---|
+| `bonus_map_coverage` | Fraction of rollout rows with a matching eval bonus map. |
+| `call_graph_coverage` | Fraction with a bonus map that contains call-graph nodes. |
+| `read_rate` | Fraction of rows where file-viewing actions were recovered. |
+| `graph_hit_rate_over_call_graphs` | Fraction whose reads hit any node in the eval call graph. |
+| `ground_truth_hit_rate_over_call_graphs` | Fraction whose reads hit a patched callable (`distance == 0`). |
+| `near_hit_rate_over_call_graphs` | Fraction whose best read distance is `<= --near-threshold` (default `0.5`). |
+| `avg_min_distance_on_hits` | Lower is better; `0` means the model read the edited callable. |
+| `avg_best_positive_multiplier_on_hits` | The diagnostic P2A multiplier implied by the best read distance. |
+
+Current SWE-bench Verified eval-map sanity check, after the targeted F2P,
+trace-capture, unittest-description F2P, zero-test runner, and F2P collection
+guards, is:
+
+| Split | Rows | Dynamic (`standard+direct`) | `standard` | `direct` | `newly_created` | `no_callable` | `no_f2p` | `static_fallback` | `signature_mismatch` | `all_pass` | `no_trace` | `no_gt` |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| hard validation | 45 | 39 (86.7%) | 32 | 7 | 4 | 0 | 1 | 1 | 0 | 0 | 0 | 0 |
+| test rest | 455 | 389 (85.5%) | 258 | 131 | 35 | 18 | 3 | 2 | 7 | 0 | 0 | 1 |
+| full Verified | 500 | 428 (85.6%) | 290 | 138 | 39 | 18 | 4 | 3 | 7 | 0 | 0 | 1 |
+
+The full run used `cache/eval_bonus_verified500_f2p_targeted_20260608_220312/bonus_maps/`;
+the 13 former `no_f2p` Django cases were rerun under
+`cache/swe_no_f2p_rerun_20260609/maps/`, recovering 11 dynamic maps.
+The 13 former `all_pass` cases were rerun under
+`cache/swe_allpass_collection_guard_20260609_005920/maps/`, recovering 10
+dynamic maps and proving the old SymPy/Django narrowed-runner all-pass bucket
+was a harness bug.
+`no_trace=0` is the build-quality gate.  Non-dynamic buckets now mean:
+
+| Bucket | Count | Meaning |
+|---|---:|---|
+| `newly_created` | 39 | The patched callable is absent in the buggy tree, so a function-body tracer cannot observe it dynamically. |
+| `no_callable` | 18 | The patch has no callable-level Python change for the bonus-map extractor. |
+| `signature_mismatch` | 7 | The F2P test fails during Python argument binding before entering the patched callable body. |
+| `static_fallback` | 3 | Static callable extraction found candidates, but sandbox instrumentation produced no instrumented callable. |
+| `no_f2p` | 4 | F2P failures remain unaligned with traces after description-to-method recovery. |
+| `no_gt` | 1 | Tests produced traces, but none entered the patched callable set. |
 
 ## ⚠️ TODO — verify before trusting P2A training
 
