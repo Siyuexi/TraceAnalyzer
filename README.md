@@ -37,7 +37,7 @@ src/
     startup_fixups.json       #   per-repo test-startup fixups (source patches + dep pins)
     bad_instances.json        #   R2E instances to exclude from training (skip-list)
   scripts/
-    build_data.py             # SINGLE data builder, subcommands: r2e | swebench-hard | skip-list
+    build_data.py             # SINGLE data builder: r2e | swebench-verified | swebench-hard | skip-list
     uni_agent_arl.sh          # prepare/data/smoke/debug launcher (ARL config)
     ray_setup.sh              # bring up Ray
     train_p2a.sh              # training launcher (baseline OR P2A)
@@ -57,51 +57,42 @@ src/
 ## Pipeline
 
 ```bash
-# 1. Build R2E training data from HuggingFace (full + skip-filtered .train.parquet)
-#    NOTE: this does NOT use vefaas. Compute backend is ARL (env/agent_config_arl.yaml)
-#    and r2e images are pair-diag. PYTHONPATH includes uni-agent/examples/data_preprocess
-#    only so build_data.py can reuse its prompt/schema CONSTANTS by import; the script
-#    sets DEPLOYMENT internally just to satisfy that import. No vefaas API is called.
+# 1. Build R2E training data from HuggingFace (full + skip-filtered .train.parquet).
+#    Rows come from canonical R2E-Gym/R2E-Gym-Subset; bad cases are excluded via
+#    config/bad_instances.json. Images are pair-diag; the compute backend is ARL.
 PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py r2e --out $DATA/r2e_gym_subset_p2a.parquet
 #   -> r2e_gym_subset_p2a.parquet         (full, for bonus-map precompute)
-#   -> r2e_gym_subset_p2a.train.parquet   (bad cases excluded, for training/eval)
-#   dependency note: r2e-gym is installed by uv.lock; no manual uv pip install is needed.
-#   source-of-truth note: rows come from R2E-Gym/R2E-Gym-Subset, not
-#   dyyyyyyyy/r2e-gym-subset-filtered.  The Uni-Agent filtered dataset dropped 75
-#   original cases; on our pair-diag ARL audit, 39/75 passed buggy-F2P/fixed-P2P
-#   and 36/75 were added to config/bad_instances.json.  Among the 39 recovered
-#   training cases, 33 have dynamic bonus maps and 6 are valid-reward cases
-#   without dynamic P2A supervision.  See config/audits/r2e_removed75_pairdiag_audit_20260609.json.
+#   -> r2e_gym_subset_p2a.train.parquet   (bad cases excluded, for training)
 
-# 2. Precompute bonus maps on ARL (pair-diag images + faithful startup fixups)
+# 2. Precompute training bonus maps on ARL (pair-diag images + startup fixups).
+#    Output defaults to ../../p2a/bonus_maps (override with P2A_BONUS_MAPS_DIR).
+#    Instances already present there are skipped; pass --rebuild to force a recompute.
+#    This dir holds training maps only — no SWE-bench data.
 PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl ARL_GATEWAY_URL=$ARL \
   uv run python p2a/precompute/precompute_bonus_maps.py \
-    $DATA/r2e_gym_subset_p2a.parquet --output_dir $BONUS --mode dynamic --n_parallel 64
+    $DATA/r2e_gym_subset_p2a.parquet --mode dynamic --n_parallel 64
+#   -> ../../p2a/bonus_maps/<instance_id>.json
 
 # 3. Build SWE-bench Verified eval data.
-#    HARD is the validation split used during RL to watch convergence; the
-#    remaining Verified instances are the held-out test split after training.
+#    HARD is the validation split watched during RL; the rest is the held-out test split.
 PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py swebench-verified --out $DATA/swe_bench_verified.parquet
 PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py swebench-hard --out $DATA/swe_bench_verified_hard.parquet
 
-# 4. Optional diagnostics: build eval-set bonus maps for fault-localization metrics.
-#    These maps are NOT used for training.  They only score eval rollouts.
+# 4. Optional diagnostics: eval-set bonus maps for fault-localization metrics
+#    (scoring eval rollouts only; never used for training reshape).
 TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
   P2A_EVAL_BONUS_MAP_DIR=$DATA/eval_bonus_maps bash scripts/precompute_eval_bonus_maps.sh
-
-# After a validation rollout dump exists, score whether the model read files on/near
-# the eval fault-propagation graph.
 uv run python -m p2a.eval_fault_localization $ROLLOUT_JSONL \
   --bonus-map-dir $DATA/eval_bonus_maps \
   --summary-out $DATA/eval_faultloc_summary.json \
   --details-out $DATA/eval_faultloc_details.jsonl
 
-# 5. Train.  Baseline (no P2A): leave P2A_BONUS_MAP_DIR unset.  P2A: set it.
+# 5. Train.  Baseline (no P2A): leave P2A_BONUS_MAP_DIR unset.  P2A: point it at the maps dir.
 TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
-  MODEL_PATH=$MODEL P2A_BONUS_MAP_DIR=$BONUS P2A_M_MAX=3.0 bash scripts/train_p2a.sh
+  MODEL_PATH=$MODEL P2A_BONUS_MAP_DIR=../../p2a/bonus_maps P2A_M_MAX=3.0 bash scripts/train_p2a.sh
 ```
 
 ## What you configure yourself
@@ -113,11 +104,12 @@ These are knobs you set; the repo does not pin them:
 | Model | `MODEL_PATH` env var; default is `../../models/Qwen3-Coder-30B-A3B-Instruct` from `Qwen/Qwen3-Coder-30B-A3B-Instruct` |
 | Train / val data | `TRAIN_FILE` / `TEST_FILE` env vars (point at the parquets built above) |
 | GPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (e.g. 4×8 H20 → `NNODES=4`, `NGPUS_PER_NODE=8`) |
-| P2A on/off + strength | `P2A_BONUS_MAP_DIR` (unset = baseline), `P2A_M_MAX` |
+| P2A on/off + strength | `P2A_BONUS_MAP_DIR` (unset = baseline; training maps default to `../../p2a/bonus_maps`), `P2A_M_MAX` |
+| Bonus-map output dir | `P2A_BONUS_MAPS_DIR` (precompute write location; default `../../p2a/bonus_maps`) |
 | Eval fault-localization diagnostics | `P2A_EVAL_BONUS_MAP_DIR`, `P2A_EVAL_BONUS_N_PARALLEL`, `P2A_EVAL_BONUS_LIMIT`, `P2A_EVAL_BONUS_OFFSET` |
 | ARL gateway | `ARL_GATEWAY_URL` |
-| Hard-subset criterion | `--difficulties` flag of `build_data.py swebench-hard` (default = old rLLM set) |
-| R2E bad-case policy | `config/bad_instances.json`; current registry is based on pair-diag ARL gate evidence, not Uni-Agent's filtered HF dataset |
+| Hard-subset criterion | `--difficulties` flag of `build_data.py swebench-hard` (default = the `1-4 hours` / `>4 hours` difficulty set) |
+| R2E bad-case policy | `config/bad_instances.json` (pair-diag ARL gate evidence) |
 
 Hydra training overrides live in `scripts/train_p2a.sh`; if you move any to a json/yaml
 config, put it under `config/`.

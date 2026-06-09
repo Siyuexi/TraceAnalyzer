@@ -61,8 +61,8 @@ cmd=(
   --n_parallel "${P2A_EVAL_BONUS_N_PARALLEL}"
 )
 
-if [[ "${P2A_EVAL_BONUS_SKIP_EXISTING}" != "0" ]]; then
-  cmd+=(--skip_existing)
+if [[ "${P2A_EVAL_BONUS_SKIP_EXISTING}" == "0" ]]; then
+  cmd+=(--rebuild)
 fi
 if [[ -n "${P2A_EVAL_BONUS_LIMIT:-}" ]]; then
   cmd+=(--limit "${P2A_EVAL_BONUS_LIMIT}")

@@ -1559,9 +1559,15 @@ def _process_one(args):
 
 
 def main():
+    from p2a.hf_assets import shared_bonus_maps_dir
+
     parser = argparse.ArgumentParser(description="Precompute P2A bonus maps")
     parser.add_argument("parquet_path", help="Path to dataset parquet file")
-    parser.add_argument("--output_dir", required=True, help="Output directory for bonus map JSONs")
+    parser.add_argument(
+        "--output_dir",
+        default=str(shared_bonus_maps_dir()),
+        help="Output directory for bonus map JSONs (default: ../../p2a/bonus_maps)",
+    )
     parser.add_argument("--mode", choices=["static", "dynamic"], default="static", help="static: AST diff only. dynamic: full trace pipeline")
     parser.add_argument(
         "--sandbox_backend",
@@ -1575,7 +1581,12 @@ def main():
     parser.add_argument(
         "--skip_existing",
         action="store_true",
-        help="Skip rows whose <instance_id>.json already exists in --output_dir",
+        help="(default) skip rows whose <instance_id>.json already exists in --output_dir",
+    )
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="rebuild maps even if <instance_id>.json already exists (overrides the default skip)",
     )
     parser.add_argument(
         "--no_skip_filter",
@@ -1606,6 +1617,8 @@ def main():
         help="Max stdout/stderr tail chars saved in each trace sidecar.",
     )
     args = parser.parse_args()
+    # Skipping already-built maps is the default; --rebuild forces a full recompute.
+    skip_existing = not args.rebuild
 
     os.makedirs(args.output_dir, exist_ok=True)
     trace_sidecar_dir = None
@@ -1649,7 +1662,7 @@ def main():
         if instance_id and instance_id in skip_ids:
             n_skipped_bad += 1
             continue
-        if args.skip_existing:
+        if skip_existing:
             if instance_id and os.path.exists(os.path.join(args.output_dir, f"{instance_id}.json")):
                 continue
         work_items.append(

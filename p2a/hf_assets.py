@@ -31,6 +31,14 @@ def shared_models_dir() -> Path:
     return shared_root() / "models"
 
 
+def shared_bonus_maps_dir() -> Path:
+    """Default location for training (R2E) bonus maps: ../../p2a/bonus_maps."""
+    override = os.environ.get("P2A_BONUS_MAPS_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    return shared_root() / "p2a" / "bonus_maps"
+
+
 def hf_repo_basename(repo_id: str) -> str:
     return repo_id.rstrip("/").split("/")[-1]
 
