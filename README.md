@@ -61,6 +61,7 @@ Set the shared paths once per shell:
 ```bash
 export DATA="${DATA:-../../datasets/p2a}"
 export MODEL="${MODEL:-../../models/Qwen3-Coder-30B-A3B-Instruct}"
+# Usual ARL Gateway: http://118.145.210.10:8080
 export ARL_GATEWAY_URL="${ARL_GATEWAY_URL:?set ARL_GATEWAY_URL}"
 ```
 
