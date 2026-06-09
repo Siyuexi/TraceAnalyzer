@@ -690,6 +690,71 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertEqual(result["test_exit"], 1)
         self.assertTrue(result["test_output_capture_detail"]["test_exit_overridden_from_output"])
 
+    def test_instrumentation_empty_is_instrumentation_failed(self) -> None:
+        from p2a.precompute import precompute_bonus_maps as bonus_maps
+
+        modified = [
+            {
+                "name": "demo",
+                "qualified_name": "demo",
+                "file_path": "pkg/demo.py",
+                "start_line": 10,
+                "end_line": 12,
+            }
+        ]
+
+        class FakeEnv:
+            swebench_verified = False
+            repo_path = "/testbed"
+            alt_path = "/root"
+
+            def start(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def checkout_buggy_commit(self, task, *, instance_id):
+                return {"buggy_checkout_ref": "abc123^", "buggy_checkout_exit": 0}
+
+            def _run(self, command: str, timeout: int | float | None = None):
+                return "", ""
+
+        task = {
+            "instance_id": "demo__abc123",
+            "repo": "demo",
+            "patch": "diff --git a/pkg/demo.py b/pkg/demo.py\n",
+        }
+
+        with (
+            patch.object(bonus_maps, "find_modified_callables_from_task", return_value=modified),
+            patch.object(bonus_maps, "find_newly_created_callables", return_value=[]),
+            patch(
+                "p2a.precompute.uni_agent_sandbox.create_uni_agent_sandbox",
+                return_value=FakeEnv(),
+            ),
+            patch("p2a.trace.instrument_sandbox", return_value=[]),
+        ):
+            result = bonus_maps.compute_dynamic_bonus_map(task)
+
+        self.assertEqual(result["case_type"], "instrumentation_failed")
+        self.assertEqual(result["reason_code"], "instrumentation_empty")
+        self.assertTrue(result["error"])
+
+    def test_all_pass_reason_is_single_early_decision(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import _all_pass_reason_code
+
+        self.assertEqual(_all_pass_reason_code(0, {"all_three_read_failed": False}), "buggy_version_passes")
+        self.assertIsNone(_all_pass_reason_code(1, {"all_three_read_failed": False}))
+        self.assertIsNone(_all_pass_reason_code(0, {"all_three_read_failed": True}))
+        self.assertIsNone(
+            _all_pass_reason_code(
+                0,
+                {"all_three_read_failed": False},
+                swebench_f2p_collection_missing=True,
+            )
+        )
+
     def test_swebench_missing_f2p_collection_is_not_all_pass(self) -> None:
         from p2a.precompute import precompute_bonus_maps as bonus_maps
 

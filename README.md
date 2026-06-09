@@ -140,7 +140,7 @@ Current SWE-bench Verified eval-map sanity check, after the targeted F2P,
 trace-capture, unittest-description F2P, zero-test runner, and F2P collection
 guards, is:
 
-| Split | Rows | Dynamic (`standard+direct`) | `standard` | `direct` | `newly_created` | `no_callable` | `no_f2p` | `static_fallback` | `signature_mismatch` | `all_pass` | `no_trace` | `no_gt` |
+| Split | Rows | Dynamic (`standard+direct`) | `standard` | `direct` | `newly_created` | `no_callable` | `no_f2p` | `instrumentation_failed` | `signature_mismatch` | `all_pass` | `no_trace` | `no_gt` |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | hard validation | 45 | 39 (86.7%) | 32 | 7 | 4 | 0 | 1 | 1 | 0 | 0 | 0 | 0 |
 | test rest | 455 | 389 (85.5%) | 258 | 131 | 35 | 18 | 3 | 2 | 7 | 0 | 0 | 1 |
@@ -160,7 +160,7 @@ was a harness bug.
 | `newly_created` | 39 | The patched callable is absent in the buggy tree, so a function-body tracer cannot observe it dynamically. |
 | `no_callable` | 18 | The patch has no callable-level Python change for the bonus-map extractor. |
 | `signature_mismatch` | 7 | The F2P test fails during Python argument binding before entering the patched callable body. |
-| `static_fallback` | 3 | Static callable extraction found candidates, but sandbox instrumentation produced no instrumented callable. |
+| `instrumentation_failed` | 3 | Static callable extraction found candidates, but sandbox instrumentation produced no instrumented callable. |
 | `no_f2p` | 4 | F2P failures remain unaligned with traces after description-to-method recovery. |
 | `no_gt` | 1 | Tests produced traces, but none entered the patched callable set. |
 
