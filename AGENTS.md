@@ -40,10 +40,11 @@ changed to Y", "reverted the … switch", dated attributions, PR/issue numbers a
 narrative). Git log is the history; the code is not. Delete such comments or rewrite
 them present-tense.
 
-## Uni-Agent / veFaaS Docs
+## Uni-Agent / ARL Docs
 
-When working with the Uni-Agent + veFaaS stack, use the official Uni-Agent
-documentation as a primary reference:
+When working with the Uni-Agent training stack, use the official Uni-Agent
+documentation as a primary reference. ARL-specific runtime behavior lives in
+this repository under `env/` and `scripts/uni_agent_arl.sh`.
 https://uni-agent.readthedocs.io/en/latest/index.html
 
 ## Git Rules

@@ -28,8 +28,9 @@ from pathlib import Path
 
 import pandas as pd
 
-# data_preprocess example modules require a known DEPLOYMENT value at import; we use only
-# their prompt constants. Images are pair-diag refs built below, independent of this value.
+# data_preprocess example modules require a known DEPLOYMENT value at import; we use
+# only their prompt constants. This is not the runtime backend. The parquet rows
+# below carry pair-diag image refs, and agent_config_arl.yaml supplies ARL at launch.
 os.environ.setdefault("DEPLOYMENT", "vefaas")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/ on path

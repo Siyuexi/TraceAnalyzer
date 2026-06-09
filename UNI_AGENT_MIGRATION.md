@@ -4,7 +4,8 @@ This project now uses a local `src/` source repository for P2A code and Uni-Agen
 
 ## Layout
 
-- `src/`: local P2A source repository. It intentionally has no remote right now.
+- `src/`: P2A source repository with GitHub remote
+  `git@github.com:Siyuexi/TraceAnalyzer.git`; development is on `main`.
 - `src/p2a/`: P2A advantage reshape, bonus-map loading, and precompute utilities.
 - `src/env/`: local ARL SDK deployment glue, image routing, ARL-aware Uni-Agent loop adapter, and smoke/data helpers. The external `arl-env` SDK owns the `arl` import name.
 - `src/scripts/`: project helper scripts for baseline preparation and launch.
@@ -12,21 +13,21 @@ This project now uses a local `src/` source repository for P2A code and Uni-Agen
 - `src/uni-agent/verl`: nested verl submodule required by Uni-Agent training scripts.
 - `src-backup/`: previous rLLM/TraceAnalyzer submodule. It is preserved as-is and should not be touched for the baseline migration.
 
-## Goal For The Next GPU Run
+## Baseline Reproduction Path
 
-Run Uni-Agent's baseline path first, without P2A loss changes:
+Run the current ARL baseline path first, without P2A advantage reshape:
 
-1. Prepare veFaaS runtime env and agent config.
+1. Prepare ARL runtime env and agent config.
 2. Generate R2E-Gym-Subset train parquet. Re-run this after the migration; the
-   forked preprocess script now embeds `git checkout <commit_hash>` in each
-   sample's `post_setup_cmd` so sandboxes start from the buggy commit rather
-   than the fixed image HEAD.
-3. Generate SWE-Bench Verified veFaaS eval parquet.
-4. Run `examples/agent_train/single_node_debug.sh` from `src/uni-agent/`.
+   local builder embeds `git checkout <commit_hash>` in each sample's
+   `post_setup_cmd` so sandboxes start from the buggy commit rather than the
+   fixed image HEAD.
+3. Generate SWE-Bench Verified HARD eval parquet.
+4. Run `src/scripts/train_p2a.sh` with `P2A_BONUS_MAP_DIR` unset.
 
 P2A bonus-map instrumentation should be added only after the baseline can run end-to-end.
 Lightweight P2A rollout instrumentation is available but disabled by default; set
-`UNI_AGENT_P2A_TRACE=1` before `src/scripts/uni_agent_baseline.sh prepare` if you want
+`UNI_AGENT_P2A_TRACE=1` before `src/scripts/uni_agent_arl.sh prepare` if you want
 per-step spans and parsed tool calls to be carried in rollout `extra_fields`.
 
 Dynamic bonus-map construction uses Uni-Agent sandboxes (ARL backend). The trace
@@ -34,24 +35,26 @@ instrumentation/parsing engine is a first-class module of this source tree,
 `p2a/trace.py` (no dependency on `src-backup`). In dynamic mode, the precompute script starts a Uni-Agent
 `AgentEnv`, runs the sample `post_setup_cmd`, explicitly checks out the buggy
 commit inferred from `commit_hash` or `instance_id`, instruments `/testbed`, and
-runs `/root/run_tests.sh`. This is the path intended for R2E-Gym-Subset veFaaS.
+runs `/root/run_tests.sh`. This is the path intended for the R2E-Gym-Subset
+ARL/Uni-Agent dynamic bonus-map build.
 
 For P2A training, use `src/scripts/train_p2a.sh` from the project root. That script
-creates a separate `$RAY_DATA_HOME/data/swe_agent/p2a_runtime_env.yaml` with
-`PYTHONPATH=uni-agent/verl:uni-agent:.`, because the P2A package lives in `src/`
-while Uni-Agent and verl live under `src/uni-agent/`.
+creates or updates `$RAY_DATA_HOME/data/swe_agent/runtime_env_arl.yaml` with
+`PYTHONPATH=uni-agent/verl:uni-agent:.`, and uses
+`$RAY_DATA_HOME/data/swe_agent/agent_config_arl.yaml` by default. Leave
+`P2A_BONUS_MAP_DIR` unset to reproduce the Uni-Agent baseline; set it only for
+P2A advantage reshape.
 
-## Required Secrets
+## Required ARL Environment
 
-Do not commit these. Provide them through the shell environment or by editing the generated runtime env file under `$RAY_DATA_HOME`.
+Do not commit credentials or cluster-local endpoints. Provide them through the shell
+environment or by editing the generated runtime env file under `$RAY_DATA_HOME`.
 
 ```bash
-export VOLCE_ACCESS_KEY="..."
-export VOLCE_SECRET_KEY="..."
-export VEFAAS_FUNCTION_ID="..."
-export VEFAAS_FUNCTION_ROUTE="..."
-export VEFAAS_REGION="cn-beijing"
-export UNI_AGENT_P2A_TRACE="1"  # optional instrumentation; omit for pure baseline
+export ARL_GATEWAY_URL="http://118.145.210.10:8080"  # override if your ARL gateway differs
+export ARL_NAMESPACE="default"
+export ARL_EXPERIMENT_ID="p2a-uniagent-arl"
+export UNI_AGENT_P2A_TRACE="1"  # optional process tracing; omit for pure baseline
 ```
 
 ## Uni-Agent Install Commands
@@ -77,70 +80,75 @@ The R2E-Gym package is needed by `examples/data_preprocess/r2e_gym_subset_filter
 From the project root:
 
 ```bash
-src/scripts/uni_agent_baseline.sh prepare
+src/scripts/uni_agent_arl.sh prepare
 ```
 
 This creates:
 
-- `$RAY_DATA_HOME/data/swe_agent/runtime_env.yaml`
-- `$RAY_DATA_HOME/data/swe_agent/agent_config.yaml`
+- `$RAY_DATA_HOME/data/swe_agent/runtime_env_arl.yaml`
+- `$RAY_DATA_HOME/data/swe_agent/agent_config_arl.yaml`
 
-If the veFaaS environment variables above are set, the helper writes them into `runtime_env.yaml`. It also lowers the debug rollout config from the upstream high-concurrency defaults.
+If ARL/P2A environment variables above are set, the helper writes them into
+`runtime_env_arl.yaml`. It also lowers the debug rollout config from the
+upstream high-concurrency defaults when running through `uni_agent_arl.sh debug`.
 
 Generate datasets after Uni-Agent dependencies are installed:
 
 ```bash
-src/scripts/uni_agent_baseline.sh data
+src/scripts/uni_agent_arl.sh data
 ```
 
-Run the baseline debug job after Ray/GPU/model/veFaaS are ready:
+Run the baseline debug job after Ray/GPU/model/ARL are ready:
 
 ```bash
-export MODEL_PATH="${RAY_DATA_HOME}/models/Qwen3-4B-Instruct-xml-template"
-src/scripts/uni_agent_baseline.sh debug
+src/scripts/uni_agent_arl.sh smoke
+src/scripts/uni_agent_arl.sh debug
 ```
 
 The helper sets:
 
-- `TRAIN_FILE=$RAY_DATA_HOME/data/swe_agent/r2e_gym_subset_filtered.parquet`
-- `TEST_FILE=$RAY_DATA_HOME/data/swe_agent/swe_bench_verified_vefaas.parquet`
-- `RUNTIME_ENV=$RAY_DATA_HOME/data/swe_agent/runtime_env.yaml`
-- `AGENT_CONFIG_PATH=$RAY_DATA_HOME/data/swe_agent/agent_config.yaml`
+- `TRAIN_FILE=$RAY_DATA_HOME/data/swe_agent/r2e_gym_subset_p2a.train.parquet`
+- `TEST_FILE=$RAY_DATA_HOME/data/swe_agent/r2e_gym_subset_p2a.train.parquet` for debug
+- `RUNTIME_ENV=$RAY_DATA_HOME/data/swe_agent/runtime_env_arl.yaml`
+- `AGENT_CONFIG_PATH=$RAY_DATA_HOME/data/swe_agent/agent_config_arl.yaml`
 
 ## Manual Baseline Commands
 
 ```bash
-cd src/uni-agent
+cd src
 export RAY_DATA_HOME="${RAY_DATA_HOME:-$HOME/verl}"
 mkdir -p "${RAY_DATA_HOME}/data/swe_agent"
 
-cp examples/agent_interaction/runtime_env.yaml \
-  "${RAY_DATA_HOME}/data/swe_agent/runtime_env.yaml"
-cp examples/agent_interaction/agent_config_vefaas.yaml \
-  "${RAY_DATA_HOME}/data/swe_agent/agent_config.yaml"
+cp uni-agent/examples/agent_interaction/runtime_env.yaml \
+  "${RAY_DATA_HOME}/data/swe_agent/runtime_env_arl.yaml"
+cp env/agent_config_arl.yaml \
+  "${RAY_DATA_HOME}/data/swe_agent/agent_config_arl.yaml"
 
-DEPLOYMENT=vefaas python examples/data_preprocess/r2e_gym_subset_filtered.py \
-  --local-save-dir "${RAY_DATA_HOME}/data/swe_agent"
-DEPLOYMENT=vefaas python examples/data_preprocess/swe_bench_verified.py \
-  --local-save-dir "${RAY_DATA_HOME}/data/swe_agent"
+PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
+  uv run python scripts/build_data.py r2e \
+    --out "${RAY_DATA_HOME}/data/swe_agent/r2e_gym_subset_p2a.parquet"
+PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
+  uv run python scripts/build_data.py swebench-hard \
+    --out "${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified_hard.parquet"
 
-export TRAIN_FILE="${RAY_DATA_HOME}/data/swe_agent/r2e_gym_subset_filtered.parquet"
-export TEST_FILE="${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified_vefaas.parquet"
-export RUNTIME_ENV="${RAY_DATA_HOME}/data/swe_agent/runtime_env.yaml"
-export AGENT_CONFIG_PATH="${RAY_DATA_HOME}/data/swe_agent/agent_config.yaml"
+export TRAIN_FILE="${RAY_DATA_HOME}/data/swe_agent/r2e_gym_subset_p2a.train.parquet"
+export TEST_FILE="${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified_hard.parquet"
+export RUNTIME_ENV="${RAY_DATA_HOME}/data/swe_agent/runtime_env_arl.yaml"
+export AGENT_CONFIG_PATH="${RAY_DATA_HOME}/data/swe_agent/agent_config_arl.yaml"
 
-bash examples/agent_train/single_node_debug.sh
+# Baseline: leave P2A_BONUS_MAP_DIR unset.
+bash scripts/train_p2a.sh
 ```
 
 ## P2A Bonus Map Precompute
 
-After veFaaS credentials and Uni-Agent dependencies are available, dynamic
+After ARL connectivity and Uni-Agent dependencies are available, dynamic
 bonus maps can be generated against the Uni-Agent R2E parquet:
 
 ```bash
 PYTHONPATH=src \
 python -m p2a.precompute.precompute_bonus_maps \
-  "${RAY_DATA_HOME}/data/swe_agent/r2e_gym_subset_filtered.parquet" \
+  "${RAY_DATA_HOME}/data/swe_agent/r2e_gym_subset_p2a.train.parquet" \
   --output_dir "${RAY_DATA_HOME}/data/swe_agent/bonus_maps" \
   --mode dynamic \
   --sandbox_backend uni_agent \
@@ -160,9 +168,7 @@ migration path.
 ## Known Tomorrow Blockers
 
 - GPU dependencies and Ray cluster are not configured in this workspace yet.
-- veFaaS credentials/function/route are not configured yet.
-- `single_node_debug.sh` submits a Ray job; Ray must be running on the GPU server.
-- Uni-Agent's R2E-Gym-Subset preprocess currently supports veFaaS mapping, not local deployment.
+- `train_p2a.sh` submits a Ray job; Ray must be running on the GPU server.
 - The direct ARL SDK path requires `arl-env==0.3.1` in the ambient Uni-Agent
   execution environment and in the training image/environment; this source tree
   currently does not own a `src/pyproject.toml`/`uv.lock`.

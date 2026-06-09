@@ -8,7 +8,7 @@ Usage: src/scripts/uni_agent_arl.sh prepare|data|smoke|debug|all
 prepare  Write ARL runtime_env.yaml and agent_config.yaml into $RAY_DATA_HOME.
 data     Generate ARL-backed R2E-Gym-Subset train parquet.
 smoke    Boot one ARL sandbox and verify SDK runtime persistence/upload.
-debug    Run Uni-Agent single-node debug launcher using ARL config.
+debug    Run the ARL-aligned train_p2a.sh launcher.
 all      Run prepare, data, then debug.
 EOF
 }
@@ -53,12 +53,35 @@ keys = [
     "P2A_BONUS_MAP_DIR",
     "P2A_M_MAX",
     "P2A_TRACKING_MODE",
+    "P2A_EVAL_BONUS_MAP_DIR",
+    "P2A_EVAL_NEAR_THRESHOLD",
+    "P2A_EVAL_DETAILS_DIR",
 ]
 
 with open(path, "r", encoding="utf-8") as fh:
     text = fh.read()
 
 text = re.sub(r'(^\s*PYTHONPATH:\s*).+$', r'\1"uni-agent/verl:uni-agent:."', text, flags=re.MULTILINE)
+lines = []
+legacy_placeholder_keys = {
+    "VEFAAS_FUNCTION_ID",
+    "VEFAAS_FUNCTION_ROUTE",
+    "VEFAAS_REGION",
+    "VOLCE_ACCESS_KEY",
+    "VOLCE_SECRET_KEY",
+    "MODAL_TOKEN_ID",
+    "MODAL_TOKEN_SECRET",
+}
+legacy_comment_needles = ("if you use vefaas", "if you use modal")
+for line in text.splitlines():
+    stripped = line.strip()
+    if any(needle in stripped.lower() for needle in legacy_comment_needles):
+        continue
+    key = stripped.split(":", 1)[0]
+    if key in legacy_placeholder_keys:
+        continue
+    lines.append(line)
+text = "\n".join(lines) + "\n"
 env_vars_seen = "env_vars:" in text
 for key in keys:
     value = os.environ.get(key)
@@ -160,7 +183,10 @@ debug() {
   export TEST_FILE
   export RUNTIME_ENV
   export AGENT_CONFIG_PATH
-  bash uni-agent/examples/agent_train/single_node_debug.sh
+  if [[ -n "${P2A_BONUS_MAP_DIR:-}" ]]; then
+    echo "P2A_BONUS_MAP_DIR is set; debug will run P2A advantage reshape, not pure baseline." >&2
+  fi
+  bash scripts/train_p2a.sh
 }
 
 cmd="${1:-}"

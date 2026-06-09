@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P2A training script — adapted from uni-agent/examples/agent_train/single_node_debug.sh
+# P2A/ARL training script — adapted from uni-agent/examples/agent_train/single_node_debug.sh
 #
 # Differences from vanilla Uni-Agent training:
 # 1. Uses `python3 -m p2a.main` instead of `python3 -m verl.experimental.fully_async_policy.fully_async_main`
@@ -18,30 +18,27 @@ set -xeuo pipefail
 
 SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${SRC_ROOT}/scripts/shared_hf.sh"
-DEFAULT_VEFAAS_ENV="${SRC_ROOT}/.secrets/vefaas_env.sh"
-if [[ -f "${DEFAULT_VEFAAS_ENV}" ]]; then
-  # shellcheck source=/dev/null
-  source "${DEFAULT_VEFAAS_ENV}"
-fi
 
 UNI_AGENT_DIR="${SRC_ROOT}/uni-agent"
 cd "${SRC_ROOT}"
 
 project_name='P2A-SWE-Agent'
-exp_name='P2A-GRPO-R2E-Fully-Async'
+exp_name='P2A-GSPO-R2E-Fully-Async'
 
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
 MODEL_PATH=${MODEL_PATH:-"$(default_model_path)"}
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/swe_agent/r2e_gym_subset_filtered.parquet"}
-TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified_vefaas.parquet"}
-VANILLA_RUNTIME_ENV=${VANILLA_RUNTIME_ENV:-"${RAY_DATA_HOME}/data/swe_agent/runtime_env.yaml"}
-RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/swe_agent/p2a_runtime_env.yaml"}
-AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-"${RAY_DATA_HOME}/data/swe_agent/agent_config.yaml"}
+TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/swe_agent/r2e_gym_subset_p2a.train.parquet"}
+TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified_hard.parquet"}
+RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/swe_agent/runtime_env_arl.yaml"}
+DEFAULT_AGENT_CONFIG_PATH="${RAY_DATA_HOME}/data/swe_agent/agent_config_arl.yaml"
+AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-"${DEFAULT_AGENT_CONFIG_PATH}"}
 
 rollout_mode="async"
 rollout_name="sglang"
 
+# Uni-Agent's GSPO recipe keeps GRPO advantage estimation and switches the
+# actor policy loss to GSPO below.
 adv_estimator=grpo
 
 use_kl_in_reward=False
@@ -59,7 +56,8 @@ overlong_buffer_len=$((1024 * 4))
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
-loss_mode=${P2A_LOSS_MODE:-gspo}   # match the uni-agent example; override with P2A_LOSS_MODE
+# Match the Uni-Agent example by default; override with P2A_LOSS_MODE for ablations.
+loss_mode=${P2A_LOSS_MODE:-gspo}
 
 temperature=1.0
 top_p=1.0
@@ -106,11 +104,11 @@ ensure_model_path
 
 mkdir -p "$(dirname "${RUNTIME_ENV}")"
 if [[ ! -f "${RUNTIME_ENV}" ]]; then
-    if [[ -f "${VANILLA_RUNTIME_ENV}" ]]; then
-        cp "${VANILLA_RUNTIME_ENV}" "${RUNTIME_ENV}"
-    else
-        cp "${UNI_AGENT_DIR}/examples/agent_interaction/runtime_env.yaml" "${RUNTIME_ENV}"
-    fi
+    cp "${UNI_AGENT_DIR}/examples/agent_interaction/runtime_env.yaml" "${RUNTIME_ENV}"
+fi
+mkdir -p "$(dirname "${AGENT_CONFIG_PATH}")"
+if [[ "${AGENT_CONFIG_PATH}" == "${DEFAULT_AGENT_CONFIG_PATH}" || ! -f "${AGENT_CONFIG_PATH}" ]]; then
+    cp "${SRC_ROOT}/env/agent_config_arl.yaml" "${AGENT_CONFIG_PATH}"
 fi
 
 python3 - "${RUNTIME_ENV}" <<'PY'
@@ -124,8 +122,36 @@ with open(path, "r", encoding="utf-8") as fh:
     text = fh.read()
 
 text = re.sub(r'(^\s*PYTHONPATH:\s*).+$', r'\1"uni-agent/verl:uni-agent:."', text, flags=re.MULTILINE)
+lines = []
+legacy_placeholder_keys = {
+    "VEFAAS_FUNCTION_ID",
+    "VEFAAS_FUNCTION_ROUTE",
+    "VEFAAS_REGION",
+    "VOLCE_ACCESS_KEY",
+    "VOLCE_SECRET_KEY",
+    "MODAL_TOKEN_ID",
+    "MODAL_TOKEN_SECRET",
+}
+legacy_comment_needles = ("if you use vefaas", "if you use modal")
+for line in text.splitlines():
+    stripped = line.strip()
+    if any(needle in stripped.lower() for needle in legacy_comment_needles):
+        continue
+    key = stripped.split(":", 1)[0]
+    if key in legacy_placeholder_keys:
+        continue
+    lines.append(line)
+text = "\n".join(lines) + "\n"
 
 for key in (
+    "ARL_GATEWAY_URL",
+    "ARL_NAMESPACE",
+    "ARL_EXPERIMENT_ID",
+    "ARL_TIMEOUT",
+    "ARL_STARTUP_TIMEOUT",
+    "ARL_MIRROR_REGISTRY",
+    "ARL_MIRROR_NAMESPACE",
+    "P2A_ARL_IMAGE_OVERRIDES_JSON",
     "P2A_BONUS_MAP_DIR",
     "P2A_M_MAX",
     "P2A_TRACKING_MODE",

@@ -76,6 +76,11 @@ PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl ARL_GATEWAY_URL=$ARL \
 
 # 3. Build SWE-bench Verified eval data.
 #    HARD is the validation split watched during RL; the rest is the held-out test split.
+#    The builder reads two upstream HF datasets into the shared cache:
+#      ../../datasets/SWE-Bench-Verified/test   (R2E-Gym rows with parsed_commit/run_tests/docker_image)
+#      ../../datasets/SWE-bench_Verified/test   (Princeton rows for difficulty labels)
+#    `swebench-hard` filters by difficulty and writes a parquet; it does not create
+#    a separate `*-hard/` dataset directory.
 PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py swebench-verified --out $DATA/swe_bench_verified.parquet
 PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
@@ -85,6 +90,10 @@ PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
 #    (scoring eval rollouts only; never used for training reshape).
 TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
   P2A_EVAL_BONUS_MAP_DIR=$DATA/eval_bonus_maps bash scripts/precompute_eval_bonus_maps.sh
+# Optional offline analysis for an already-dumped rollout file.  `summary-out`
+# is aggregate JSON; `details-out` is per-instance JSONL for debugging misses.
+# Pure training/evaluation does not read these files.  Live validation dashboards
+# instead use P2A_EVAL_BONUS_MAP_DIR and optionally P2A_EVAL_DETAILS_DIR.
 uv run python -m p2a.eval_fault_localization $ROLLOUT_JSONL \
   --bonus-map-dir $DATA/eval_bonus_maps \
   --summary-out $DATA/eval_faultloc_summary.json \
@@ -149,16 +158,16 @@ guards, is:
 | Split | Rows | Dynamic (`standard+direct`) | `standard` | `direct` | `newly_created` | `no_callable` | `no_f2p` | `instrumentation_failed` | `signature_mismatch` | `all_pass` | `no_trace` | `no_gt` |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | hard validation | 45 | 39 (86.7%) | 32 | 7 | 4 | 0 | 1 | 1 | 0 | 0 | 0 | 0 |
-| test rest | 455 | 389 (85.5%) | 258 | 131 | 35 | 18 | 3 | 2 | 7 | 0 | 0 | 1 |
-| full Verified | 500 | 428 (85.6%) | 290 | 138 | 39 | 18 | 4 | 3 | 7 | 0 | 0 | 1 |
+| test rest | 455 | 389 (85.5%) | 258 | 131 | 35 | 18 | 2 | 2 | 7 | 2 | 0 | 0 |
+| full Verified | 500 | 428 (85.6%) | 290 | 138 | 39 | 18 | 3 | 3 | 7 | 2 | 0 | 0 |
 
 The full run used `cache/eval_bonus_verified500_f2p_targeted_20260608_220312/bonus_maps/`;
 the 13 former `no_f2p` Django cases were rerun under
 `cache/swe_no_f2p_rerun_20260609/maps/`, recovering 11 dynamic maps.
-The 13 former `all_pass` cases were rerun under
-`cache/swe_allpass_collection_guard_20260609_005920/maps/`, recovering 10
-dynamic maps and proving the old SymPy/Django narrowed-runner all-pass bucket
-was a harness bug.
+The 13 former `all_pass` cases were rerun after the issue #6/#7/#8 merges under
+`cache/swe_allpass_after_merge_20260609_131500/maps/`, recovering 10 dynamic
+maps. The remaining residuals are 2 deterministic `all_pass` Django cases and 1
+`no_f2p` SymPy case.
 `no_trace=0` is the build-quality gate.  Non-dynamic buckets now mean:
 
 | Bucket | Count | Meaning |
@@ -167,8 +176,8 @@ was a harness bug.
 | `no_callable` | 18 | The patch has no callable-level Python change for the bonus-map extractor. |
 | `signature_mismatch` | 7 | The F2P test fails during Python argument binding before entering the patched callable body. |
 | `instrumentation_failed` | 3 | Static callable extraction found candidates, but sandbox instrumentation produced no instrumented callable. |
-| `no_f2p` | 4 | F2P failures remain unaligned with traces after description-to-method recovery. |
-| `no_gt` | 1 | Tests produced traces, but none entered the patched callable set. |
+| `no_f2p` | 3 | F2P failures remain unaligned with traces after description-to-method recovery. |
+| `all_pass` | 2 | Buggy F2P tests exit 0 after checkout/test-selection verification, so the bug does not reproduce locally. |
 
 ## ⚠️ TODO — verify before trusting P2A training
 
