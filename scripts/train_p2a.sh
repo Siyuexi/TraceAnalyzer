@@ -26,6 +26,8 @@ TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified_hard.
 RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/swe_agent/runtime_env_arl.yaml"}
 DEFAULT_AGENT_CONFIG_PATH="${RAY_DATA_HOME}/data/swe_agent/agent_config_arl.yaml"
 AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-"${DEFAULT_AGENT_CONFIG_PATH}"}
+UV_PYTHON=${UV_PYTHON:-3.11}
+export UV_PYTHON
 UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT:-"${RAY_DATA_HOME}/uv_envs/p2a-train"}
 export UV_PROJECT_ENVIRONMENT
 UV_BIN=${UV_BIN:-"$(command -v uv)"}
@@ -157,6 +159,7 @@ for key in (
     "P2A_EVAL_NEAR_THRESHOLD",
     "P2A_EVAL_DETAILS_DIR",
     "UNI_AGENT_P2A_TRACE",
+    "UV_PYTHON",
     "UV_PROJECT_ENVIRONMENT",
 ):
     value = os.environ.get(key)

@@ -68,6 +68,9 @@ dependency-metadata = [
     { name = "r2e-gym", version = "0.1.0", requires-python = ">=3.10", requires-dist = [] },
 ]
 
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch"]
+
 # ── sources: the two submodules are installed editable from the local tree ─────
 # Honored by uv project commands (`uv lock` / `uv sync` / `uv run`), so `[train]` pulls
 # verl's real dependency graph straight from uni-agent/verl/setup.py (no drift, no copy).
