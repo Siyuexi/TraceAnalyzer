@@ -63,7 +63,7 @@ with open(path, "r", encoding="utf-8") as fh:
 
 text = re.sub(r'(^\s*PYTHONPATH:\s*).+$', r'\1"uni-agent/verl:uni-agent:."', text, flags=re.MULTILINE)
 lines = []
-legacy_placeholder_keys = {
+upstream_placeholder_keys = {
     "VEFAAS_FUNCTION_ID",
     "VEFAAS_FUNCTION_ROUTE",
     "VEFAAS_REGION",
@@ -72,13 +72,13 @@ legacy_placeholder_keys = {
     "MODAL_TOKEN_ID",
     "MODAL_TOKEN_SECRET",
 }
-legacy_comment_needles = ("if you use vefaas", "if you use modal")
+upstream_comment_needles = ("if you use vefaas", "if you use modal")
 for line in text.splitlines():
     stripped = line.strip()
-    if any(needle in stripped.lower() for needle in legacy_comment_needles):
+    if any(needle in stripped.lower() for needle in upstream_comment_needles):
         continue
     key = stripped.split(":", 1)[0]
-    if key in legacy_placeholder_keys:
+    if key in upstream_placeholder_keys:
         continue
     lines.append(line)
 text = "\n".join(lines) + "\n"
@@ -130,10 +130,7 @@ EOF
 data() {
   require_uni_agent
   mkdir -p "$DATA_DIR"
-  # Build via the canonical self-contained builder: it writes the full parquet plus a
-  # skip-filtered *.train.parquet (bad_instances excluded), with pair-diag image refs.
-  # deployment.type: arl is supplied by agent_config_arl.yaml and deep-merged at
-  # agent-loop init; the parquet carries per-instance image + post_setup_cmd + reward.
+  # Writes the full R2E parquet plus the skip-filtered *.train.parquet used by RL.
   cd "$SRC_DIR"
   PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
     uv run python scripts/build_data.py r2e --out "${DATA_DIR}/r2e_gym_subset_p2a.parquet"
@@ -142,8 +139,7 @@ data() {
 smoke() {
   require_uni_agent
   cd "$SRC_DIR"
-  # Default to a real pair-diag image taken from the built R2E parquet (build_data.py
-  # writes pair-diag refs); otherwise require ARL_SMOKE_IMAGE. Never default to enterprise.
+  # Prefer a pair-diag image from the built R2E parquet; otherwise require ARL_SMOKE_IMAGE.
   local image="${ARL_SMOKE_IMAGE:-}"
   if [[ -z "$image" && -f "$TRAIN_FILE" ]]; then
     image="$(uv run python -c "
@@ -174,9 +170,7 @@ debug() {
 
   cd "$SRC_DIR"
 
-  # TRAIN_FILE (and an R2E TEST_FILE) must be the skip-filtered training parquet
-  # produced by scripts/build_data.py r2e (*.train.parquet) — bad cases are
-  # already excluded there, so no separate filter step is needed here.
+  # TRAIN_FILE and the default debug TEST_FILE use the skip-filtered R2E train parquet.
 
   export RAY_DATA_HOME
   export TRAIN_FILE

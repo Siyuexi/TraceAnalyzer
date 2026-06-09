@@ -23,6 +23,7 @@ Default HuggingFace assets are shared across sibling projects:
 |---|---|---|
 | Models | `../../models/<repo-name>` | `MODEL_PATH` / `P2A_MODELS_DIR` / `P2A_MODEL_REPO` |
 | Datasets | `../../datasets/<repo-name>/<split>` | `P2A_DATASETS_DIR` |
+| Generated P2A data | `../../datasets/p2a` | `DATA` / `P2A_SHARED_ROOT` |
 
 If a dataset/model is already present there, scripts read it directly. If it is
 missing, the script downloads it from HuggingFace and saves it under that shared
@@ -55,60 +56,88 @@ src/
 
 ## Pipeline
 
+Set the shared paths once per shell:
+
 ```bash
-# 1. Build R2E training data from HuggingFace (full + skip-filtered .train.parquet).
-#    Rows come from canonical R2E-Gym/R2E-Gym-Subset; bad cases are excluded via
-#    config/bad_instances.json. Images are pair-diag; the compute backend is ARL.
+export DATA="${DATA:-../../datasets/p2a}"
+export MODEL="${MODEL:-../../models/Qwen3-Coder-30B-A3B-Instruct}"
+export ARL_GATEWAY_URL="${ARL_GATEWAY_URL:?set ARL_GATEWAY_URL}"
+```
+
+1. Build the R2E training parquet and SWE-bench Verified validation parquets:
+
+```bash
 PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py r2e --out $DATA/r2e_gym_subset_p2a.parquet
-#   -> r2e_gym_subset_p2a.parquet         (full, for bonus-map precompute)
-#   -> r2e_gym_subset_p2a.train.parquet   (bad cases excluded, for training)
 
-# 2. Precompute training bonus maps on ARL (pair-diag images + startup fixups).
-#    Output dir = P2A_BONUS_MAP_DIR if set, else ../../p2a/bonus_maps — the SAME dir
-#    training reads (one variable for read + write).
-#    Instances already present there are skipped; pass --rebuild to force a recompute.
-#    This dir holds training maps only — no SWE-bench data.
-PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl ARL_GATEWAY_URL=$ARL \
-  uv run python p2a/precompute/precompute_bonus_maps.py \
-    $DATA/r2e_gym_subset_p2a.parquet --mode dynamic --n_parallel 64
-#   -> ../../p2a/bonus_maps/<instance_id>.json
-
-# 3. Build SWE-bench Verified eval data.
-#    HARD is the validation split watched during RL; the rest is the held-out test split.
-#    The builder reads two upstream HF datasets into the shared cache:
-#      ../../datasets/SWE-Bench-Verified/test   (R2E-Gym rows with parsed_commit/run_tests/docker_image)
-#      ../../datasets/SWE-bench_Verified/test   (Princeton rows for difficulty labels)
-#    `swebench-hard` filters by difficulty and writes a parquet; it does not create
-#    a separate `*-hard/` dataset directory.
 PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py swebench-verified --out $DATA/swe_bench_verified.parquet
+
 PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py swebench-hard --out $DATA/swe_bench_verified_hard.parquet
+```
 
-# 4. Precompute eval-set bonus maps for live validation graph metrics.
-#    These maps score eval rollouts only; they are never used for training reshape.
+`swebench-hard` is a filtered parquet, not a separate HuggingFace cache directory.
+The two upstream cache directories are expected: `SWE-Bench-Verified/` carries
+R2E-Gym eval rows, while `SWE-bench_Verified/` carries Princeton difficulty labels.
+
+2. Precompute training bonus maps on ARL:
+
+```bash
+PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl \
+  uv run python p2a/precompute/precompute_bonus_maps.py \
+    $DATA/r2e_gym_subset_p2a.parquet --mode dynamic --n_parallel 64
+```
+
+Training maps default to `../../p2a/bonus_maps`; set `P2A_BONUS_MAP_DIR` to use a
+different read/write directory.
+
+3. Precompute eval maps for live validation graph metrics:
+
+```bash
 TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
   P2A_EVAL_BONUS_MAP_DIR=$DATA/eval_bonus_maps bash scripts/precompute_eval_bonus_maps.sh
+```
 
-# Optional offline analysis for an already-dumped rollout file. These files are
-# post-hoc artifacts only: summary-out is aggregate JSON; details-out is
-# per-instance JSONL for debugging misses. Training/validation does not read
-# them. Live dashboards read P2A_EVAL_BONUS_MAP_DIR instead, and optionally write
-# per-validation-step details through P2A_EVAL_DETAILS_DIR.
+Eval maps are diagnostic only. They are read during validation logging but never
+used by the P2A training reshape.
+
+4. Launch a baseline run:
+
+```bash
+TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet \
+  TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
+  MODEL_PATH=$MODEL \
+  P2A_EVAL_BONUS_MAP_DIR=$DATA/eval_bonus_maps \
+  P2A_EVAL_DETAILS_DIR=$DATA/eval_details \
+  bash scripts/train_p2a.sh
+```
+
+5. Launch a P2A run:
+
+```bash
+TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet \
+  TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
+  MODEL_PATH=$MODEL \
+  P2A_EVAL_BONUS_MAP_DIR=$DATA/eval_bonus_maps \
+  P2A_EVAL_DETAILS_DIR=$DATA/eval_details \
+  P2A_BONUS_MAP_DIR=../../p2a/bonus_maps \
+  P2A_M_MAX=3.0 \
+  bash scripts/train_p2a.sh
+```
+
+Optional offline analysis for an already-dumped rollout file:
+
+```bash
 uv run python -m p2a.eval_fault_localization $ROLLOUT_JSONL \
   --bonus-map-dir $DATA/eval_bonus_maps \
   --summary-out $DATA/eval_faultloc_summary.json \
   --details-out $DATA/eval_faultloc_details.jsonl
-
-# 5. Train. Baseline (no P2A): leave P2A_BONUS_MAP_DIR unset. P2A: point it at
-#    training maps. In both cases, P2A_EVAL_BONUS_MAP_DIR enables validation
-#    dashboard metrics for the 45 hard examples.
-TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
-  MODEL_PATH=$MODEL P2A_EVAL_BONUS_MAP_DIR=$DATA/eval_bonus_maps \
-  P2A_EVAL_DETAILS_DIR=$DATA/eval_details \
-  P2A_BONUS_MAP_DIR=../../p2a/bonus_maps P2A_M_MAX=3.0 bash scripts/train_p2a.sh
 ```
+
+The offline `summary-out` and `details-out` files are post-hoc artifacts for
+inspecting dumped rollouts. Training and validation do not read them; live
+validation dashboards use `P2A_EVAL_BONUS_MAP_DIR`.
 
 ## What you configure yourself
 
@@ -117,6 +146,7 @@ These are knobs you set; the repo does not pin them:
 | What | Where |
 |---|---|
 | Model | `MODEL_PATH` env var; default is `../../models/Qwen3-Coder-30B-A3B-Instruct` from `Qwen/Qwen3-Coder-30B-A3B-Instruct` |
+| Shared generated data root | `DATA`, conventionally `../../datasets/p2a` |
 | Train / val data | `TRAIN_FILE` / `TEST_FILE` env vars (point at the parquets built above) |
 | GPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (e.g. 4×8 H20 → `NNODES=4`, `NGPUS_PER_NODE=8`) |
 | Bonus maps (read + write) | `P2A_BONUS_MAP_DIR` — one dir for both precompute output and training input; default `../../p2a/bonus_maps`. Training treats it as the P2A on/off switch (unset = baseline). `P2A_M_MAX` sets strength. |

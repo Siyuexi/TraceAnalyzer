@@ -1,19 +1,12 @@
 #!/usr/bin/env bash
-# P2A/ARL training script — adapted from uni-agent/examples/agent_train/single_node_debug.sh
+# ARL-aligned Uni-Agent launcher for both baseline and P2A runs.
 #
-# Differences from vanilla Uni-Agent training:
-# 1. Uses `python3 -m p2a.main` instead of `python3 -m verl.experimental.fully_async_policy.fully_async_main`
-# 2. Passes P2A env vars: P2A_BONUS_MAP_DIR, P2A_M_MAX, P2A_TRACKING_MODE,
-#    P2A_EVAL_BONUS_MAP_DIR, P2A_EVAL_NEAR_THRESHOLD, P2A_EVAL_DETAILS_DIR
-#
-# To run vanilla baseline (no P2A), simply unset P2A_BONUS_MAP_DIR.
+# Leave P2A_BONUS_MAP_DIR unset for the vanilla baseline. P2A_EVAL_BONUS_MAP_DIR
+# is independent: it enables validation graph metrics for baseline and P2A runs.
 #
 # Usage:
-#   # Baseline (no P2A):
-#   bash src/scripts/train_p2a.sh
-#
-#   # With P2A:
-#   P2A_BONUS_MAP_DIR=/path/to/bonus_maps P2A_M_MAX=3.0 bash src/scripts/train_p2a.sh
+#   TRAIN_FILE=... TEST_FILE=... MODEL_PATH=... bash scripts/train_p2a.sh
+#   TRAIN_FILE=... TEST_FILE=... MODEL_PATH=... P2A_BONUS_MAP_DIR=... P2A_M_MAX=3.0 bash scripts/train_p2a.sh
 set -xeuo pipefail
 
 SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -123,7 +116,7 @@ with open(path, "r", encoding="utf-8") as fh:
 
 text = re.sub(r'(^\s*PYTHONPATH:\s*).+$', r'\1"uni-agent/verl:uni-agent:."', text, flags=re.MULTILINE)
 lines = []
-legacy_placeholder_keys = {
+upstream_placeholder_keys = {
     "VEFAAS_FUNCTION_ID",
     "VEFAAS_FUNCTION_ROUTE",
     "VEFAAS_REGION",
@@ -132,13 +125,13 @@ legacy_placeholder_keys = {
     "MODAL_TOKEN_ID",
     "MODAL_TOKEN_SECRET",
 }
-legacy_comment_needles = ("if you use vefaas", "if you use modal")
+upstream_comment_needles = ("if you use vefaas", "if you use modal")
 for line in text.splitlines():
     stripped = line.strip()
-    if any(needle in stripped.lower() for needle in legacy_comment_needles):
+    if any(needle in stripped.lower() for needle in upstream_comment_needles):
         continue
     key = stripped.split(":", 1)[0]
-    if key in legacy_placeholder_keys:
+    if key in upstream_placeholder_keys:
         continue
     lines.append(line)
 text = "\n".join(lines) + "\n"
@@ -174,11 +167,11 @@ with open(path, "w", encoding="utf-8") as fh:
     fh.write(text)
 PY
 
-# TRAIN_FILE must be the skip-filtered training parquet produced by
-# scripts/build_data.py r2e (the *.train.parquet output); bad cases are
-# already excluded there, so no separate filter step is needed here.
+# TRAIN_FILE should point at the skip-filtered *.train.parquet emitted by
+# scripts/build_data.py r2e.
 
-# --- The one change: use p2a.main instead of verl.experimental.fully_async_policy.fully_async_main ---
+# p2a.main wraps Uni-Agent's fully async trainer and stays vanilla when
+# P2A_BONUS_MAP_DIR is unset.
 ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     -- python3 -m p2a.main \
     --config-name='fully_async_ppo_megatron_trainer.yaml' \
