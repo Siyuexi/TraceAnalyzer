@@ -63,6 +63,8 @@ export DATA="${DATA:-../../datasets/p2a}"
 export MODEL="${MODEL:-../../models/Qwen3-Coder-30B-A3B-Instruct}"
 # Usual ARL Gateway: http://118.145.210.10:8080
 export ARL_GATEWAY_URL="${ARL_GATEWAY_URL:?set ARL_GATEWAY_URL}"
+# Ray Jobs target; use http://<ray-head-ip>:8265 when launching off the head node.
+export RAY_API_SERVER_ADDRESS="${RAY_API_SERVER_ADDRESS:-http://127.0.0.1:8265}"
 ```
 
 1. Build the R2E training parquet and SWE-bench Verified validation parquets:
@@ -103,7 +105,23 @@ TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
 Eval maps are diagnostic only. They are read during validation logging but never
 used by the P2A training reshape.
 
-4. Launch a baseline run:
+4. Launch training on an existing Ray cluster.
+
+`scripts/train_p2a.sh` submits a Ray job; it does not start Ray. Start/connect
+the cluster first, then point `RAY_API_SERVER_ADDRESS` at the Ray Jobs endpoint.
+For a 4-node x 8-GPU cluster, this is the recommended 32-GPU starter profile:
+
+```bash
+export NNODES_TRAIN=2
+export NNODES_ROLLOUT=2
+export NGPUS_PER_NODE=8
+```
+
+This allocates 16 GPUs to trainer and 16 GPUs to rollout. Do not set
+`NNODES_TRAIN=4 NNODES_ROLLOUT=4 NGPUS_PER_NODE=8` on a 32-GPU cluster; that
+requests 64 GPUs.
+
+Baseline:
 
 ```bash
 TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet \
@@ -114,7 +132,7 @@ TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet \
   bash scripts/train_p2a.sh
 ```
 
-5. Launch a P2A run:
+P2A:
 
 ```bash
 TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet \
@@ -149,7 +167,8 @@ These are knobs you set; the repo does not pin them:
 | Model | `MODEL_PATH` env var; default is `../../models/Qwen3-Coder-30B-A3B-Instruct` from `Qwen/Qwen3-Coder-30B-A3B-Instruct` |
 | Shared generated data root | `DATA`, conventionally `../../datasets/p2a` |
 | Train / val data | `TRAIN_FILE` / `TEST_FILE` env vars (point at the parquets built above) |
-| GPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (e.g. 4×8 H20 → `NNODES=4`, `NGPUS_PER_NODE=8`) |
+| Ray job target | `RAY_API_SERVER_ADDRESS` (Ray Jobs endpoint, usually `http://<ray-head-ip>:8265`) |
+| GPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (32-GPU 4×8 starter: `2 / 2 / 8`) |
 | Bonus maps (read + write) | `P2A_BONUS_MAP_DIR` — one dir for both precompute output and training input; default `../../p2a/bonus_maps`. Training treats it as the P2A on/off switch (unset = baseline). `P2A_M_MAX` sets strength. |
 | Eval fault-localization diagnostics | `P2A_EVAL_BONUS_MAP_DIR`, `P2A_EVAL_NEAR_THRESHOLD`, `P2A_EVAL_DETAILS_DIR`, `P2A_EVAL_BONUS_N_PARALLEL`, `P2A_EVAL_BONUS_LIMIT`, `P2A_EVAL_BONUS_OFFSET` |
 | ARL gateway | `ARL_GATEWAY_URL` |
