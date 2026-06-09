@@ -66,7 +66,8 @@ PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
 #   -> r2e_gym_subset_p2a.train.parquet   (bad cases excluded, for training)
 
 # 2. Precompute training bonus maps on ARL (pair-diag images + startup fixups).
-#    Output defaults to ../../p2a/bonus_maps (override with P2A_BONUS_MAPS_DIR).
+#    Output dir = P2A_BONUS_MAP_DIR if set, else ../../p2a/bonus_maps — the SAME dir
+#    training reads (one variable for read + write).
 #    Instances already present there are skipped; pass --rebuild to force a recompute.
 #    This dir holds training maps only — no SWE-bench data.
 PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl ARL_GATEWAY_URL=$ARL \
@@ -104,8 +105,7 @@ These are knobs you set; the repo does not pin them:
 | Model | `MODEL_PATH` env var; default is `../../models/Qwen3-Coder-30B-A3B-Instruct` from `Qwen/Qwen3-Coder-30B-A3B-Instruct` |
 | Train / val data | `TRAIN_FILE` / `TEST_FILE` env vars (point at the parquets built above) |
 | GPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (e.g. 4×8 H20 → `NNODES=4`, `NGPUS_PER_NODE=8`) |
-| P2A on/off + strength | `P2A_BONUS_MAP_DIR` (unset = baseline; training maps default to `../../p2a/bonus_maps`), `P2A_M_MAX` |
-| Bonus-map output dir | `P2A_BONUS_MAPS_DIR` (precompute write location; default `../../p2a/bonus_maps`) |
+| Bonus maps (read + write) | `P2A_BONUS_MAP_DIR` — one dir for both precompute output and training input; default `../../p2a/bonus_maps`. Training treats it as the P2A on/off switch (unset = baseline). `P2A_M_MAX` sets strength. |
 | Eval fault-localization diagnostics | `P2A_EVAL_BONUS_MAP_DIR`, `P2A_EVAL_BONUS_N_PARALLEL`, `P2A_EVAL_BONUS_LIMIT`, `P2A_EVAL_BONUS_OFFSET` |
 | ARL gateway | `ARL_GATEWAY_URL` |
 | Hard-subset criterion | `--difficulties` flag of `build_data.py swebench-hard` (default = the `1-4 hours` / `>4 hours` difficulty set) |

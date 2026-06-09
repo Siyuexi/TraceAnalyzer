@@ -32,8 +32,11 @@ def shared_models_dir() -> Path:
 
 
 def shared_bonus_maps_dir() -> Path:
-    """Default location for training (R2E) bonus maps: ../../p2a/bonus_maps."""
-    override = os.environ.get("P2A_BONUS_MAPS_DIR")
+    """The training bonus-map directory (read by training, written by precompute).
+
+    Single source of truth: ``P2A_BONUS_MAP_DIR`` if set, else ../../p2a/bonus_maps.
+    """
+    override = os.environ.get("P2A_BONUS_MAP_DIR")
     if override:
         return Path(override).expanduser().resolve()
     return shared_root() / "p2a" / "bonus_maps"
