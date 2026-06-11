@@ -9,7 +9,11 @@
 #   TRAIN_FILE=... TEST_FILE=... MODEL_PATH=... P2A_BONUS_MAP_DIR=... P2A_M_MAX=3.0 bash scripts/train_p2a.sh
 set -xeuo pipefail
 
-SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
+source "${SCRIPT_SRC_ROOT}/scripts/stage_local_runtime.sh"
+p2a_stage_local_runtime "${SCRIPT_SRC_ROOT}"
+SRC_ROOT="${P2A_RUNTIME_SRC_ROOT}"
 source "${SRC_ROOT}/scripts/shared_hf.sh"
 
 UNI_AGENT_DIR="${SRC_ROOT}/uni-agent"
@@ -36,6 +40,10 @@ RAY_BIN=${RAY_BIN:-"${UV_PROJECT_ENVIRONMENT}/bin/ray"}
 export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
 export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
 echo "[P2A] UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT}"
+if [[ "${P2A_SHARED_SRC_ROOT:-${SRC_ROOT}}" != "${SRC_ROOT}" ]]; then
+    echo "[P2A] shared source: ${P2A_SHARED_SRC_ROOT}"
+    echo "[P2A] runtime source: ${SRC_ROOT}"
+fi
 if [[ ! -x "${PYTHON_BIN}" || ! -x "${RAY_BIN}" ]]; then
     echo "[P2A] Missing ${PYTHON_BIN} or ${RAY_BIN}" >&2
     echo "[P2A] Build the shared src/.venv first, then rerun this script." >&2
