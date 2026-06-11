@@ -118,7 +118,7 @@ p2a_stage_local_runtime() {
   local_src_root="${P2A_LOCAL_SRC_ROOT:-${local_root}/TraceAnalyzer}"
   local_src_root="$(p2a_abs_dir "${local_src_root}")"
 
-  export P2A_SHARED_SRC_ROOT="${source_root}"
+  export P2A_SHARED_SRC_ROOT="${P2A_SHARED_SRC_ROOT:-${source_root}}"
   export P2A_RUNTIME_SRC_ROOT="${local_src_root}"
   export UV_PROJECT_ENVIRONMENT="${local_src_root}/.venv"
 

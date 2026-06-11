@@ -13,6 +13,8 @@ shared_root() {
   if [[ -n "${P2A_SHARED_ROOT:-}" ]]; then
     mkdir -p "${P2A_SHARED_ROOT}"
     cd "${P2A_SHARED_ROOT}" && pwd
+  elif [[ -n "${P2A_SHARED_SRC_ROOT:-}" ]]; then
+    cd "${P2A_SHARED_SRC_ROOT}/../.." && pwd
   else
     cd "${SRC_ROOT}/../.." && pwd
   fi

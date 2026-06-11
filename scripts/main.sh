@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Clean one-shot baseline launcher. Run from any directory on the Ray head node
+# One-shot baseline launcher. Run from any directory on the Ray head node
 # after scripts/ray_setup.sh has already been run on every GPU node.
 set -euo pipefail
 
@@ -8,6 +8,7 @@ P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
 source "${SCRIPT_SRC_ROOT}/scripts/stage_local_runtime.sh"
 p2a_stage_local_runtime "${SCRIPT_SRC_ROOT}"
 SRC_ROOT="${P2A_RUNTIME_SRC_ROOT}"
+source "${SRC_ROOT}/scripts/shared_hf.sh"
 cd "${SRC_ROOT}"
 
 UV_BIN="${UV_BIN:-$(command -v uv || true)}"
@@ -21,9 +22,6 @@ unset RAY_ADDRESS
 unset P2A_BONUS_MAP_DIR P2A_M_MAX P2A_TRACKING_MODE
 unset P2A_EVAL_BONUS_MAP_DIR P2A_EVAL_DETAILS_DIR P2A_EVAL_NEAR_THRESHOLD
 unset UNI_AGENT_P2A_TRACE
-if [[ "${P2A_KEEP_PROXY:-0}" != "1" ]]; then
-  unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
-fi
 
 export UV_PYTHON_INSTALL_DIR="${SRC_ROOT}/.uv-python"
 export UV_PROJECT_ENVIRONMENT="${SRC_ROOT}/.venv"
@@ -31,8 +29,25 @@ export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
 export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
 
 export RAY_DATA_HOME="${RAY_DATA_HOME:-${HOME}/verl}"
-export DATA="${DATA:-${SRC_ROOT}/../../datasets/p2a}"
-export MODEL="${MODEL:-${SRC_ROOT}/../../models/Qwen3-Coder-30B-A3B-Instruct}"
+default_data_dir() {
+  if [[ -n "${DATA:-}" ]]; then
+    local data_dir
+    data_dir="$(resolve_shared_path "${DATA}")"
+    mkdir -p "${data_dir}"
+    cd "${data_dir}" && pwd
+  else
+    local root
+    root="$(shared_hf_root)"
+    mkdir -p "${root}/datasets/p2a"
+    cd "${root}/datasets/p2a" && pwd
+  fi
+}
+export DATA="$(default_data_dir)"
+if [[ -n "${MODEL:-}" ]]; then
+  export MODEL="$(resolve_shared_path "${MODEL}")"
+else
+  export MODEL="$(default_model_path)"
+fi
 export ARL_GATEWAY_URL="${ARL_GATEWAY_URL:-http://118.145.210.10:8080}"
 export RAY_API_SERVER_ADDRESS="${RAY_API_SERVER_ADDRESS:-http://127.0.0.1:8265}"
 export NNODES_TRAIN="${NNODES_TRAIN:-2}"

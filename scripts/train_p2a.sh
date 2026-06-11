@@ -27,6 +27,20 @@ MODEL_PATH=${MODEL_PATH:-"$(default_model_path)"}
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
 TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/swe_agent/r2e_gym_subset_p2a.train.parquet"}
 TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified_hard.parquet"}
+MODEL_PATH="$(resolve_shared_path "${MODEL_PATH}")"
+TRAIN_FILE="$(resolve_shared_path "${TRAIN_FILE}")"
+TEST_FILE="$(resolve_shared_path "${TEST_FILE}")"
+resolve_env_path_if_set() {
+    local key="$1"
+    local value="${!key:-}"
+    if [[ -n "${value}" ]]; then
+        printf -v "${key}" '%s' "$(resolve_shared_path "${value}")"
+        export "${key}"
+    fi
+}
+resolve_env_path_if_set P2A_BONUS_MAP_DIR
+resolve_env_path_if_set P2A_EVAL_BONUS_MAP_DIR
+resolve_env_path_if_set P2A_EVAL_DETAILS_DIR
 RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/swe_agent/runtime_env_arl.yaml"}
 DEFAULT_AGENT_CONFIG_PATH="${RAY_DATA_HOME}/data/swe_agent/agent_config_arl.yaml"
 AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-"${DEFAULT_AGENT_CONFIG_PATH}"}
@@ -237,7 +251,7 @@ import urllib.request
 
 url = sys.argv[1].rstrip("/")
 try:
-    with urllib.request.urlopen(url, timeout=5) as response:
+    with urllib.request.urlopen(url + "/api/version", timeout=5) as response:
         print(f"[P2A] Ray dashboard reachable: {url} ({response.status})")
 except Exception as exc:
     raise SystemExit(f"[P2A] Ray dashboard is not reachable at {url}: {exc}")
