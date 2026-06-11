@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# One-shot baseline launcher. Run from any directory on the Ray head node
-# after scripts/ray_setup.sh has already been run on every GPU node.
+# One-shot baseline launcher. Run from any directory on the Ray head node.
 set -euo pipefail
 
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -29,6 +28,9 @@ export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
 export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
 
 export RAY_DATA_HOME="${RAY_DATA_HOME:-${HOME}/verl}"
+export RAY_WORKER_HOSTS="${RAY_WORKER_HOSTS:-28.45.33.48 28.45.33.95 28.45.33.97}"
+export RAY_GCS_PORT="${RAY_GCS_PORT:-6379}"
+export RAY_SSH_OPTS="${RAY_SSH_OPTS:--p 36000 -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8}"
 default_data_dir() {
   if [[ -n "${DATA:-}" ]]; then
     local data_dir
@@ -78,6 +80,28 @@ if [[ ! -x "${PYTHON_BIN}" || ! -x "${RAY_BIN}" ]]; then
   exit 2
 fi
 
+restart_ray_cluster() {
+  if [[ "${P2A_RESTART_RAY:-1}" != "1" ]]; then
+    echo "[baseline] skipping Ray restart because P2A_RESTART_RAY=${P2A_RESTART_RAY}"
+    return
+  fi
+
+  local head_ip
+  head_ip="${HEAD_IP:-${RAY_HEAD_IP:-${MASTER_IP:-28.45.32.245}}}"
+  if [[ -z "${head_ip}" ]]; then
+    head_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+  if [[ -z "${head_ip}" ]]; then
+    echo "[baseline] Could not infer HEAD_IP; set HEAD_IP explicitly." >&2
+    exit 2
+  fi
+
+  echo "[baseline] Restarting Ray cluster from main.sh: head=${head_ip}, workers=${RAY_WORKER_HOSTS}"
+  P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME}" \
+    P2A_LOCAL_ROOT="${P2A_LOCAL_ROOT:-/tmp/p2a-traceanalyzer}" \
+    bash "${SCRIPT_SRC_ROOT}/scripts/ray_setup.sh" "${head_ip}" restart-cluster
+}
+
 build_data() {
   local target="$1"
   shift
@@ -95,6 +119,8 @@ build_data "${DATA}/swe_bench_verified.parquet" \
   swebench-verified --out "${DATA}/swe_bench_verified.parquet"
 build_data "${DATA}/swe_bench_verified_hard.parquet" \
   swebench-hard --out "${DATA}/swe_bench_verified_hard.parquet"
+
+restart_ray_cluster
 
 echo "[baseline] Ray endpoint: ${RAY_API_SERVER_ADDRESS}"
 if [[ "${P2A_SHARED_SRC_ROOT:-${SRC_ROOT}}" != "${SRC_ROOT}" ]]; then

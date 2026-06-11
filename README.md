@@ -89,6 +89,7 @@ export RAY_API_SERVER_ADDRESS="${RAY_API_SERVER_ADDRESS:-http://127.0.0.1:8265}"
 # Ray cluster ports. 6379 is Ray GCS; 8265 is Ray dashboard / Jobs.
 export RAY_GCS_PORT="${RAY_GCS_PORT:-6379}"
 export RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
+export RAY_SSH_OPTS="${RAY_SSH_OPTS:--p 36000 -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8}"
 # Ray 2.55 prestarts one Python worker per advertised CPU. Limit this on
 # large GPU nodes so dashboard-agent / Jobs startup is not blocked by hundreds
 # of shared-venv worker imports.
@@ -164,16 +165,18 @@ This allocates 16 GPUs to trainer and 16 GPUs to rollout. Do not set
 `NNODES_TRAIN=4 NNODES_ROLLOUT=4 NGPUS_PER_NODE=8` on a 32-GPU cluster; that
 requests 64 GPUs.
 
-### Step 6. Start or restart Ray
+### Step 6. Optional manual Ray restart
 
-From the head node, use the script's cluster restart mode. This stops workers
-first, then the head, then starts the head, starts workers, and finally submits
-a tiny Ray Jobs smoke task:
+`scripts/main.sh` restarts Ray by default before submitting training. To restart
+Ray manually instead, run this from the head node. It stops workers first, then
+the head, then starts the head, starts workers, and finally submits a tiny Ray
+Jobs smoke task:
 
 ```bash
 HEAD_IP=<HEAD_IP>
 export RAY_WORKER_HOSTS="<WORKER_IP_1> <WORKER_IP_2> <WORKER_IP_3>"
 export P2A_LOCAL_ROOT=/tmp/p2a-traceanalyzer
+export RAY_SSH_OPTS="${RAY_SSH_OPTS:--p 36000 -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8}"
 bash scripts/ray_setup.sh "$HEAD_IP" restart-cluster
 ```
 
@@ -230,9 +233,14 @@ One-shot baseline from the Ray head:
 bash scripts/main.sh
 ```
 
-`scripts/main.sh` stages code/runtime locally like the other launchers, but keeps
-default `DATA` / `MODEL` paths anchored at the shared checkout
-(`../../datasets/p2a` and `../../models/...`) instead of under `/tmp`.
+`scripts/main.sh` stages code/runtime locally like the other launchers, restarts
+Ray through `scripts/ray_setup.sh`, and keeps default `DATA` / `MODEL` paths
+anchored at the shared checkout (`../../datasets/p2a` and `../../models/...`)
+instead of under `/tmp`. It defaults to the current GPU cluster
+(`HEAD_IP=28.45.32.245`, `RAY_WORKER_HOSTS="28.45.33.48 28.45.33.95 28.45.33.97"`,
+`RAY_GCS_PORT=6379`, `RAY_SSH_OPTS="-p 36000 ..."`). Override those env vars if
+the allocation changes. To submit to an already-running Ray cluster without a restart, set
+`P2A_RESTART_RAY=0`.
 
 Baseline:
 
