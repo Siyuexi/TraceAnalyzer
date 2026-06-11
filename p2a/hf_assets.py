@@ -10,24 +10,38 @@ SRC_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL_REPO = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
 
 
+def _shared_src_root() -> Path:
+    shared_src = os.environ.get("P2A_SHARED_SRC_ROOT")
+    if shared_src:
+        return Path(shared_src).expanduser().resolve()
+    return SRC_ROOT
+
+
+def _resolve_shared_relative(value: str) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (_shared_src_root() / path).resolve()
+
+
 def shared_root() -> Path:
     override = os.environ.get("P2A_SHARED_ROOT")
     if override:
-        return Path(override).expanduser().resolve()
-    return SRC_ROOT.parent.parent
+        return _resolve_shared_relative(override)
+    return _shared_src_root().parent.parent
 
 
 def shared_datasets_dir() -> Path:
     override = os.environ.get("P2A_DATASETS_DIR")
     if override:
-        return Path(override).expanduser().resolve()
+        return _resolve_shared_relative(override)
     return shared_root() / "datasets"
 
 
 def shared_models_dir() -> Path:
     override = os.environ.get("P2A_MODELS_DIR")
     if override:
-        return Path(override).expanduser().resolve()
+        return _resolve_shared_relative(override)
     return shared_root() / "models"
 
 
@@ -38,7 +52,7 @@ def shared_bonus_maps_dir() -> Path:
     """
     override = os.environ.get("P2A_BONUS_MAP_DIR")
     if override:
-        return Path(override).expanduser().resolve()
+        return _resolve_shared_relative(override)
     return shared_root() / "p2a" / "bonus_maps"
 
 

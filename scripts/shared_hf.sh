@@ -5,19 +5,45 @@ if [[ -z "${SRC_ROOT:-}" ]]; then
   SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 
+shared_src_root() {
+  if [[ -n "${P2A_SHARED_SRC_ROOT:-}" ]]; then
+    cd "${P2A_SHARED_SRC_ROOT}" && pwd
+  else
+    cd "${SRC_ROOT}" && pwd
+  fi
+}
+
+resolve_shared_path() {
+  local path="$1"
+  case "${path}" in
+    /*) printf '%s\n' "${path}" ;;
+    *)
+      local src
+      src="$(shared_src_root)"
+      printf '%s/%s\n' "${src}" "${path}"
+      ;;
+  esac
+}
+
 shared_hf_root() {
   if [[ -n "${P2A_SHARED_ROOT:-}" ]]; then
-    mkdir -p "${P2A_SHARED_ROOT}"
-    cd "${P2A_SHARED_ROOT}" && pwd
+    local root
+    root="$(resolve_shared_path "${P2A_SHARED_ROOT}")"
+    mkdir -p "${root}"
+    cd "${root}" && pwd
   else
-    cd "${SRC_ROOT}/../.." && pwd
+    local src
+    src="$(shared_src_root)"
+    cd "${src}/../.." && pwd
   fi
 }
 
 shared_models_dir() {
   if [[ -n "${P2A_MODELS_DIR:-}" ]]; then
-    mkdir -p "${P2A_MODELS_DIR}"
-    cd "${P2A_MODELS_DIR}" && pwd
+    local models_dir
+    models_dir="$(resolve_shared_path "${P2A_MODELS_DIR}")"
+    mkdir -p "${models_dir}"
+    cd "${models_dir}" && pwd
   else
     local root
     root="$(shared_hf_root)"

@@ -79,9 +79,6 @@ RAY_BIN=${RAY_BIN:-"${UV_PROJECT_ENVIRONMENT}/bin/ray"}
 export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
 export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
 
-if [[ "${RAY_KEEP_PROXY:-0}" != "1" ]]; then
-  unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
-fi
 NO_PROXY_APPEND="localhost,127.0.0.1,::1,${MASTER_IP}"
 export NO_PROXY="${NO_PROXY:+${NO_PROXY},}${NO_PROXY_APPEND}"
 export no_proxy="${no_proxy:+${no_proxy},}${NO_PROXY_APPEND}"

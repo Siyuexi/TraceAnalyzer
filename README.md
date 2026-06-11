@@ -40,6 +40,7 @@ src/
     build_data.py             # SINGLE data builder: r2e | swebench-verified | swebench-hard | skip-list
     uni_agent_arl.sh          # prepare/data/smoke/debug launcher (ARL config)
     ray_setup.sh              # bring up Ray and smoke-check Ray Jobs
+    main.sh                   # one-shot baseline launcher
     train_p2a.sh              # training launcher (baseline OR P2A)
   p2a/
     core.py                   # bonus-map load + read->callgraph match + m(d)=m_max^(1-d) multiplier
@@ -187,13 +188,12 @@ path mainly reduces Ray control-plane / worker-import pressure during startup;
 it is not expected to materially speed up steady-state training unless training
 was blocked on shared-disk Python package reads.
 
-The script clears proxy variables for the Ray control plane, starts `--head` on
-the head node, and joins workers to that head over ssh. It intentionally ignores
-the generic `PORT` environment variable; use `RAY_GCS_PORT` if you need to
-override the Ray cluster port. `8080` is not a Ray port in the VRC remote-debug
-setup. In staged mode, `NUM_CPUS` defaults to `nproc`; in direct shared-disk
-mode it defaults to 64 to avoid prestarting hundreds of workers from the shared
-venv.
+The script starts `--head` on the head node and joins workers to that head over
+ssh. It intentionally ignores the generic `PORT` environment variable; use
+`RAY_GCS_PORT` if you need to override the Ray cluster port. `8080` is not a Ray
+port in the VRC remote-debug setup. In staged mode, `NUM_CPUS` defaults to
+`nproc`; in direct shared-disk mode it defaults to 64 to avoid prestarting
+hundreds of workers from the shared venv.
 
 To bypass local staging and run directly from the shared checkout:
 
@@ -223,6 +223,16 @@ a tiny Ray Jobs task. If you submit training from the head node,
 to `http://<HEAD_IP>:8265`.
 
 ### Step 7. Submit a baseline or P2A run
+
+One-shot baseline from the Ray head:
+
+```bash
+bash scripts/main.sh
+```
+
+`scripts/main.sh` stages code/runtime locally like the other launchers, but keeps
+default `DATA` / `MODEL` paths anchored at the shared checkout
+(`../../datasets/p2a` and `../../models/...`) instead of under `/tmp`.
 
 Baseline:
 
