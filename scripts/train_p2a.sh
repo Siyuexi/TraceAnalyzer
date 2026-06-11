@@ -90,10 +90,6 @@ normalize_bool() {
     esac
 }
 
-apply_rope_fusion="$(normalize_bool P2A_APPLY_ROPE_FUSION "${P2A_APPLY_ROPE_FUSION:-True}")"
-
-moe_permute_fusion="$(normalize_bool P2A_MOE_PERMUTE_FUSION "${P2A_MOE_PERMUTE_FUSION:-True}")"
-
 rollout_mode="async"
 rollout_name="vllm"
 
@@ -289,7 +285,7 @@ PY
     actor_rollout_ref.actor.megatron.context_parallel_size=${train_cp} \
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=${train_ep} \
     actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${train_etp} \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=${apply_rope_fusion} \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.masked_softmax_fusion=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.bias_activation_fusion=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.bias_dropout_fusion=True \
@@ -297,7 +293,7 @@ PY
     +actor_rollout_ref.actor.megatron.override_transformer_config.deallocate_pipeline_outputs=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.persist_layer_norm=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm=True \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=${moe_permute_fusion} \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type="alltoall" \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32 \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform \
