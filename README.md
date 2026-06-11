@@ -39,11 +39,11 @@ src/
   scripts/
     build_data.py             # SINGLE data builder: r2e | swebench-verified | swebench-hard | skip-list
     uni_agent_arl.sh          # prepare/data/smoke/debug launcher (ARL config)
-    ray_setup.sh              # bring up Ray
+    ray_setup.sh              # bring up Ray and smoke-check Ray Jobs
     train_p2a.sh              # training launcher (baseline OR P2A)
   p2a/
     core.py                   # bonus-map load + read->callgraph match + m(d)=m_max^(1-d) multiplier
-    trainer.py                # apply_p2a_reshape: capture agent reads -> reshape advantage   [see TODO]
+    trainer.py                # apply_p2a_reshape: capture agent reads -> reshape advantage
     main.py                   # training entry; P2AFullyAsyncTrainer (vanilla if P2A_BONUS_MAP_DIR unset)
     test_setup.py             # startup_fixup_command(repo) — loads config/startup_fixups.json
     trace.py                  # instrumentation + call-graph build (bonus-map precompute)
@@ -56,18 +56,45 @@ src/
 
 ## Pipeline
 
-Set the shared paths once per shell:
+### Step 0. Prepare the shared checkout and venv
+
+Clone the repo onto the shared disk first. Run all following commands from the
+repo root:
 
 ```bash
+git clone git@github.com:Siyuexi/TraceAnalyzer.git
+cd TraceAnalyzer
+git submodule update --init --recursive
+export UV_PYTHON_INSTALL_DIR=$PWD/.uv-python
+uv python install --managed-python 3.11
+"$(uv python find --managed-python --no-project 3.11)" -m venv --clear --copies .venv
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv sync --locked --extra train --extra gpu
+```
+
+### Step 1. Set common paths
+
+Set these once per shell:
+
+```bash
+export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$PWD/.venv}"
+export PATH="$UV_PROJECT_ENVIRONMENT/bin:$PATH"
+export RAY_DATA_HOME="${RAY_DATA_HOME:-$HOME/verl}"
 export DATA="${DATA:-../../datasets/p2a}"
 export MODEL="${MODEL:-../../models/Qwen3-Coder-30B-A3B-Instruct}"
 # Usual ARL Gateway: http://118.145.210.10:8080
 export ARL_GATEWAY_URL="${ARL_GATEWAY_URL:?set ARL_GATEWAY_URL}"
-# Ray Jobs target; use http://<ray-head-ip>:8265 when launching off the head node.
+# If submitting from the Ray head node, the local dashboard endpoint is enough.
 export RAY_API_SERVER_ADDRESS="${RAY_API_SERVER_ADDRESS:-http://127.0.0.1:8265}"
+# Ray cluster ports. 6379 is Ray GCS; 8265 is Ray dashboard / Jobs.
+export RAY_GCS_PORT="${RAY_GCS_PORT:-6379}"
+export RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
+# Ray 2.55 prestarts one Python worker per advertised CPU. Limit this on
+# large GPU nodes so dashboard-agent / Jobs startup is not blocked by hundreds
+# of shared-venv worker imports.
+export NUM_CPUS="${NUM_CPUS:-64}"
 ```
 
-1. Build the R2E training parquet and SWE-bench Verified validation parquets:
+### Step 2. Build the training and validation parquets
 
 ```bash
 PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
@@ -84,7 +111,7 @@ PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
 The two upstream cache directories are expected: `SWE-Bench-Verified/` carries
 R2E-Gym eval rows, while `SWE-bench_Verified/` carries Princeton difficulty labels.
 
-2. Precompute training bonus maps on ARL:
+### Step 3. Precompute training bonus maps for P2A
 
 ```bash
 PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl \
@@ -95,7 +122,10 @@ PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl \
 Training maps default to `../../p2a/bonus_maps`; set `P2A_BONUS_MAP_DIR` to use a
 different read/write directory.
 
-3. Precompute eval maps for live validation graph metrics:
+Skip this step for a pure baseline run. P2A training reads these maps through
+`P2A_BONUS_MAP_DIR`.
+
+### Step 4. Precompute eval maps for validation graph metrics
 
 ```bash
 TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
@@ -105,17 +135,21 @@ TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
 Eval maps are diagnostic only. They are read during validation logging but never
 used by the P2A training reshape.
 
-4. Launch training on an existing Ray cluster.
+### Step 5. Configure logging and GPU layout
 
-`scripts/train_p2a.sh` submits a Ray job; it does not start Ray. Start/connect
-the cluster first, then point `RAY_API_SERVER_ADDRESS` at the Ray Jobs endpoint.
-The launcher runs both submission and the Ray driver through
-`uv run --locked --extra train --extra gpu`, so the job uses this repo's locked
-training environment instead of the system Python. It also defaults
-`UV_PYTHON=3.11`, `UV_PROJECT_ENVIRONMENT=$RAY_DATA_HOME/uv_envs/p2a-train`,
-`UV_CACHE_DIR=$RAY_DATA_HOME/uv_cache`, and `UV_HTTP_TIMEOUT=300` so repeated
-Ray submissions use a stable Python/uv environment and tolerate large wheel
-downloads.
+Configure Weights & Biases before submitting training. Use online logging:
+
+```bash
+wandb login
+# or export WANDB_API_KEY=...
+```
+
+Or use local offline logs:
+
+```bash
+export WANDB_MODE=offline
+```
+
 The launcher defaults to the Uni-Agent Qwen3 30B MoE 64-GPU shape. For a
 4-node x 8-GPU cluster, override it with this 32-GPU starter profile:
 
@@ -128,6 +162,48 @@ export NGPUS_PER_NODE=8
 This allocates 16 GPUs to trainer and 16 GPUs to rollout. Do not set
 `NNODES_TRAIN=4 NNODES_ROLLOUT=4 NGPUS_PER_NODE=8` on a 32-GPU cluster; that
 requests 64 GPUs.
+
+### Step 6. Start or restart Ray
+
+From the head node, use the script's cluster restart mode. This stops workers
+first, then the head, then starts the head, starts workers, and finally submits
+a tiny Ray Jobs smoke task:
+
+```bash
+HEAD_IP=<HEAD_IP>
+export RAY_WORKER_HOSTS="<WORKER_IP_1> <WORKER_IP_2> <WORKER_IP_3>"
+bash scripts/ray_setup.sh "$HEAD_IP" restart-cluster
+```
+
+The script uses the shared checkout's `.venv/bin/ray` and `.venv/bin/python`,
+clears proxy variables for the Ray control plane, starts `--head` on the head
+node, and joins workers to that head over ssh. It intentionally ignores the
+generic `PORT` environment variable; use `RAY_GCS_PORT` if you need to override
+the Ray cluster port. `8080` is not a Ray port in the VRC remote-debug setup.
+`NUM_CPUS` defaults to 64 per node to avoid Ray prestarting hundreds of Python
+workers from the shared `.venv`; raise it only after the smoke check passes.
+
+If you cannot ssh from the head to workers, run the same script manually in this
+order:
+
+```bash
+HEAD_IP=<HEAD_IP>
+# on every worker first
+bash scripts/ray_setup.sh "$HEAD_IP" stop
+# on the head
+bash scripts/ray_setup.sh "$HEAD_IP" start
+# on every worker
+bash scripts/ray_setup.sh "$HEAD_IP" start
+# on the head
+bash scripts/ray_setup.sh "$HEAD_IP" smoke
+```
+
+The `smoke` command does not restart Ray. It waits for the dashboard and submits
+a tiny Ray Jobs task. If you submit training from the head node,
+`RAY_API_SERVER_ADDRESS` can stay at `http://127.0.0.1:8265`; otherwise set it
+to `http://<HEAD_IP>:8265`.
+
+### Step 7. Submit a baseline or P2A run
 
 Baseline:
 
@@ -153,7 +229,9 @@ TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet \
   bash scripts/train_p2a.sh
 ```
 
-Optional offline analysis for an already-dumped rollout file:
+### Step 8. Optional offline analysis
+
+For an already-dumped rollout file:
 
 ```bash
 uv run python -m p2a.eval_fault_localization $ROLLOUT_JSONL \
@@ -176,7 +254,7 @@ These are knobs you set; the repo does not pin them:
 | Shared generated data root | `DATA`, conventionally `../../datasets/p2a` |
 | Train / val data | `TRAIN_FILE` / `TEST_FILE` env vars (point at the parquets built above) |
 | Ray job target | `RAY_API_SERVER_ADDRESS` (Ray Jobs endpoint, usually `http://<ray-head-ip>:8265`) |
-| GPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (32-GPU 4×8 starter: `2 / 2 / 8`) |
+| GPU / CPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (32-GPU 4×8 starter: `2 / 2 / 8`); `NUM_CPUS` is the Ray CPU resource advertised per node, default 64 |
 | Bonus maps (read + write) | `P2A_BONUS_MAP_DIR` — one dir for both precompute output and training input; default `../../p2a/bonus_maps`. Training treats it as the P2A on/off switch (unset = baseline). `P2A_M_MAX` sets strength. |
 | Eval fault-localization diagnostics | `P2A_EVAL_BONUS_MAP_DIR`, `P2A_EVAL_NEAR_THRESHOLD`, `P2A_EVAL_DETAILS_DIR`, `P2A_EVAL_BONUS_N_PARALLEL`, `P2A_EVAL_BONUS_LIMIT`, `P2A_EVAL_BONUS_OFFSET` |
 | ARL gateway | `ARL_GATEWAY_URL` |
@@ -259,15 +337,8 @@ maps. The remaining residuals are 2 deterministic `all_pass` Django cases and 1
 | `no_f2p` | 3 | F2P failures remain unaligned with traces after description-to-method recovery. |
 | `all_pass` | 2 | Buggy F2P tests exit 0 after checkout/test-selection verification, so the bug does not reproduce locally. |
 
-## ⚠️ TODO — verify before trusting P2A training
+## Training Smoke Check
 
-The P2A advantage-reshape (`p2a/trainer.py::apply_p2a_reshape` → `p2a/core.py`) is
-implemented and wired into the trainer, but it has **never been run end-to-end at
-training**. It assumes the Uni-Agent rollout writes each step's `tool_calls` /
-`response_text` into the trajectory in the format `apply_p2a_reshape` parses; if it
-does not, `reads` is empty and the reshape silently becomes a no-op even with a
-bonus map.
-
-**Do a small demo smoke test first** — confirm that P2A actually works on the
-Uni-Agent tool set and really captures the agent's actions (non-empty `reads`,
-non-trivial multipliers) — **before launching a real training run.**
+Before a full P2A run, do a small smoke run and confirm validation logs include
+the `val-p2a/swebench-hard/*` metrics above. If `P2A_EVAL_DETAILS_DIR` is set,
+check that it writes per-step JSONL files for the validation cases.
