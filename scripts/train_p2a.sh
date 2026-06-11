@@ -26,17 +26,32 @@ TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified_hard.
 RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/swe_agent/runtime_env_arl.yaml"}
 DEFAULT_AGENT_CONFIG_PATH="${RAY_DATA_HOME}/data/swe_agent/agent_config_arl.yaml"
 AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-"${DEFAULT_AGENT_CONFIG_PATH}"}
-UV_PYTHON=${UV_PYTHON:-3.11}
-export UV_PYTHON
-UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT:-"${RAY_DATA_HOME}/uv_envs/p2a-train"}
+UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT:-"${SRC_ROOT}/.venv"}
+if [[ "${UV_PROJECT_ENVIRONMENT}" != /* ]]; then
+    UV_PROJECT_ENVIRONMENT="${SRC_ROOT}/${UV_PROJECT_ENVIRONMENT}"
+fi
 export UV_PROJECT_ENVIRONMENT
-UV_CACHE_DIR=${UV_CACHE_DIR:-"${RAY_DATA_HOME}/uv_cache"}
-export UV_CACHE_DIR
-UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT:-300}
-export UV_HTTP_TIMEOUT
-UV_BIN=${UV_BIN:-"$(command -v uv)"}
-UV_RUN=("${UV_BIN}" run --locked)
-UV_TRAIN_RUN=("${UV_BIN}" run --locked --extra train --extra gpu)
+PYTHON_BIN=${PYTHON_BIN:-"${UV_PROJECT_ENVIRONMENT}/bin/python"}
+RAY_BIN=${RAY_BIN:-"${UV_PROJECT_ENVIRONMENT}/bin/ray"}
+export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
+export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
+echo "[P2A] UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT}"
+if [[ ! -x "${PYTHON_BIN}" || ! -x "${RAY_BIN}" ]]; then
+    echo "[P2A] Missing ${PYTHON_BIN} or ${RAY_BIN}" >&2
+    echo "[P2A] Build the shared src/.venv first, then rerun this script." >&2
+    exit 2
+fi
+RAY_API_URL="${RAY_API_SERVER_ADDRESS:-http://127.0.0.1:8265}"
+export RAY_API_SERVER_ADDRESS="${RAY_API_URL}"
+RAY_API_HOST="${RAY_API_URL#*://}"
+RAY_API_HOST="${RAY_API_HOST%%/*}"
+RAY_API_HOST="${RAY_API_HOST%%:*}"
+RAY_NO_PROXY="localhost,127.0.0.1,::1"
+if [[ -n "${RAY_API_HOST}" && "${RAY_API_HOST}" != "${RAY_API_URL}" ]]; then
+    RAY_NO_PROXY="${RAY_NO_PROXY},${RAY_API_HOST}"
+fi
+export NO_PROXY="${NO_PROXY:+${NO_PROXY},}${RAY_NO_PROXY}"
+export no_proxy="${no_proxy:+${no_proxy},}${RAY_NO_PROXY}"
 
 rollout_mode="async"
 rollout_name="vllm"
@@ -115,17 +130,19 @@ if [[ "${AGENT_CONFIG_PATH}" == "${DEFAULT_AGENT_CONFIG_PATH}" || ! -f "${AGENT_
     cp "${SRC_ROOT}/env/agent_config_arl.yaml" "${AGENT_CONFIG_PATH}"
 fi
 
-"${UV_RUN[@]}" python - "${RUNTIME_ENV}" <<'PY'
+"${PYTHON_BIN}" - "${RUNTIME_ENV}" "${SRC_ROOT}" <<'PY'
 import json
 import os
 import re
 import sys
 
 path = sys.argv[1]
+src_root = sys.argv[2]
 with open(path, "r", encoding="utf-8") as fh:
     text = fh.read()
 
-text = re.sub(r'(^\s*PYTHONPATH:\s*).+$', r'\1"uni-agent/verl:uni-agent:."', text, flags=re.MULTILINE)
+pythonpath = f"{src_root}/uni-agent/verl:{src_root}/uni-agent:{src_root}"
+text = re.sub(r'(^\s*PYTHONPATH:\s*).+$', rf'\1{json.dumps(pythonpath)}', text, flags=re.MULTILINE)
 lines = []
 upstream_placeholder_keys = {
     "VEFAAS_FUNCTION_ID",
@@ -139,6 +156,10 @@ upstream_placeholder_keys = {
 upstream_comment_needles = ("if you use vefaas", "if you use modal")
 for line in text.splitlines():
     stripped = line.strip()
+    if not line.startswith(" ") and (
+        stripped.startswith("working_dir:") or stripped.startswith("excludes:")
+    ):
+        continue
     if any(needle in stripped.lower() for needle in upstream_comment_needles):
         continue
     key = stripped.split(":", 1)[0]
@@ -147,7 +168,7 @@ for line in text.splitlines():
     lines.append(line)
 text = "\n".join(lines) + "\n"
 
-for key in (
+managed_env_keys = (
     "ARL_GATEWAY_URL",
     "ARL_NAMESPACE",
     "ARL_EXPERIMENT_ID",
@@ -163,15 +184,30 @@ for key in (
     "P2A_EVAL_NEAR_THRESHOLD",
     "P2A_EVAL_DETAILS_DIR",
     "UNI_AGENT_P2A_TRACE",
+    "PATH",
+    "UV_PROJECT_ENVIRONMENT",
     "UV_CACHE_DIR",
     "UV_HTTP_TIMEOUT",
+    "UV_NO_BUILD_PACKAGE",
     "UV_PYTHON",
-    "UV_PROJECT_ENVIRONMENT",
-):
+    "VIRTUAL_ENV",
+    "WANDB_API_KEY",
+    "WANDB_BASE_URL",
+    "WANDB_DIR",
+    "WANDB_ENTITY",
+    "WANDB_MODE",
+    "WANDB_NAME",
+    "WANDB_PROJECT",
+    "WANDB_RUN_GROUP",
+    "WANDB_TAGS",
+)
+
+for key in managed_env_keys:
     value = os.environ.get(key)
-    if not value:
-        continue
     pattern = rf"(^\s*{re.escape(key)}:\s*).*$"
+    if not value:
+        text = re.sub(pattern + r"\n?", "", text, flags=re.MULTILINE)
+        continue
     replacement = rf"\1{json.dumps(value)}"
     if re.search(pattern, text, flags=re.MULTILINE):
         text = re.sub(pattern, replacement, text, flags=re.MULTILINE)
@@ -185,12 +221,23 @@ PY
 # TRAIN_FILE should point at the skip-filtered *.train.parquet emitted by
 # scripts/build_data.py r2e.
 
+"${PYTHON_BIN}" - "${RAY_API_URL}" <<'PY'
+import sys
+import urllib.request
+
+url = sys.argv[1].rstrip("/")
+try:
+    with urllib.request.urlopen(url, timeout=5) as response:
+        print(f"[P2A] Ray dashboard reachable: {url} ({response.status})")
+except Exception as exc:
+    raise SystemExit(f"[P2A] Ray dashboard is not reachable at {url}: {exc}")
+PY
+
 # p2a.main wraps Uni-Agent's fully async trainer and stays vanilla when
 # P2A_BONUS_MAP_DIR is unset.
-"${UV_TRAIN_RUN[@]}" ray job submit --no-wait --runtime-env "${RUNTIME_ENV}" \
-    -- "${UV_TRAIN_RUN[@]}" python -m p2a.main \
-    --config-name='fully_async_ppo_megatron_trainer.yaml' \
-    hydra.searchpath=[pkg://verl.trainer.config] \
+"${RAY_BIN}" job submit --no-wait --address="${RAY_API_URL}" --runtime-env "${RUNTIME_ENV}" \
+    -- env -C "${SRC_ROOT}" "${PYTHON_BIN}" -m p2a.main \
+    'hydra.searchpath=[pkg://verl.trainer.config]' \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
