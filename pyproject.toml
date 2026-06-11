@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "p2a-arl"
 version = "0.1.0"
 description = "P2A on uni-agent with an ARL-native sandbox backend (env/) + bonus-map process supervision (p2a/)."
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.12"
 
 # ── core: ARL sandbox runtime + data build + bonus-map precompute ──────────────
 # Everything to run scripts/build_data.py and p2a/precompute on a CPU box.
@@ -33,51 +33,143 @@ dependencies = [
     "numpy",
     "pyyaml",
     "tqdm",
+    "wheel",
     "r2e-gym",         # Git source below; metadata override keeps it no-deps
     "uni-agent",        # local submodule (editable, see [tool.uv.sources]); has zero deps
 ]
 
 [project.optional-dependencies]
-# ── train: the framework, sourced from verl ITSELF (uni-agent/verl/setup.py) ───
-# We do NOT hand-copy or pin the framework deps: listing `verl` (editable) pulls verl's own
-# install_requires — accelerate / transformers / ray[default]>=2.41 / tensordict / peft /
-# numpy<2 / pandas / pyarrow>=19 / wandb / tensorboard / …. CPU-installable (torch resolves
-# to the CPU wheel), so the trainer imports + smoke-tests run without a GPU.
+# ── train: local editable verl framework ──────────────────────────────────────
+# The dependency metadata below mirrors uni-agent/verl's setup requirements so
+# Ray job startup can resolve from the lock without fetching editable build
+# metadata from PyPI. The locked Linux training target uses CUDA 13.0 torch
+# wheels, which install on CPU hosts but are large.
 train = ["verl"]
 
-# ── gpu: the GPU accelerators, ALSO sourced from verl's OWN extras ─────────────
-# verl/setup.py defines these as extras_require, so we just turn them on (no pins of ours):
-#   vllm  → vllm>=0.8.5,<=0.12.0      gpu  → liger-kernel, flash-attn
-#   geo   → torchvision, qwen_vl_utils, mathruler
-#   mcore → mbridge (Megatron bridge; p2a/train_p2a.sh uses the Megatron PPO backend)
-#   math  → math-verify
-# CUDA-only — install on the GPU training node:  uv pip install -e '.[train,gpu]'
-gpu = ["verl[vllm,gpu,geo,mcore,math]"]
+# ── gpu: training accelerators ────────────────────────────────────────────────
+# Keep verl's GPU/Megatron/math extras. Pin vLLM to a torch-2.9-compatible
+# manylinux1 wheel; torch itself is sourced from the CUDA 13 PyTorch index below.
+gpu = [
+    "verl[gpu,geo,mcore,math]",
+    "torch>=2.9.0",
+    "torchvision>=0.24.0",
+    "torchaudio>=2.9.0",
+    "vllm==0.11.2",
+    "cupy-cuda13x==13.6.0",
+]
 
 dev = ["pytest", "ruff", "mypy"]
 
-# ── uv resolver metadata overrides ────────────────────────────────────────────
+# ── uv resolver metadata ──────────────────────────────────────────────────────
 # R2E-Gym is a git package with a broad runtime/training dependency list and a stale
 # datasets==2.19 pin. This project only imports its lightweight data/parsing modules
 # (`ParsedCommit`, execution-log parsing), while core already declares the needed
-# runtime deps. Mirror the old `uv pip install --no-deps ...` behavior in uv's
-# project resolver so `uv run` / `uv sync` install r2e-gym without inheriting that
-# upstream dependency graph.
+# runtime deps, so the resolver should not inherit its upstream dependency graph.
+#
+# uni-agent and verl are local editable sources. Their metadata is declared here
+# so `uv run` / `uv sync` do not need network access just to inspect editable
+# package build requirements while building the shared .venv.
 [tool.uv]
-dependency-metadata = [
-    { name = "r2e-gym", version = "0.1.0", requires-python = ">=3.10", requires-dist = [] },
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and python_full_version >= '3.11' and python_full_version < '3.12'",
+]
+exclude-dependencies = [
+    "cupy-cuda12x",
+]
+
+[[tool.uv.dependency-metadata]]
+name = "r2e-gym"
+version = "0.1.0"
+requires-python = ">=3.10"
+requires-dist = []
+
+[[tool.uv.dependency-metadata]]
+name = "uni-agent"
+requires-python = ">=3.10"
+requires-dist = []
+
+[[tool.uv.dependency-metadata]]
+name = "verl"
+version = "0.8.0.dev0"
+requires-dist = [
+    "accelerate",
+    "codetiming",
+    "datasets",
+    "dill",
+    "hydra-core",
+    "numpy<2.0.0",
+    "pandas",
+    "peft",
+    "pyarrow>=19.0.0",
+    "pybind11",
+    "pylatexenc",
+    "ray[default]>=2.41.0",
+    "torchdata",
+    "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
+    "transformers",
+    "wandb",
+    "packaging>=20.0",
+    "tensorboard",
+    "pytest; extra == 'test'",
+    "pre-commit; extra == 'test'",
+    "py-spy; extra == 'test'",
+    "pytest-asyncio; extra == 'test'",
+    "pytest-rerunfailures; extra == 'test'",
+    "pyext; extra == 'prime'",
+    "mathruler; extra == 'geo'",
+    "torchvision; extra == 'geo'",
+    "qwen_vl_utils; extra == 'geo'",
+    "liger-kernel; extra == 'gpu'",
+    "flash-attn; extra == 'gpu'",
+    "math-verify; extra == 'math'",
+    "vllm>=0.8.5,<=0.12.0; extra == 'vllm'",
+    "tensordict>=0.8.0,<=0.10.0,!=0.9.0; extra == 'vllm'",
+    "sglang[srt,openai]==0.5.8; extra == 'sglang'",
+    "torch==2.9.1; extra == 'sglang'",
+    "tensordict>=0.8.0,<=0.10.0,!=0.9.0; extra == 'sglang'",
+    "trl<=0.9.6; extra == 'trl'",
+    "mbridge; extra == 'mcore'",
+    "tensorrt-llm>=1.2.0rc6; extra == 'trtllm'",
+    "TransferQueue==0.1.6; extra == 'transferqueue'",
+]
+provides-extra = [
+    "test",
+    "prime",
+    "geo",
+    "gpu",
+    "math",
+    "vllm",
+    "sglang",
+    "trl",
+    "mcore",
+    "trtllm",
+    "transferqueue",
 ]
 
 [tool.uv.extra-build-dependencies]
 flash-attn = ["torch"]
 
-# ── sources: the two submodules are installed editable from the local tree ─────
-# Honored by uv project commands (`uv lock` / `uv sync` / `uv run`), so `[train]` pulls
-# verl's real dependency graph straight from uni-agent/verl/setup.py (no drift, no copy).
+# ── sources: local editables plus CUDA 13 torch wheels ────────────────────────
+# The editable packages use the resolver metadata above; torch packages are
+# pinned to PyTorch's CUDA 13 index for the GPU training environment.
 [tool.uv.sources]
 uni-agent = { path = "uni-agent", editable = true }
 verl = { path = "uni-agent/verl", editable = true }
 r2e-gym = { git = "https://github.com/R2E-Gym/R2E-Gym.git", rev = "0d94c4eb9431cd195c55a7ea3abd54006c9a1735" }
+torch = [
+    { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+    { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchaudio = [
+    { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 # ── deps-only project: we ship no modules; p2a/ env/ scripts/ stay on PYTHONPATH ─
 [tool.setuptools]
@@ -86,6 +178,6 @@ packages = []
 # ──────────────────────────────────────────────────────────────────────────────
 # Full recipes:
 #   CPU (data + precompute):   bash scripts/check_deps_cpu.sh          # core + r2e-gym
-#   CPU (+ framework, smoke):  bash scripts/check_deps_cpu.sh --train  # + verl (CPU torch)
+#   CPU (+ framework, smoke):  bash scripts/check_deps_cpu.sh --train  # + verl, large torch wheel
 #   GPU server (training):     uv sync --extra train --extra gpu
 # ──────────────────────────────────────────────────────────────────────────────
