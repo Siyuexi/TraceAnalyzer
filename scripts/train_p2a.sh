@@ -10,6 +10,7 @@
 set -xeuo pipefail
 
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
 source "${SCRIPT_SRC_ROOT}/scripts/stage_local_runtime.sh"
 p2a_stage_local_runtime "${SCRIPT_SRC_ROOT}"
 SRC_ROOT="${P2A_RUNTIME_SRC_ROOT}"

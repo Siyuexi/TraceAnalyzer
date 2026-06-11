@@ -18,10 +18,10 @@ Common overrides:
   RAY_GCS_PORT=6379
   RAY_DASHBOARD_PORT=8265
   UV_PROJECT_ENVIRONMENT=$PWD/.venv
-  P2A_STAGE_LOCAL_RUNTIME=0|1
+  P2A_STAGE_LOCAL_RUNTIME=1
   P2A_LOCAL_ROOT=/tmp/p2a-traceanalyzer
   NUM_GPUS=8
-  NUM_CPUS=64
+  NUM_CPUS=$(nproc) when staging locally; 64 when P2A_STAGE_LOCAL_RUNTIME=0
 EOF
 }
 
@@ -54,11 +54,18 @@ if [[ -n "${PORT:-}" && -z "${RAY_GCS_PORT:-}" && -z "${RAY_PORT:-}" ]]; then
   echo "[Ray] Ignoring generic PORT=${PORT}; set RAY_GCS_PORT to override Ray's GCS port." >&2
 fi
 RAY_GCS_PORT="${RAY_GCS_PORT:-${RAY_PORT:-6379}}"
+P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
+source "${SHARED_SRC_ROOT}/scripts/stage_local_runtime.sh"
 NUM_GPUS="${NUM_GPUS:-8}"
-NUM_CPUS="${NUM_CPUS:-64}"
+if [[ -z "${NUM_CPUS:-}" ]]; then
+  if p2a_stage_enabled; then
+    NUM_CPUS="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || printf '64')"
+  else
+    NUM_CPUS=64
+  fi
+fi
 RAY_DASHBOARD_HOST="${RAY_DASHBOARD_HOST:-0.0.0.0}"
 RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
-source "${SHARED_SRC_ROOT}/scripts/stage_local_runtime.sh"
 p2a_stage_local_runtime "${SHARED_SRC_ROOT}"
 SRC_ROOT="${P2A_RUNTIME_SRC_ROOT}"
 cd "${SRC_ROOT}"
@@ -80,6 +87,7 @@ export NO_PROXY="${NO_PROXY:+${NO_PROXY},}${NO_PROXY_APPEND}"
 export no_proxy="${no_proxy:+${no_proxy},}${NO_PROXY_APPEND}"
 
 echo "[Ray] UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT}"
+echo "[Ray] NUM_CPUS=${NUM_CPUS}"
 if [[ "${SRC_ROOT}" != "${SHARED_SRC_ROOT}" ]]; then
   echo "[Ray] shared source: ${SHARED_SRC_ROOT}"
   echo "[Ray] runtime source: ${SRC_ROOT}"
