@@ -18,6 +18,8 @@ Common overrides:
   RAY_GCS_PORT=6379
   RAY_DASHBOARD_PORT=8265
   UV_PROJECT_ENVIRONMENT=$PWD/.venv
+  P2A_STAGE_LOCAL_RUNTIME=0|1
+  P2A_LOCAL_ROOT=/tmp/p2a-traceanalyzer
   NUM_GPUS=8
   NUM_CPUS=64
 EOF
@@ -28,8 +30,9 @@ if [[ $# -lt 1 ]]; then
   exit 2
 fi
 
-SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "${SRC_ROOT}"
+SHARED_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC_ROOT="${SHARED_SRC_ROOT}"
+cd "${SHARED_SRC_ROOT}"
 
 MASTER_IP="$1"
 if [[ -z "${MASTER_IP}" ]]; then
@@ -55,6 +58,10 @@ NUM_GPUS="${NUM_GPUS:-8}"
 NUM_CPUS="${NUM_CPUS:-64}"
 RAY_DASHBOARD_HOST="${RAY_DASHBOARD_HOST:-0.0.0.0}"
 RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
+source "${SHARED_SRC_ROOT}/scripts/stage_local_runtime.sh"
+p2a_stage_local_runtime "${SHARED_SRC_ROOT}"
+SRC_ROOT="${P2A_RUNTIME_SRC_ROOT}"
+cd "${SRC_ROOT}"
 UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT:-"${SRC_ROOT}/.venv"}
 if [[ "${UV_PROJECT_ENVIRONMENT}" != /* ]]; then
   UV_PROJECT_ENVIRONMENT="${SRC_ROOT}/${UV_PROJECT_ENVIRONMENT}"
@@ -73,6 +80,10 @@ export NO_PROXY="${NO_PROXY:+${NO_PROXY},}${NO_PROXY_APPEND}"
 export no_proxy="${no_proxy:+${no_proxy},}${NO_PROXY_APPEND}"
 
 echo "[Ray] UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT}"
+if [[ "${SRC_ROOT}" != "${SHARED_SRC_ROOT}" ]]; then
+  echo "[Ray] shared source: ${SHARED_SRC_ROOT}"
+  echo "[Ray] runtime source: ${SRC_ROOT}"
+fi
 
 if [[ ! -x "${PYTHON_BIN}" || ! -x "${RAY_BIN}" ]]; then
   echo "[Ray] Missing ${PYTHON_BIN} or ${RAY_BIN}" >&2
@@ -190,10 +201,10 @@ start_local() {
 remote_node() {
   local host="$1"
   local mode="$2"
-  # RAY_WORKER_HOSTS nodes share this checkout path on the cluster filesystem.
+  # Workers enter through the shared source, then stage their own local runtime if enabled.
   ssh ${RAY_SSH_OPTS:--o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8} \
     "${host}" \
-    "cd '${SRC_ROOT}' && RAY_GCS_PORT='${RAY_GCS_PORT}' RAY_DASHBOARD_PORT='${RAY_DASHBOARD_PORT}' UV_PROJECT_ENVIRONMENT='${UV_PROJECT_ENVIRONMENT}' NUM_GPUS='${NUM_GPUS}' NUM_CPUS='${NUM_CPUS}' bash scripts/ray_setup.sh '${MASTER_IP}' '${mode}'"
+    "cd '${SHARED_SRC_ROOT}' && RAY_GCS_PORT='${RAY_GCS_PORT}' RAY_DASHBOARD_PORT='${RAY_DASHBOARD_PORT}' NUM_GPUS='${NUM_GPUS}' NUM_CPUS='${NUM_CPUS}' P2A_STAGE_LOCAL_RUNTIME='${P2A_STAGE_LOCAL_RUNTIME:-${P2A_LOCAL_RUNTIME:-0}}' P2A_LOCAL_ROOT='${P2A_LOCAL_ROOT:-/tmp/p2a-traceanalyzer}' P2A_LOCAL_SRC_ROOT='${P2A_LOCAL_SRC_ROOT:-}' P2A_FORCE_STAGE_LOCAL_RUNTIME='${P2A_FORCE_STAGE_LOCAL_RUNTIME:-0}' bash scripts/ray_setup.sh '${MASTER_IP}' '${mode}'"
 }
 
 restart_cluster() {

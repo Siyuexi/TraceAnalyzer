@@ -3,7 +3,10 @@
 # after scripts/ray_setup.sh has already been run on every GPU node.
 set -euo pipefail
 
-SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${SCRIPT_SRC_ROOT}/scripts/stage_local_runtime.sh"
+p2a_stage_local_runtime "${SCRIPT_SRC_ROOT}"
+SRC_ROOT="${P2A_RUNTIME_SRC_ROOT}"
 cd "${SRC_ROOT}"
 
 UV_BIN="${UV_BIN:-$(command -v uv || true)}"
@@ -78,6 +81,10 @@ build_data "${DATA}/swe_bench_verified_hard.parquet" \
   swebench-hard --out "${DATA}/swe_bench_verified_hard.parquet"
 
 echo "[baseline] Ray endpoint: ${RAY_API_SERVER_ADDRESS}"
+if [[ "${P2A_SHARED_SRC_ROOT:-${SRC_ROOT}}" != "${SRC_ROOT}" ]]; then
+  echo "[baseline] shared source: ${P2A_SHARED_SRC_ROOT}"
+  echo "[baseline] runtime source: ${SRC_ROOT}"
+fi
 echo "[baseline] venv: ${UV_PROJECT_ENVIRONMENT}"
 echo "[baseline] train: ${DATA}/r2e_gym_subset_p2a.train.parquet"
 echo "[baseline] val: ${DATA}/swe_bench_verified_hard.parquet"

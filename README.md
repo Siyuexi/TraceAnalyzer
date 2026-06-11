@@ -183,6 +183,28 @@ the Ray cluster port. `8080` is not a Ray port in the VRC remote-debug setup.
 `NUM_CPUS` defaults to 64 per node to avoid Ray prestarting hundreds of Python
 workers from the shared `.venv`; raise it only after the smoke check passes.
 
+If Ray worker startup puts too much small-file pressure on the shared disk, keep
+the shared checkout as the source of truth but stage code and the Python runtime
+onto each node's local disk before starting Ray:
+
+```bash
+HEAD_IP=<HEAD_IP>
+export RAY_WORKER_HOSTS="<WORKER_IP_1> <WORKER_IP_2> <WORKER_IP_3>"
+export P2A_STAGE_LOCAL_RUNTIME=1
+export P2A_LOCAL_ROOT=/tmp/p2a-traceanalyzer
+bash scripts/ray_setup.sh "$HEAD_IP" restart-cluster
+```
+
+This copies the repo code, `.uv-python`, and `.venv` to
+`$P2A_LOCAL_ROOT/TraceAnalyzer` on each node, rewrites copied venv paths from the
+shared source to the local runtime path, then starts Ray from the local venv.
+Data, models, checkpoints, and W&B output remain controlled by `DATA`,
+`MODEL_PATH`/`MODEL`, `RAY_DATA_HOME`, and `WANDB_DIR`; keep those on shared
+storage unless their access pattern becomes a measured bottleneck. The staging
+path mainly reduces Ray control-plane / worker-import pressure during startup;
+it is not expected to materially speed up steady-state training unless training
+was blocked on shared-disk Python package reads.
+
 If you cannot ssh from the head to workers, run the same script manually in this
 order:
 
