@@ -2,7 +2,8 @@
 P2A training entry point — drop-in replacement for verl's fully_async_main.
 
 Usage:
-    python3 -m p2a.main --config-name='fully_async_ppo_megatron_trainer.yaml' ...
+    python3 -m p2a.main \
+      'hydra.searchpath=[pkg://verl.trainer.config]' ...
 
 The ONLY difference from the upstream entry point: _create_trainer() uses
 P2AFullyAsyncTrainer instead of FullyAsyncTrainer, and _create_rollouter()
@@ -27,6 +28,8 @@ from p2a.trainer import create_p2a_trainer_cls
 P2AFullyAsyncTrainer = create_p2a_trainer_cls(FullyAsyncTrainer)
 P2AFullyAsyncRollouter = create_p2a_rollouter_cls(FullyAsyncRollouter)
 _BaseTaskRunnerClass = getattr(getattr(_BaseTaskRunner, "__ray_metadata__", None), "modified_class", _BaseTaskRunner)
+_CONFIG_PATH = "../uni-agent/verl/verl/experimental/fully_async_policy/config"
+_CONFIG_NAME = "fully_async_ppo_megatron_trainer"
 
 
 @ray.remote(num_cpus=1)
@@ -72,7 +75,7 @@ class P2ATaskRunner(_BaseTaskRunnerClass):
         print("[P2A MAIN] P2AFullyAsyncTrainer created and initialized successfully")
 
 
-@hydra.main(config_path=None, config_name=None, version_base=None)
+@hydra.main(config_path=_CONFIG_PATH, config_name=_CONFIG_NAME, version_base=None)
 def main(config):
     from verl.experimental.reward_loop import migrate_legacy_reward_impl
     from verl.trainer.main_ppo import run_ppo
