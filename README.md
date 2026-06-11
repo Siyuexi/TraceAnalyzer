@@ -183,62 +183,6 @@ the Ray cluster port. `8080` is not a Ray port in the VRC remote-debug setup.
 `NUM_CPUS` defaults to 64 per node to avoid Ray prestarting hundreds of Python
 workers from the shared `.venv`; raise it only after the smoke check passes.
 
-For lower shared-disk pressure, keep the shared checkout as the source of truth
-but run Ray from each node's local disk:
-
-```bash
-HEAD_IP=<HEAD_IP>
-export RAY_WORKER_HOSTS="<WORKER_IP_1> <WORKER_IP_2> <WORKER_IP_3>"
-export P2A_LOCAL_RUNTIME=1
-export P2A_LOCAL_ROOT=/tmp/p2a-traceanalyzer
-export P2A_RAY_LAUNCHER=venv
-export P2A_SYNC_LOCAL_VENV=1
-bash scripts/ray_setup.sh "$HEAD_IP" restart-cluster
-```
-
-With `P2A_LOCAL_RUNTIME=1`, each node copies this shared source tree to
-`$P2A_LOCAL_ROOT/TraceAnalyzer` before starting Ray. With
-`P2A_RAY_LAUNCHER=venv` and `P2A_SYNC_LOCAL_VENV=1`, Ray starts from the copied
-local venv instead of the shared-disk venv, so the control plane and training
-workers use the same local Python/Ray ABI.
-
-For training, keep `P2A_SYNC_LOCAL_VENV=1` so every node has the same local
-training environment at `$P2A_LOCAL_ROOT/TraceAnalyzer/.venv`. By default the
-script copies the already-built shared `.uv-python` and `.venv` to each node's
-local disk and rewrites the copied venv paths to the local runtime root. The
-training launcher writes that Python into Ray's `runtime_env.py_executable`, so
-training workers use the local copied venv rather than the shared-disk venv.
-
-`P2A_RAY_LAUNCHER=native` is only safe for training when native Python has the
-same major/minor version as the training venv. For example, a native Python 3.10
-Ray control plane cannot safely run a Python 3.11 training `py_executable`;
-Ray's internal JobSupervisor actor can fail to deserialize. For smoke-only Ray
-Jobs without the training venv, native launch is still available:
-
-```bash
-export P2A_RAY_LAUNCHER=native
-export P2A_SYNC_NATIVE_RAY=1
-unset P2A_SYNC_LOCAL_VENV
-```
-
-If you only want to smoke-test Ray Jobs without building the full training venv,
-you can omit:
-
-```bash
-unset P2A_SYNC_LOCAL_VENV
-```
-
-The first local venv copy can be slow because the GPU training environment is
-large, but it avoids per-node package downloads. Set `P2A_REBUILD_LOCAL_VENV=1`
-only when you intentionally want each node to rebuild the local venv with
-`uv sync --locked --extra train --extra gpu`. Submit training from the same
-local runtime path, or point a shared checkout invocation at it:
-
-```bash
-export P2A_RUNTIME_SRC_ROOT=/tmp/p2a-traceanalyzer/TraceAnalyzer
-bash "$P2A_RUNTIME_SRC_ROOT/scripts/run_baseline_clean.sh"
-```
-
 If you cannot ssh from the head to workers, run the same script manually in this
 order:
 

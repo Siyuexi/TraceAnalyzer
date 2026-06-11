@@ -9,9 +9,7 @@
 #   TRAIN_FILE=... TEST_FILE=... MODEL_PATH=... P2A_BONUS_MAP_DIR=... P2A_M_MAX=3.0 bash scripts/train_p2a.sh
 set -xeuo pipefail
 
-SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC_ROOT="${P2A_RUNTIME_SRC_ROOT:-${SCRIPT_SRC_ROOT}}"
-SRC_ROOT="$(cd "${SRC_ROOT}" && pwd)"
+SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "${SRC_ROOT}/scripts/shared_hf.sh"
 
 UNI_AGENT_DIR="${SRC_ROOT}/uni-agent"
@@ -37,15 +35,10 @@ PYTHON_BIN=${PYTHON_BIN:-"${UV_PROJECT_ENVIRONMENT}/bin/python"}
 RAY_BIN=${RAY_BIN:-"${UV_PROJECT_ENVIRONMENT}/bin/ray"}
 export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
 export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
-P2A_RAY_WORKER_PYTHON=${P2A_RAY_WORKER_PYTHON:-"${PYTHON_BIN}"}
 echo "[P2A] UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT}"
 if [[ ! -x "${PYTHON_BIN}" || ! -x "${RAY_BIN}" ]]; then
     echo "[P2A] Missing ${PYTHON_BIN} or ${RAY_BIN}" >&2
     echo "[P2A] Build the shared src/.venv first, then rerun this script." >&2
-    exit 2
-fi
-if [[ ! -x "${P2A_RAY_WORKER_PYTHON}" ]]; then
-    echo "[P2A] Missing P2A_RAY_WORKER_PYTHON=${P2A_RAY_WORKER_PYTHON}" >&2
     exit 2
 fi
 RAY_API_URL="${RAY_API_SERVER_ADDRESS:-http://127.0.0.1:8265}"
@@ -137,6 +130,8 @@ if [[ "${AGENT_CONFIG_PATH}" == "${DEFAULT_AGENT_CONFIG_PATH}" || ! -f "${AGENT_
     cp "${SRC_ROOT}/env/agent_config_arl.yaml" "${AGENT_CONFIG_PATH}"
 fi
 
+# Ray runtime_env working_dir packages and uploads the checkout. The GPU nodes
+# already share SRC_ROOT, so run there directly and keep runtime_env env-only.
 "${PYTHON_BIN}" - "${RUNTIME_ENV}" "${SRC_ROOT}" <<'PY'
 import json
 import os
@@ -172,14 +167,8 @@ for line in text.splitlines():
     key = stripped.split(":", 1)[0]
     if key in upstream_placeholder_keys:
         continue
-    if not line.startswith(" ") and stripped.startswith("py_executable:"):
-        continue
     lines.append(line)
 text = "\n".join(lines) + "\n"
-
-py_executable = os.environ.get("P2A_RAY_WORKER_PYTHON")
-if py_executable:
-    text = f"py_executable: {json.dumps(py_executable)}\n" + text
 
 managed_env_keys = (
     "ARL_GATEWAY_URL",
