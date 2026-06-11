@@ -1154,6 +1154,20 @@ wheels = [
 ]
 
 [[package]]
+name = "megatron-core"
+version = "0.16.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", marker = "platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
+    { name = "packaging", marker = "platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
+    { name = "torch", marker = "platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e5/93/b8725486a5d2cda20f003d26fd8c777fe95451303bd661cedc37d0d005eb/megatron_core-0.16.1.tar.gz", hash = "sha256:86522feacfa5ef384a6ac627e7d88cf4866811aed3bc9b6c2a85cbf15cff91a3", size = 1035250, upload-time = "2026-03-20T21:23:43.551Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e0/fd/2c3a62d09e2afca4cef6171e6f6aae3d0a704d5929690a7ee44fae65d538/megatron_core-0.16.1-cp311-cp311-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:38f6bef63cd4ebc4c39c1eccbaf578596accba5c47d012faffa0670913aec131", size = 2577950, upload-time = "2026-03-20T21:23:36.759Z" },
+]
+
+[[package]]
 name = "mistral-common"
 version = "1.11.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1691,6 +1705,7 @@ dev = [
 ]
 gpu = [
     { name = "cupy-cuda13x", marker = "platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
+    { name = "megatron-core", marker = "platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
     { name = "torch", marker = "platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
     { name = "torchaudio", marker = "platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
     { name = "torchvision", marker = "platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
@@ -1710,6 +1725,7 @@ requires-dist = [
     { name = "httpx" },
     { name = "huggingface-hub" },
     { name = "loguru" },
+    { name = "megatron-core", marker = "extra == 'gpu'", specifier = ">=0.12.0" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "numpy" },
     { name = "pandas" },

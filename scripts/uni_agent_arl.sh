@@ -32,81 +32,14 @@ require_uni_agent() {
   fi
 }
 
-write_runtime_env_from_shell() {
-  python3 - "$RUNTIME_ENV" <<'PY'
-import json
-import os
-import re
-import sys
-
-path = sys.argv[1]
-keys = [
-    "ARL_GATEWAY_URL",
-    "ARL_NAMESPACE",
-    "ARL_EXPERIMENT_ID",
-    "ARL_TIMEOUT",
-    "ARL_STARTUP_TIMEOUT",
-    "ARL_MIRROR_REGISTRY",
-    "ARL_MIRROR_NAMESPACE",
-    "P2A_ARL_IMAGE_OVERRIDES_JSON",
-    "UNI_AGENT_P2A_TRACE",
-    "P2A_BONUS_MAP_DIR",
-    "P2A_M_MAX",
-    "P2A_TRACKING_MODE",
-    "P2A_EVAL_BONUS_MAP_DIR",
-    "P2A_EVAL_NEAR_THRESHOLD",
-    "P2A_EVAL_DETAILS_DIR",
-]
-
-with open(path, "r", encoding="utf-8") as fh:
-    text = fh.read()
-
-text = re.sub(r'(^\s*PYTHONPATH:\s*).+$', r'\1"uni-agent/verl:uni-agent:."', text, flags=re.MULTILINE)
-lines = []
-upstream_placeholder_keys = {
-    "VEFAAS_FUNCTION_ID",
-    "VEFAAS_FUNCTION_ROUTE",
-    "VEFAAS_REGION",
-    "VOLCE_ACCESS_KEY",
-    "VOLCE_SECRET_KEY",
-    "MODAL_TOKEN_ID",
-    "MODAL_TOKEN_SECRET",
-}
-upstream_comment_needles = ("if you use vefaas", "if you use modal")
-for line in text.splitlines():
-    stripped = line.strip()
-    if any(needle in stripped.lower() for needle in upstream_comment_needles):
-        continue
-    key = stripped.split(":", 1)[0]
-    if key in upstream_placeholder_keys:
-        continue
-    lines.append(line)
-text = "\n".join(lines) + "\n"
-env_vars_seen = "env_vars:" in text
-for key in keys:
-    value = os.environ.get(key)
-    if not value:
-        continue
-    pattern = rf"(^\s*{re.escape(key)}:\s*).*$"
-    replacement = rf"\1{json.dumps(value)}"
-    if re.search(pattern, text, flags=re.MULTILINE):
-        text = re.sub(pattern, replacement, text, flags=re.MULTILINE)
-    elif env_vars_seen:
-        text = text.rstrip() + f"\n  {key}: {json.dumps(value)}\n"
-
-with open(path, "w", encoding="utf-8") as fh:
-    fh.write(text)
-PY
-}
-
 prepare() {
   require_uni_agent
   mkdir -p "$DATA_DIR"
   if [[ ! -f "$RUNTIME_ENV" ]]; then
-    cp "${UNI_AGENT_DIR}/examples/agent_interaction/runtime_env.yaml" "$RUNTIME_ENV"
+    cp "${UNI_AGENT_DIR}/examples/swe_agent_235b/runtime_env.yaml" "$RUNTIME_ENV"
   fi
   cp "${SRC_DIR}/env/agent_config_arl.yaml" "$AGENT_CONFIG_PATH"
-  write_runtime_env_from_shell
+  (cd "$SRC_DIR" && uv run python -m p2a.runtime_env "$RUNTIME_ENV" --src-root "$SRC_DIR" --drop-working-dir --env-profile arl)
 
   local debug_concurrency="${UNI_AGENT_DEBUG_CONCURRENCY:-4}"
   local debug_max_turns="${UNI_AGENT_DEBUG_MAX_TURNS:-10}"
@@ -166,7 +99,6 @@ debug() {
     echo "Missing $AGENT_CONFIG_PATH; run prepare first." >&2
     exit 1
   fi
-  ensure_model_path
 
   cd "$SRC_DIR"
 

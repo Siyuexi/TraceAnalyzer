@@ -67,7 +67,7 @@ ensure_model_path() {
   local path repo python_bin
   path="${MODEL_PATH:-$(default_model_path)}"
   repo="$(default_model_repo)"
-  python_bin="${P2A_PYTHON:-python3}"
+  python_bin="${P2A_PYTHON:-${PYTHON_BIN:-python3}}"
 
   if [[ -d "${path}" && -n "$(find "${path}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
     MODEL_PATH="${path}"

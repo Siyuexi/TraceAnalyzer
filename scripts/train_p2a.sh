@@ -8,6 +8,8 @@
 #   TRAIN_FILE=... TEST_FILE=... MODEL_PATH=... bash scripts/train_p2a.sh
 #   TRAIN_FILE=... TEST_FILE=... MODEL_PATH=... P2A_BONUS_MAP_DIR=... P2A_M_MAX=3.0 bash scripts/train_p2a.sh
 set -xeuo pipefail
+export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
+export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
 
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
@@ -75,6 +77,23 @@ fi
 export NO_PROXY="${NO_PROXY:+${NO_PROXY},}${RAY_NO_PROXY}"
 export no_proxy="${no_proxy:+${no_proxy},}${RAY_NO_PROXY}"
 
+normalize_bool() {
+    local key="$1"
+    local value="$2"
+    case "${value}" in
+        true|True|1|yes|YES) printf 'True\n' ;;
+        false|False|0|no|NO) printf 'False\n' ;;
+        *)
+            echo "[P2A] Invalid ${key}=${value}; use true or false." >&2
+            return 2
+            ;;
+    esac
+}
+
+apply_rope_fusion="$(normalize_bool P2A_APPLY_ROPE_FUSION "${P2A_APPLY_ROPE_FUSION:-True}")"
+
+moe_permute_fusion="$(normalize_bool P2A_MOE_PERMUTE_FUSION "${P2A_MOE_PERMUTE_FUSION:-True}")"
+
 rollout_mode="async"
 rollout_name="vllm"
 
@@ -121,11 +140,16 @@ infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / train_cp)
 optimizer_offload_fraction=1.0
 
 USE_MBRIDGE=True
+VANILLA_MBRIDGE="${VANILLA_MBRIDGE:-True}"
 USE_DIST_CKPT=False
 
 NNODES_ROLLOUT=${NNODES_ROLLOUT:-4}
 NNODES_TRAIN=${NNODES_TRAIN:-4}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
+infer_ep=${INFER_EP:-1}
+vllm_performance_mode="${VLLM_PERFORMANCE_MODE:-interactivity}"
+update_weights_bucket_megabytes="${P2A_UPDATE_WEIGHTS_BUCKET_MB:-2048}"
+nccl_timeout="${P2A_NCCL_TIMEOUT:-9600}"
 
 train_prompt_bsz=0
 n_resp_per_prompt=8
@@ -141,11 +165,9 @@ if [[ -n "${P2A_BONUS_MAP_DIR:-}${P2A_EVAL_BONUS_MAP_DIR:-}" && -z "${UNI_AGENT_
     export UNI_AGENT_P2A_TRACE=1
 fi
 
-ensure_model_path
-
 mkdir -p "$(dirname "${RUNTIME_ENV}")"
 if [[ ! -f "${RUNTIME_ENV}" ]]; then
-    cp "${UNI_AGENT_DIR}/examples/agent_interaction/runtime_env.yaml" "${RUNTIME_ENV}"
+    cp "${UNI_AGENT_DIR}/examples/swe_agent_235b/runtime_env.yaml" "${RUNTIME_ENV}"
 fi
 mkdir -p "$(dirname "${AGENT_CONFIG_PATH}")"
 if [[ "${AGENT_CONFIG_PATH}" == "${DEFAULT_AGENT_CONFIG_PATH}" || ! -f "${AGENT_CONFIG_PATH}" ]]; then
@@ -154,93 +176,51 @@ fi
 
 # Ray runtime_env working_dir packages and uploads the checkout. The GPU nodes
 # already share SRC_ROOT, so run there directly and keep runtime_env env-only.
-"${PYTHON_BIN}" - "${RUNTIME_ENV}" "${SRC_ROOT}" <<'PY'
-import json
-import os
-import re
-import sys
+"${PYTHON_BIN}" -m p2a.runtime_env "${RUNTIME_ENV}" --src-root "${SRC_ROOT}" --drop-working-dir
 
-path = sys.argv[1]
-src_root = sys.argv[2]
-with open(path, "r", encoding="utf-8") as fh:
-    text = fh.read()
+ensure_model_path
 
-pythonpath = f"{src_root}/uni-agent/verl:{src_root}/uni-agent:{src_root}"
-text = re.sub(r'(^\s*PYTHONPATH:\s*).+$', rf'\1{json.dumps(pythonpath)}', text, flags=re.MULTILINE)
-lines = []
-upstream_placeholder_keys = {
-    "VEFAAS_FUNCTION_ID",
-    "VEFAAS_FUNCTION_ROUTE",
-    "VEFAAS_REGION",
-    "VOLCE_ACCESS_KEY",
-    "VOLCE_SECRET_KEY",
-    "MODAL_TOKEN_ID",
-    "MODAL_TOKEN_SECRET",
-}
-upstream_comment_needles = ("if you use vefaas", "if you use modal")
-for line in text.splitlines():
-    stripped = line.strip()
-    if not line.startswith(" ") and (
-        stripped.startswith("working_dir:") or stripped.startswith("excludes:")
-    ):
-        continue
-    if any(needle in stripped.lower() for needle in upstream_comment_needles):
-        continue
-    key = stripped.split(":", 1)[0]
-    if key in upstream_placeholder_keys:
-        continue
-    lines.append(line)
-text = "\n".join(lines) + "\n"
+if [[ "${P2A_SKIP_MEGATRON_PREFLIGHT:-0}" != "1" ]]; then
+    "${PYTHON_BIN}" - <<'PY'
+import importlib
 
-managed_env_keys = (
-    "ARL_GATEWAY_URL",
-    "ARL_NAMESPACE",
-    "ARL_EXPERIMENT_ID",
-    "ARL_TIMEOUT",
-    "ARL_STARTUP_TIMEOUT",
-    "ARL_MIRROR_REGISTRY",
-    "ARL_MIRROR_NAMESPACE",
-    "P2A_ARL_IMAGE_OVERRIDES_JSON",
-    "P2A_BONUS_MAP_DIR",
-    "P2A_M_MAX",
-    "P2A_TRACKING_MODE",
-    "P2A_EVAL_BONUS_MAP_DIR",
-    "P2A_EVAL_NEAR_THRESHOLD",
-    "P2A_EVAL_DETAILS_DIR",
-    "UNI_AGENT_P2A_TRACE",
-    "PATH",
-    "UV_PROJECT_ENVIRONMENT",
-    "UV_CACHE_DIR",
-    "UV_HTTP_TIMEOUT",
-    "UV_NO_BUILD_PACKAGE",
-    "UV_PYTHON",
-    "VIRTUAL_ENV",
-    "WANDB_API_KEY",
-    "WANDB_BASE_URL",
-    "WANDB_DIR",
-    "WANDB_ENTITY",
-    "WANDB_MODE",
-    "WANDB_NAME",
-    "WANDB_PROJECT",
-    "WANDB_RUN_GROUP",
-    "WANDB_TAGS",
-)
+from verl.workers.engine import EngineRegistry, MegatronEngine
 
-for key in managed_env_keys:
-    value = os.environ.get(key)
-    pattern = rf"(^\s*{re.escape(key)}:\s*).*$"
-    if not value:
-        text = re.sub(pattern + r"\n?", "", text, flags=re.MULTILINE)
-        continue
-    replacement = rf"\1{json.dumps(value)}"
-    if re.search(pattern, text, flags=re.MULTILINE):
-        text = re.sub(pattern, replacement, text, flags=re.MULTILINE)
-    elif "env_vars:" in text:
-        text = text.rstrip() + f"\n  {key}: {json.dumps(value)}\n"
-
-with open(path, "w", encoding="utf-8") as fh:
-    fh.write(text)
+registered = sorted(EngineRegistry._engines.get("language_model", {}))
+if MegatronEngine is None or "megatron" not in registered:
+    try:
+        importlib.import_module("verl.workers.engine.megatron")
+    except Exception as exc:  # noqa: BLE001 - include the real import failure in the launcher error
+        import_error = f"{type(exc).__name__}: {exc}"
+    else:
+        import_error = "direct import succeeded, but registry still lacks megatron"
+    raise SystemExit(
+        "[P2A] Megatron engine is not registered in this Python environment. "
+        f"registered_language_model_backends={registered}. "
+        f"megatron_import={import_error}. "
+        "Run `uv sync --extra train --extra gpu` on the GPU/shared runtime, "
+        "then rerun ray_setup/main so Ray workers use the refreshed .venv."
+    )
+print(f"[P2A] Megatron backend registered (language_model backends: {registered})")
 PY
+fi
+
+if [[ "${P2A_SKIP_TRANSFORMER_ENGINE_PREFLIGHT:-0}" != "1" ]]; then
+    "${PYTHON_BIN}" - <<'PY'
+try:
+    import transformer_engine.pytorch  # noqa: F401
+except Exception as exc:  # noqa: BLE001 - report binary/linker failures directly
+    raise SystemExit(
+        "[P2A] TransformerEngine is required by Uni-Agent's Megatron/mbridge path, "
+        f"but transformer_engine.pytorch is not importable: {type(exc).__name__}: {exc}. "
+        "Use a TransformerEngine build matched to the active torch/CUDA/Megatron stack; "
+        "Uni-Agent's reference image builds TE v2.2.1 with torch 2.8, CUDA 12.8, "
+        "and Megatron-LM core_v0.13.0."
+    )
+else:
+    print("[P2A] TransformerEngine import check passed")
+PY
+fi
 
 # TRAIN_FILE should point at the skip-filtered *.train.parquet emitted by
 # scripts/build_data.py r2e.
@@ -277,6 +257,8 @@ PY
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
+    actor_rollout_ref.model.trust_remote_code=True \
+    actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
@@ -296,7 +278,9 @@ PY
     +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True \
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True \
     actor_rollout_ref.actor.megatron.use_mbridge=$USE_MBRIDGE \
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=$VANILLA_MBRIDGE \
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=$USE_DIST_CKPT \
+    actor_rollout_ref.actor.megatron.use_remove_padding=True \
     actor_rollout_ref.actor.megatron.param_offload=${offload} \
     actor_rollout_ref.actor.megatron.grad_offload=${offload} \
     actor_rollout_ref.actor.megatron.optimizer_offload=${offload} \
@@ -305,7 +289,7 @@ PY
     actor_rollout_ref.actor.megatron.context_parallel_size=${train_cp} \
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=${train_ep} \
     actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${train_etp} \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=True \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=${apply_rope_fusion} \
     +actor_rollout_ref.actor.megatron.override_transformer_config.masked_softmax_fusion=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.bias_activation_fusion=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.bias_dropout_fusion=True \
@@ -313,7 +297,7 @@ PY
     +actor_rollout_ref.actor.megatron.override_transformer_config.deallocate_pipeline_outputs=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.persist_layer_norm=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm=True \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=${moe_permute_fusion} \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type="alltoall" \
     +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32 \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform \
@@ -323,7 +307,11 @@ PY
     actor_rollout_ref.rollout.enable_rollout_routing_replay=True \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
+    actor_rollout_ref.rollout.prompt_length=${max_prompt_length} \
+    actor_rollout_ref.rollout.response_length=${max_response_length} \
     actor_rollout_ref.rollout.multi_turn.enable=True \
     actor_rollout_ref.rollout.multi_turn.max_parallel_calls=1 \
     actor_rollout_ref.rollout.agent.num_workers=8 \
@@ -331,6 +319,9 @@ PY
     actor_rollout_ref.rollout.agent.default_agent_loop=swe_agent \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
+    actor_rollout_ref.rollout.expert_parallel_size=${infer_ep} \
+    actor_rollout_ref.rollout.max_model_len=$((max_prompt_length + max_response_length)) \
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.performance_mode=${vllm_performance_mode} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
     actor_rollout_ref.rollout.temperature=${temperature} \
@@ -344,9 +335,12 @@ PY
     actor_rollout_ref.rollout.name=${rollout_name} \
     actor_rollout_ref.rollout.mode=${rollout_mode} \
     actor_rollout_ref.rollout.calculate_log_probs=True \
+    actor_rollout_ref.nccl_timeout=${nccl_timeout} \
     actor_rollout_ref.hybrid_engine=False \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.free_cache_engine=True \
+    actor_rollout_ref.rollout.disable_log_stats=False \
+    actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=${update_weights_bucket_megabytes} \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.ref.megatron.use_dist_checkpointing=${USE_DIST_CKPT} \
     actor_rollout_ref.ref.megatron.param_offload=${offload} \

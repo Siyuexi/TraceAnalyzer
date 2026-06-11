@@ -7,26 +7,18 @@
 set -euo pipefail
 
 SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${SRC_ROOT}/scripts/shared_hf.sh"
 cd "${SRC_ROOT}"
-
-shared_root() {
-  if [[ -n "${P2A_SHARED_ROOT:-}" ]]; then
-    mkdir -p "${P2A_SHARED_ROOT}"
-    cd "${P2A_SHARED_ROOT}" && pwd
-  elif [[ -n "${P2A_SHARED_SRC_ROOT:-}" ]]; then
-    cd "${P2A_SHARED_SRC_ROOT}/../.." && pwd
-  else
-    cd "${SRC_ROOT}/../.." && pwd
-  fi
-}
 
 default_data_dir() {
   if [[ -n "${DATA:-}" ]]; then
-    mkdir -p "${DATA}"
-    cd "${DATA}" && pwd
+    local data_dir
+    data_dir="$(resolve_shared_path "${DATA}")"
+    mkdir -p "${data_dir}"
+    cd "${data_dir}" && pwd
   else
     local root
-    root="$(shared_root)"
+    root="$(shared_hf_root)"
     mkdir -p "${root}/datasets/p2a"
     cd "${root}/datasets/p2a" && pwd
   fi

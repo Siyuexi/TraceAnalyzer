@@ -4,9 +4,7 @@ set -euo pipefail
 
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
-source "${SCRIPT_SRC_ROOT}/scripts/stage_local_runtime.sh"
-p2a_stage_local_runtime "${SCRIPT_SRC_ROOT}"
-SRC_ROOT="${P2A_RUNTIME_SRC_ROOT}"
+SRC_ROOT="${SCRIPT_SRC_ROOT}"
 source "${SRC_ROOT}/scripts/shared_hf.sh"
 cd "${SRC_ROOT}"
 
@@ -22,8 +20,8 @@ unset P2A_BONUS_MAP_DIR P2A_M_MAX P2A_TRACKING_MODE
 unset P2A_EVAL_BONUS_MAP_DIR P2A_EVAL_DETAILS_DIR P2A_EVAL_NEAR_THRESHOLD
 unset UNI_AGENT_P2A_TRACE
 
-export UV_PYTHON_INSTALL_DIR="${SRC_ROOT}/.uv-python"
-export UV_PROJECT_ENVIRONMENT="${SRC_ROOT}/.venv"
+export UV_PYTHON_INSTALL_DIR="${SCRIPT_SRC_ROOT}/.uv-python"
+export UV_PROJECT_ENVIRONMENT="${SCRIPT_SRC_ROOT}/.venv"
 export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
 export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
 
@@ -73,6 +71,15 @@ if [[ "${P2A_SYNC_DEPS:-1}" == "1" ]]; then
   UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT}" "${UV_BIN}" sync --locked --extra train --extra gpu
 fi
 
+source "${SCRIPT_SRC_ROOT}/scripts/stage_local_runtime.sh"
+p2a_stage_local_runtime "${SCRIPT_SRC_ROOT}"
+SRC_ROOT="${P2A_RUNTIME_SRC_ROOT}"
+cd "${SRC_ROOT}"
+export UV_PYTHON_INSTALL_DIR="${SRC_ROOT}/.uv-python"
+export UV_PROJECT_ENVIRONMENT="${SRC_ROOT}/.venv"
+export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
+export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
+
 PYTHON_BIN="${UV_PROJECT_ENVIRONMENT}/bin/python"
 RAY_BIN="${UV_PROJECT_ENVIRONMENT}/bin/ray"
 if [[ ! -x "${PYTHON_BIN}" || ! -x "${RAY_BIN}" ]]; then
@@ -98,6 +105,7 @@ restart_ray_cluster() {
 
   echo "[baseline] Restarting Ray cluster from main.sh: head=${head_ip}, workers=${RAY_WORKER_HOSTS}"
   P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME}" \
+    P2A_SHARED_SRC_ROOT="${P2A_SHARED_SRC_ROOT:-${SCRIPT_SRC_ROOT}}" \
     P2A_LOCAL_ROOT="${P2A_LOCAL_ROOT:-/tmp/p2a-traceanalyzer}" \
     bash "${SCRIPT_SRC_ROOT}/scripts/ray_setup.sh" "${head_ip}" restart-cluster
 }
