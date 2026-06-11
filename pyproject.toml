@@ -51,6 +51,7 @@ train = ["verl"]
 # manylinux1 wheel; torch itself is sourced from the CUDA 13 PyTorch index below.
 gpu = [
     "verl[gpu,geo,mcore,math]",
+    "megatron-core>=0.12.0",
     "torch>=2.9.0",
     "torchvision>=0.24.0",
     "torchaudio>=2.9.0",

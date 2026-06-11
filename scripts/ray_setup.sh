@@ -30,7 +30,8 @@ if [[ $# -lt 1 ]]; then
   exit 2
 fi
 
-SHARED_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SHARED_SRC_ROOT="$(cd "${P2A_SHARED_SRC_ROOT:-${SCRIPT_SRC_ROOT}}" && pwd)"
 SRC_ROOT="${SHARED_SRC_ROOT}"
 cd "${SHARED_SRC_ROOT}"
 
