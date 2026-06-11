@@ -3,7 +3,9 @@
 # after scripts/ray_setup.sh has already been run on every GPU node.
 set -euo pipefail
 
-SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SRC_ROOT="${P2A_RUNTIME_SRC_ROOT:-${SCRIPT_SRC_ROOT}}"
+SRC_ROOT="$(cd "${SRC_ROOT}" && pwd)"
 cd "${SRC_ROOT}"
 
 UV_BIN="${UV_BIN:-$(command -v uv || true)}"
