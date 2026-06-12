@@ -192,7 +192,8 @@ install_vllm() {
     "numba==0.61.2" \
     "pyzmq>=25.0.0" \
     "regex" \
-    "psutil"
+    "psutil" \
+    "cupy-cuda12x"
   "${python_bin}" -m pip install --no-deps --no-cache-dir "xformers==0.0.32.post1"
 
   if [[ "${spec}" != "source" ]]; then

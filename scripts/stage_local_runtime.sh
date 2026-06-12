@@ -70,7 +70,7 @@ p2a_runtime_stamp() {
     printf 'venv=%s\n' "${venv_rel}"
     git rev-parse HEAD 2>/dev/null || true
     git submodule status --recursive 2>/dev/null || true
-    for path in pyproject.toml uv.lock "${venv_rel}/pyvenv.cfg" "${venv_rel}/bin/python" "${venv_rel}/bin/ray" .uv-python; do
+    for path in pyproject.toml uv.lock "${venv_rel}/pyvenv.cfg" "${venv_rel}/bin/python" "${venv_rel}/bin/ray" "${venv_rel}"/lib/python*/site-packages .uv-python; do
       if [[ -e "${path}" ]]; then
         stat -c '%n %s %Y' "${path}" 2>/dev/null || ls -l "${path}"
       fi
