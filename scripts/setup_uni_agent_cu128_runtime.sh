@@ -74,21 +74,21 @@ choose_cuda_home() {
 }
 
 choose_python() {
+  local python_bin
   if [[ -n "${P2A_CU128_PYTHON:-}" ]]; then
-    printf '%s\n' "${P2A_CU128_PYTHON}"
-    return
+    python_bin="${P2A_CU128_PYTHON}"
+  elif command -v python3.11 >/dev/null 2>&1; then
+    python_bin="$(command -v python3.11)"
+  elif command -v uv >/dev/null 2>&1; then
+    uv python install --managed-python 3.11 >&2
+    python_bin="$(uv python find --managed-python --no-project 3.11)"
+  else
+    echo "[cu128] python3.11 or uv is required to build ${VENV_REL}." >&2
+    exit 2
   fi
-  if command -v python3.11 >/dev/null 2>&1; then
-    command -v python3.11
-    return
-  fi
-  if command -v uv >/dev/null 2>&1; then
-    uv python install --managed-python 3.11
-    uv python find --managed-python --no-project 3.11
-    return
-  fi
-  echo "[cu128] python3.11 or uv is required to build ${VENV_REL}." >&2
-  exit 2
+  # venv records home= from the invoking binary's directory; a symlinked
+  # python3.11 makes the --copies interpreter unable to locate its stdlib.
+  readlink -f "${python_bin}"
 }
 
 require_submodules() {
