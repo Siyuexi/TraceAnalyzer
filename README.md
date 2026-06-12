@@ -97,7 +97,7 @@ Uni-Agent reference versions:
 | TransformerEngine | `NVIDIA/TransformerEngine.git@v2.2.1` with `NVTE_FRAMEWORK=pytorch` |
 | Megatron-LM | `NVIDIA/Megatron-LM.git@core_v0.13.0`, editable/no-deps |
 | mbridge | `git+https://github.com/ISEEKYAN/mbridge.git` |
-| vLLM | `vllm==0.11.0` cu128 wheel, no-deps with its dependency closure preinstalled (`P2A_CU128_VLLM_SPEC=source` builds from git `@v0.11.0`) |
+| vLLM | built from `vllm-project/vllm.git@v0.11.0` (PyPI wheels need glibc ≥ 2.29; TLinux has 2.28), dependency closure preinstalled; `P2A_CU128_VLLM_SPEC=vllm==0.11.0` uses the wheel on newer hosts |
 
 When `.venv-cu128` exists, the launchers prefer it automatically and skip `uv
 sync` by default so the cu130 lock cannot overwrite the cu128 stack. To force a

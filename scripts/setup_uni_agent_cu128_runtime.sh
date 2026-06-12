@@ -15,7 +15,9 @@ Key overrides:
   P2A_CU128_CUDA_HOME=/usr/local/cuda-12.8
   P2A_CU128_PYTHON=/path/to/python3.11
   P2A_CU128_REBUILD=1
-  P2A_CU128_VLLM_SPEC=vllm==0.11.0  # pip spec installed --no-deps; "source" builds from git
+  P2A_CU128_VLLM_SPEC=source        # default: build from git (PyPI wheels need GLIBC>=2.29;
+                                    # TLinux glibc 2.28 cannot load their _moe_C). A pip spec
+                                    # like "vllm==0.11.0" installs a wheel --no-deps instead.
   P2A_CU128_VLLM_REF=v0.11.0        # git ref when P2A_CU128_VLLM_SPEC=source
   P2A_CU128_INSTALL_APEX=1
 EOF
@@ -154,7 +156,7 @@ install_vllm() {
   local python_bin="$1"
   local repo="${BUILD_ROOT}/vllm"
   local ref="${P2A_CU128_VLLM_REF:-v0.11.0}"
-  local spec="${P2A_CU128_VLLM_SPEC:-vllm==0.11.0}"
+  local spec="${P2A_CU128_VLLM_SPEC:-source}"
 
   # vllm itself is installed --no-deps to keep the torch cu128 pins authoritative,
   # so its runtime dependency closure (vllm 0.11.0 requires_dist) is installed here.
