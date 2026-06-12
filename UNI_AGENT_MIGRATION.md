@@ -75,6 +75,24 @@ pip install git+https://github.com/R2E-Gym/R2E-Gym.git
 The exact CUDA/vLLM/SGLang/Megatron dependencies depend on the GPU server and the model recipe. Install those following the Uni-Agent/verl environment already used on that server.
 The R2E-Gym package is needed by `examples/data_preprocess/r2e_gym_subset_filtered.py` for `r2egym.commit_models.diff_classes.ParsedCommit`.
 
+For the fused Megatron/mbridge baseline, the current target is the Uni-Agent
+cu128 runtime rather than the generic cu130 uv environment:
+
+```bash
+cd src
+export P2A_CU128_CUDA_HOME=/usr/local/cuda-12.8
+bash scripts/setup_uni_agent_cu128_runtime.sh
+source .venv-cu128/p2a-cu128.env
+python scripts/check_uni_agent_runtime.py
+```
+
+The setup script follows `uni-agent/verl/docker/verl0.6-cu128-torch2.8.0-fa2.7.4`:
+torch 2.8.0/cu128, flash-attn 2.7.4.post1, TransformerEngine v2.2.1,
+Megatron-LM core_v0.13.0, and mbridge. `scripts/main.sh`,
+`scripts/train_p2a.sh`, and `scripts/ray_setup.sh` prefer `.venv-cu128` when it
+exists and stage that selected runtime to worker-local disk. `.venv` remains the
+uv-managed environment; do not run `uv sync` into `.venv-cu128`.
+
 ## One-Command Project Helper
 
 From the project root:

@@ -5,20 +5,72 @@ p2a_stage_enabled() {
   [[ "${P2A_STAGE_LOCAL_RUNTIME:-${P2A_LOCAL_RUNTIME:-0}}" == "1" ]]
 }
 
+p2a_preferred_venv_rel() {
+  local source_root="$1"
+  if [[ -n "${P2A_VENV_DIR:-}" ]]; then
+    printf '%s\n' "${P2A_VENV_DIR%/}"
+  elif [[ -n "${UV_PROJECT_ENVIRONMENT:-}" ]]; then
+    if [[ "${UV_PROJECT_ENVIRONMENT}" == /* ]]; then
+      printf '%s\n' "${UV_PROJECT_ENVIRONMENT#${source_root}/}"
+    else
+      printf '%s\n' "${UV_PROJECT_ENVIRONMENT%/}"
+    fi
+  elif [[ -x "${source_root}/.venv-cu128/bin/python" ]]; then
+    printf '.venv-cu128\n'
+  else
+    printf '.venv\n'
+  fi
+}
+
+p2a_runtime_venv_rel() {
+  local source_root="$1"
+  local rel
+  source_root="$(cd "${source_root}" && pwd -P)"
+  rel="$(p2a_preferred_venv_rel "${source_root}")"
+  rel="${rel#./}"
+  rel="${rel%/}"
+  case "${rel}" in
+    ""|/*|../*|*/../*|*/..)
+      echo "[stage] P2A_VENV_DIR/UV_PROJECT_ENVIRONMENT must point inside ${source_root}: ${rel}" >&2
+      return 2
+      ;;
+  esac
+  # With P2A_VENV_DIR set, an inherited UV_PROJECT_ENVIRONMENT may legitimately
+  # point at a parent launcher's staged runtime; the explicit name wins.
+  if [[ -z "${P2A_VENV_DIR:-}" && -n "${UV_PROJECT_ENVIRONMENT:-}" && "${UV_PROJECT_ENVIRONMENT}" == /* && "${UV_PROJECT_ENVIRONMENT}" != "${source_root}/${rel}" ]]; then
+    echo "[stage] UV_PROJECT_ENVIRONMENT must point inside ${source_root}: ${UV_PROJECT_ENVIRONMENT}" >&2
+    return 2
+  fi
+  printf '%s\n' "${rel}"
+}
+
 p2a_abs_dir() {
   local path="$1"
   mkdir -p "${path}"
   (cd "${path}" && pwd -P)
 }
 
+p2a_source_runtime_profile() {
+  local venv_path="${1:-${UV_PROJECT_ENVIRONMENT:-}}"
+  if [[ -n "${venv_path}" && -f "${venv_path}/p2a-cu128.env" ]]; then
+    # shellcheck disable=SC1091
+    source "${venv_path}/p2a-cu128.env"
+  fi
+}
+
 p2a_runtime_stamp() {
   local source_root="$1"
+  local venv_rel="${2:-}"
+  if [[ -z "${venv_rel}" ]]; then
+    venv_rel="$(p2a_runtime_venv_rel "${source_root}")"
+  fi
   (
     cd "${source_root}"
     printf 'source=%s\n' "${source_root}"
+    printf 'venv=%s\n' "${venv_rel}"
     git rev-parse HEAD 2>/dev/null || true
     git submodule status --recursive 2>/dev/null || true
-    for path in pyproject.toml uv.lock .venv/pyvenv.cfg .venv/bin/python .venv/bin/ray; do
+    for path in pyproject.toml uv.lock "${venv_rel}/pyvenv.cfg" "${venv_rel}/bin/python" "${venv_rel}/bin/ray" "${venv_rel}"/lib/python*/site-packages .uv-python; do
       if [[ -e "${path}" ]]; then
         stat -c '%n %s %Y' "${path}" 2>/dev/null || ls -l "${path}"
       fi
@@ -29,6 +81,7 @@ p2a_runtime_stamp() {
 p2a_rewrite_staged_paths() {
   local old_root="$1"
   local new_root="$2"
+  local venv_rel="${3:-.venv}"
   local patch_python
   local roots=("${old_root}")
   patch_python="$(command -v python3 || command -v python || true)"
@@ -37,37 +90,38 @@ p2a_rewrite_staged_paths() {
     return 2
   fi
 
-  if [[ -f "${new_root}/.venv/bin/ray" ]]; then
+  if [[ -f "${new_root}/${venv_rel}/bin/ray" ]]; then
     local shebang
-    IFS= read -r shebang < "${new_root}/.venv/bin/ray" || true
+    IFS= read -r shebang < "${new_root}/${venv_rel}/bin/ray" || true
     shebang="${shebang#\#!}"
-    if [[ "${shebang}" == */.venv/bin/python* ]]; then
-      roots+=("${shebang%%/.venv/bin/python*}")
+    if [[ "${shebang}" == */"${venv_rel}"/bin/python* ]]; then
+      roots+=("${shebang%%/${venv_rel}/bin/python*}")
     fi
   fi
-  if [[ -f "${new_root}/.venv/pyvenv.cfg" ]]; then
+  if [[ -f "${new_root}/${venv_rel}/pyvenv.cfg" ]]; then
     local line root
     while IFS= read -r line; do
       if [[ "${line}" == *"/.uv-python/"* ]]; then
         root="${line#*= }"
         roots+=("${root%%/.uv-python/*}")
       fi
-    done < "${new_root}/.venv/pyvenv.cfg"
+    done < "${new_root}/${venv_rel}/pyvenv.cfg"
   fi
-  if [[ -L "${new_root}/.venv" || -L "${new_root}/.uv-python" ]]; then
-    echo "[stage] staged .venv/.uv-python must be real local directories, not symlinks." >&2
+  if [[ -L "${new_root}/${venv_rel}" || -L "${new_root}/.uv-python" ]]; then
+    echo "[stage] staged ${venv_rel}/.uv-python must be real local directories, not symlinks." >&2
     return 2
   fi
 
-  "${patch_python}" - "${new_root}" "${roots[@]}" <<'PY'
+  "${patch_python}" - "${new_root}" "${venv_rel}" "${roots[@]}" <<'PY'
 import sys
 from pathlib import Path
 
 new = sys.argv[1].encode()
 root = Path(sys.argv[1])
-old_roots = sorted({arg.encode() for arg in sys.argv[2:] if arg and arg.encode() != new}, key=len, reverse=True)
+venv_rel = sys.argv[2]
+old_roots = sorted({arg.encode() for arg in sys.argv[3:] if arg and arg.encode() != new}, key=len, reverse=True)
 
-for rel in (".venv", ".uv-python"):
+for rel in (venv_rel, ".uv-python"):
     base = root / rel
     if not base.exists():
         continue
@@ -97,10 +151,14 @@ PY
 p2a_stage_local_runtime() {
   local source_root="$1"
   source_root="$(cd "${source_root}" && pwd -P)"
+  local venv_rel
+  venv_rel="$(p2a_runtime_venv_rel "${source_root}")"
 
   if ! p2a_stage_enabled; then
     export P2A_SHARED_SRC_ROOT="${P2A_SHARED_SRC_ROOT:-${source_root}}"
     export P2A_RUNTIME_SRC_ROOT="${P2A_RUNTIME_SRC_ROOT:-${source_root}}"
+    export P2A_VENV_DIR="${venv_rel}"
+    export UV_PROJECT_ENVIRONMENT="${source_root}/${venv_rel}"
     return 0
   fi
 
@@ -108,8 +166,8 @@ p2a_stage_local_runtime() {
     echo "[stage] rsync is required for P2A_STAGE_LOCAL_RUNTIME=1." >&2
     return 2
   fi
-  if [[ ! -x "${source_root}/.venv/bin/python" || ! -x "${source_root}/.venv/bin/ray" ]]; then
-    echo "[stage] missing source runtime under ${source_root}/.venv." >&2
+  if [[ ! -x "${source_root}/${venv_rel}/bin/python" || ! -x "${source_root}/${venv_rel}/bin/ray" ]]; then
+    echo "[stage] missing source runtime under ${source_root}/${venv_rel}." >&2
     return 2
   fi
 
@@ -120,7 +178,8 @@ p2a_stage_local_runtime() {
 
   export P2A_SHARED_SRC_ROOT="${P2A_SHARED_SRC_ROOT:-${source_root}}"
   export P2A_RUNTIME_SRC_ROOT="${local_src_root}"
-  export UV_PROJECT_ENVIRONMENT="${local_src_root}/.venv"
+  export P2A_VENV_DIR="${venv_rel}"
+  export UV_PROJECT_ENVIRONMENT="${local_src_root}/${venv_rel}"
 
   if [[ "${source_root}" == "${local_src_root}" ]]; then
     return 0
@@ -141,6 +200,10 @@ p2a_stage_local_runtime() {
       --exclude='.git/' \
       --exclude='.venv' \
       --exclude='.venv/' \
+      --exclude='.venv-cu128' \
+      --exclude='.venv-cu128/' \
+      --exclude="${venv_rel}" \
+      --exclude="${venv_rel}/" \
       --exclude='.uv-python' \
       --exclude='.uv-python/' \
       --exclude='.p2a-stage/' \
@@ -154,20 +217,24 @@ p2a_stage_local_runtime() {
       --exclude='checkpoints/' \
       "${source_root}/" "${local_src_root}/"
 
-    source_stamp="$(p2a_runtime_stamp "${source_root}")"
+    source_stamp="$(p2a_runtime_stamp "${source_root}" "${venv_rel}")"
     stamp_file="${stage_dir}/runtime.stamp"
-    if [[ "${P2A_FORCE_STAGE_LOCAL_RUNTIME:-0}" == "1" || -L "${local_src_root}/.venv" || -L "${local_src_root}/.uv-python" || ! -f "${stamp_file}" || "$(cat "${stamp_file}")" != "${source_stamp}" ]]; then
+    if [[ "${P2A_FORCE_STAGE_LOCAL_RUNTIME:-0}" == "1" || -L "${local_src_root}/${venv_rel}" || -L "${local_src_root}/.uv-python" || ! -f "${stamp_file}" || "$(cat "${stamp_file}")" != "${source_stamp}" ]]; then
       echo "[stage] syncing local Python runtime"
-      if [[ -L "${local_src_root}/.venv" ]]; then
-        rm -f "${local_src_root}/.venv"
+      if [[ -L "${local_src_root}/${venv_rel}" ]]; then
+        rm -f "${local_src_root:?}/${venv_rel}"
       fi
       if [[ -L "${local_src_root}/.uv-python" ]]; then
         rm -f "${local_src_root}/.uv-python"
       fi
-      mkdir -p "${local_src_root}/.uv-python" "${local_src_root}/.venv"
-      rsync -a --delete "${source_root}/.uv-python/" "${local_src_root}/.uv-python/"
-      rsync -a --delete "${source_root}/.venv/" "${local_src_root}/.venv/"
-      p2a_rewrite_staged_paths "${source_root}" "${local_src_root}"
+      mkdir -p "$(dirname "${local_src_root}/${venv_rel}")"
+      if [[ -d "${source_root}/.uv-python" ]]; then
+        mkdir -p "${local_src_root}/.uv-python"
+        rsync -a --delete "${source_root}/.uv-python/" "${local_src_root}/.uv-python/"
+      fi
+      mkdir -p "${local_src_root}/${venv_rel}"
+      rsync -a --delete "${source_root}/${venv_rel}/" "${local_src_root}/${venv_rel}/"
+      p2a_rewrite_staged_paths "${source_root}" "${local_src_root}" "${venv_rel}"
       printf '%s\n' "${source_stamp}" > "${stamp_file}"
     else
       echo "[stage] local Python runtime is current"

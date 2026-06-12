@@ -14,8 +14,19 @@ export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
 source "${SCRIPT_SRC_ROOT}/scripts/stage_local_runtime.sh"
+P2A_VENV_DIR="$(p2a_runtime_venv_rel "${SCRIPT_SRC_ROOT}")"
+export P2A_VENV_DIR
+export UV_PROJECT_ENVIRONMENT="${SCRIPT_SRC_ROOT}/${P2A_VENV_DIR}"
+export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
+export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
+p2a_source_runtime_profile "${UV_PROJECT_ENVIRONMENT}"
 p2a_stage_local_runtime "${SCRIPT_SRC_ROOT}"
 SRC_ROOT="${P2A_RUNTIME_SRC_ROOT}"
+UV_PROJECT_ENVIRONMENT="${SRC_ROOT}/${P2A_VENV_DIR}"
+export UV_PROJECT_ENVIRONMENT
+export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
+export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
+p2a_source_runtime_profile "${UV_PROJECT_ENVIRONMENT}"
 source "${SRC_ROOT}/scripts/shared_hf.sh"
 
 UNI_AGENT_DIR="${SRC_ROOT}/uni-agent"
@@ -44,17 +55,13 @@ resolve_env_path_if_set P2A_BONUS_MAP_DIR
 resolve_env_path_if_set P2A_EVAL_BONUS_MAP_DIR
 resolve_env_path_if_set P2A_EVAL_DETAILS_DIR
 RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/swe_agent/runtime_env_arl.yaml"}
-DEFAULT_AGENT_CONFIG_PATH="${RAY_DATA_HOME}/data/swe_agent/agent_config_arl.yaml"
+# Agent-loop actors on every node load this path, so it must resolve on all of
+# them; the (staged) source tree is present per-node at the same location,
+# unlike RAY_DATA_HOME which is node-local to the head.
+DEFAULT_AGENT_CONFIG_PATH="${SRC_ROOT}/env/agent_config_arl.yaml"
 AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-"${DEFAULT_AGENT_CONFIG_PATH}"}
-UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT:-"${SRC_ROOT}/.venv"}
-if [[ "${UV_PROJECT_ENVIRONMENT}" != /* ]]; then
-    UV_PROJECT_ENVIRONMENT="${SRC_ROOT}/${UV_PROJECT_ENVIRONMENT}"
-fi
-export UV_PROJECT_ENVIRONMENT
 PYTHON_BIN=${PYTHON_BIN:-"${UV_PROJECT_ENVIRONMENT}/bin/python"}
 RAY_BIN=${RAY_BIN:-"${UV_PROJECT_ENVIRONMENT}/bin/ray"}
-export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
-export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
 echo "[P2A] UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT}"
 if [[ "${P2A_SHARED_SRC_ROOT:-${SRC_ROOT}}" != "${SRC_ROOT}" ]]; then
     echo "[P2A] shared source: ${P2A_SHARED_SRC_ROOT}"
@@ -124,12 +131,14 @@ val_top_k=-1
 
 use_dynamic_bsz=True
 offload=True
-gen_tp=4
-train_tp=4
-train_pp=1
-train_cp=4
-train_ep=8
-train_etp=1
+# Defaults assume the 2-train-node topology (16 GPUs: TP=4 x CP=4); override via
+# env for other node counts, e.g. TRAIN_CP=2 on a single 8-GPU train node.
+gen_tp=${GEN_TP:-4}
+train_tp=${TRAIN_TP:-4}
+train_pp=${TRAIN_PP:-1}
+train_cp=${TRAIN_CP:-4}
+train_ep=${TRAIN_EP:-8}
+train_etp=${TRAIN_ETP:-1}
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) / train_cp))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / train_cp))
 
@@ -143,7 +152,16 @@ NNODES_ROLLOUT=${NNODES_ROLLOUT:-4}
 NNODES_TRAIN=${NNODES_TRAIN:-4}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 infer_ep=${INFER_EP:-1}
-vllm_performance_mode="${VLLM_PERFORMANCE_MODE:-interactivity}"
+# These three require Uni-Agent's patched vLLM; stock vLLM 0.11.0 rejects the
+# --performance-mode / --enable-return-routed-experts server flags, so they
+# default off and are opt-in for runtimes that carry the patched build.
+vllm_performance_mode="${VLLM_PERFORMANCE_MODE:-}"
+router_replay_mode="${ROUTER_REPLAY_MODE:-disabled}"
+enable_routing_replay="${ENABLE_ROUTING_REPLAY:-False}"
+rollout_engine_params=()
+if [[ -n "${vllm_performance_mode}" ]]; then
+    rollout_engine_params+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.performance_mode=${vllm_performance_mode}")
+fi
 update_weights_bucket_megabytes="${P2A_UPDATE_WEIGHTS_BUCKET_MB:-2048}"
 nccl_timeout="${P2A_NCCL_TIMEOUT:-9600}"
 
@@ -152,6 +170,7 @@ n_resp_per_prompt=8
 train_prompt_mini_bsz=16
 total_rollout_steps=200000
 test_freq=10
+val_before_train=${VAL_BEFORE_TRAIN:-True}
 staleness_threshold=1.0
 trigger_parameter_sync_step=4
 require_batches=1
@@ -165,9 +184,9 @@ mkdir -p "$(dirname "${RUNTIME_ENV}")"
 if [[ ! -f "${RUNTIME_ENV}" ]]; then
     cp "${UNI_AGENT_DIR}/examples/swe_agent_235b/runtime_env.yaml" "${RUNTIME_ENV}"
 fi
-mkdir -p "$(dirname "${AGENT_CONFIG_PATH}")"
-if [[ "${AGENT_CONFIG_PATH}" == "${DEFAULT_AGENT_CONFIG_PATH}" || ! -f "${AGENT_CONFIG_PATH}" ]]; then
-    cp "${SRC_ROOT}/env/agent_config_arl.yaml" "${AGENT_CONFIG_PATH}"
+if [[ ! -f "${AGENT_CONFIG_PATH}" ]]; then
+    echo "[P2A] AGENT_CONFIG_PATH does not exist: ${AGENT_CONFIG_PATH}" >&2
+    exit 2
 fi
 
 # Ray runtime_env working_dir packages and uploads the checkout. The GPU nodes
@@ -203,7 +222,12 @@ fi
 
 if [[ "${P2A_SKIP_TRANSFORMER_ENGINE_PREFLIGHT:-0}" != "1" ]]; then
     "${PYTHON_BIN}" - <<'PY'
+import importlib.metadata
+import os
+import sys
+
 try:
+    import torch
     import transformer_engine.pytorch  # noqa: F401
 except Exception as exc:  # noqa: BLE001 - report binary/linker failures directly
     raise SystemExit(
@@ -211,10 +235,20 @@ except Exception as exc:  # noqa: BLE001 - report binary/linker failures directl
         f"but transformer_engine.pytorch is not importable: {type(exc).__name__}: {exc}. "
         "Use a TransformerEngine build matched to the active torch/CUDA/Megatron stack; "
         "Uni-Agent's reference image builds TE v2.2.1 with torch 2.8, CUDA 12.8, "
-        "and Megatron-LM core_v0.13.0."
+        "and Megatron-LM core_v0.13.0. "
+        "Run `P2A_CU128_CUDA_HOME=/path/to/cuda-12.8 bash scripts/setup_uni_agent_cu128_runtime.sh`, "
+        "then launch with `P2A_VENV_DIR=.venv-cu128`."
     )
 else:
-    print("[P2A] TransformerEngine import check passed")
+    try:
+        te_version = importlib.metadata.version("transformer-engine")
+    except importlib.metadata.PackageNotFoundError:
+        te_version = "unknown"
+    print(
+        "[P2A] TransformerEngine import check passed "
+        f"(python={sys.executable}, torch={torch.__version__}, torch_cuda={torch.version.cuda}, "
+        f"CUDA_HOME={os.environ.get('CUDA_HOME')}, transformer_engine={te_version})"
+    )
 PY
 fi
 
@@ -299,8 +333,8 @@ PY
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
-    actor_rollout_ref.actor.router_replay.mode="R3" \
-    actor_rollout_ref.rollout.enable_rollout_routing_replay=True \
+    actor_rollout_ref.actor.router_replay.mode="${router_replay_mode}" \
+    actor_rollout_ref.rollout.enable_rollout_routing_replay=${enable_routing_replay} \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
@@ -317,7 +351,7 @@ PY
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.expert_parallel_size=${infer_ep} \
     actor_rollout_ref.rollout.max_model_len=$((max_prompt_length + max_response_length)) \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.performance_mode=${vllm_performance_mode} \
+    ${rollout_engine_params[@]+"${rollout_engine_params[@]}"} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
     actor_rollout_ref.rollout.temperature=${temperature} \
@@ -354,7 +388,7 @@ PY
     trainer.logger=['console','wandb'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
-    trainer.val_before_train=True \
+    trainer.val_before_train=${val_before_train} \
     trainer.save_freq=-1 \
     trainer.total_epochs=20 \
     trainer.resume_mode=auto \

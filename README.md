@@ -72,6 +72,39 @@ uv python install --managed-python 3.11
 UV_PROJECT_ENVIRONMENT=$PWD/.venv uv sync --locked --extra train --extra gpu
 ```
 
+The `uv` path above is the generic locked environment. The fused Megatron /
+mbridge launcher used by `scripts/main.sh` should use the Uni-Agent cu128 stack
+instead:
+
+```bash
+cd TraceAnalyzer
+git submodule update --init --recursive
+export P2A_CU128_CUDA_HOME=/usr/local/cuda-12.8  # must be a CUDA 12.8 toolkit
+bash scripts/setup_uni_agent_cu128_runtime.sh
+source .venv-cu128/p2a-cu128.env
+python scripts/check_uni_agent_runtime.py
+```
+
+`scripts/setup_uni_agent_cu128_runtime.sh` builds `.venv-cu128` with the
+Uni-Agent reference versions:
+
+| Component | Version / source |
+|---|---|
+| CUDA toolkit used for builds | `P2A_CU128_CUDA_HOME` (`nvcc` release 12.8) |
+| PyTorch | `torch==2.8.0` from `https://download.pytorch.org/whl/cu128` |
+| torchvision / torchaudio | `0.23.0` / `2.8.0` from the same cu128 index |
+| flash-attn | `flash_attn==2.7.4.post1` |
+| TransformerEngine | `NVIDIA/TransformerEngine.git@v2.2.1` with `NVTE_FRAMEWORK=pytorch` |
+| Megatron-LM | `NVIDIA/Megatron-LM.git@core_v0.13.0`, editable/no-deps |
+| mbridge | `git+https://github.com/ISEEKYAN/mbridge.git` |
+| vLLM | built from `vllm-project/vllm.git@v0.11.0` (PyPI wheels need glibc ≥ 2.29; TLinux has 2.28), dependency closure preinstalled; `P2A_CU128_VLLM_SPEC=vllm==0.11.0` uses the wheel on newer hosts |
+
+When `.venv-cu128` exists, the launchers prefer it automatically and skip `uv
+sync` by default so the cu130 lock cannot overwrite the cu128 stack. To force a
+specific runtime, set `P2A_VENV_DIR=.venv-cu128` or `P2A_VENV_DIR=.venv`.
+`scripts/ray_setup.sh` stages the selected venv to each node-local runtime path,
+so head and workers run the same Python stack.
+
 ### Step 1. Set common paths
 
 Set these once per shell:

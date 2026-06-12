@@ -6,13 +6,8 @@ SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
 SRC_ROOT="${SCRIPT_SRC_ROOT}"
 source "${SRC_ROOT}/scripts/shared_hf.sh"
+source "${SRC_ROOT}/scripts/stage_local_runtime.sh"
 cd "${SRC_ROOT}"
-
-UV_BIN="${UV_BIN:-$(command -v uv || true)}"
-if [[ -z "${UV_BIN}" ]]; then
-  echo "[baseline] uv not found on PATH" >&2
-  exit 2
-fi
 
 unset PYTHONPATH PYTHONHOME
 unset RAY_ADDRESS
@@ -20,10 +15,20 @@ unset P2A_BONUS_MAP_DIR P2A_M_MAX P2A_TRACKING_MODE
 unset P2A_EVAL_BONUS_MAP_DIR P2A_EVAL_DETAILS_DIR P2A_EVAL_NEAR_THRESHOLD
 unset UNI_AGENT_P2A_TRACE
 
+P2A_VENV_DIR="$(p2a_runtime_venv_rel "${SCRIPT_SRC_ROOT}")"
+export P2A_VENV_DIR
 export UV_PYTHON_INSTALL_DIR="${SCRIPT_SRC_ROOT}/.uv-python"
-export UV_PROJECT_ENVIRONMENT="${SCRIPT_SRC_ROOT}/.venv"
+export UV_PROJECT_ENVIRONMENT="${SCRIPT_SRC_ROOT}/${P2A_VENV_DIR}"
 export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
 export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
+p2a_source_runtime_profile "${UV_PROJECT_ENVIRONMENT}"
+if [[ -z "${P2A_SYNC_DEPS+x}" ]]; then
+  if [[ "${P2A_VENV_DIR}" == ".venv-cu128" ]]; then
+    P2A_SYNC_DEPS=0
+  else
+    P2A_SYNC_DEPS=1
+  fi
+fi
 
 export RAY_DATA_HOME="${RAY_DATA_HOME:-${HOME}/verl}"
 export RAY_WORKER_HOSTS="${RAY_WORKER_HOSTS:-28.45.33.48 28.45.33.95 28.45.33.97}"
@@ -64,6 +69,16 @@ fi
 export DATA MODEL
 
 if [[ "${P2A_SYNC_DEPS:-1}" == "1" ]]; then
+  if [[ "${P2A_VENV_DIR}" == ".venv-cu128" ]]; then
+    echo "[baseline] ${P2A_VENV_DIR} is pip-managed by scripts/setup_uni_agent_cu128_runtime.sh; do not run uv sync into it." >&2
+    echo "[baseline] Set P2A_SYNC_DEPS=0 or use P2A_VENV_DIR=.venv for the uv-managed cu130 environment." >&2
+    exit 2
+  fi
+  UV_BIN="${UV_BIN:-$(command -v uv || true)}"
+  if [[ -z "${UV_BIN}" ]]; then
+    echo "[baseline] uv not found on PATH" >&2
+    exit 2
+  fi
   if [[ "${P2A_REBUILD_VENV:-0}" == "1" || ! -x "${UV_PROJECT_ENVIRONMENT}/bin/python" ]]; then
     "${UV_BIN}" python install --managed-python 3.11
     "$("${UV_BIN}" python find --managed-python --no-project 3.11)" -m venv --clear --copies "${UV_PROJECT_ENVIRONMENT}"
@@ -71,14 +86,14 @@ if [[ "${P2A_SYNC_DEPS:-1}" == "1" ]]; then
   UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT}" "${UV_BIN}" sync --locked --extra train --extra gpu
 fi
 
-source "${SCRIPT_SRC_ROOT}/scripts/stage_local_runtime.sh"
 p2a_stage_local_runtime "${SCRIPT_SRC_ROOT}"
 SRC_ROOT="${P2A_RUNTIME_SRC_ROOT}"
 cd "${SRC_ROOT}"
 export UV_PYTHON_INSTALL_DIR="${SRC_ROOT}/.uv-python"
-export UV_PROJECT_ENVIRONMENT="${SRC_ROOT}/.venv"
+export UV_PROJECT_ENVIRONMENT="${SRC_ROOT}/${P2A_VENV_DIR}"
 export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
 export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
+p2a_source_runtime_profile "${UV_PROJECT_ENVIRONMENT}"
 
 PYTHON_BIN="${UV_PROJECT_ENVIRONMENT}/bin/python"
 RAY_BIN="${UV_PROJECT_ENVIRONMENT}/bin/ray"
