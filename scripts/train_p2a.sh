@@ -128,12 +128,14 @@ val_top_k=-1
 
 use_dynamic_bsz=True
 offload=True
-gen_tp=4
-train_tp=4
-train_pp=1
-train_cp=4
-train_ep=8
-train_etp=1
+# Defaults assume the 2-train-node topology (16 GPUs: TP=4 x CP=4); override via
+# env for other node counts, e.g. TRAIN_CP=2 on a single 8-GPU train node.
+gen_tp=${GEN_TP:-4}
+train_tp=${TRAIN_TP:-4}
+train_pp=${TRAIN_PP:-1}
+train_cp=${TRAIN_CP:-4}
+train_ep=${TRAIN_EP:-8}
+train_etp=${TRAIN_ETP:-1}
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) / train_cp))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / train_cp))
 
@@ -156,6 +158,7 @@ n_resp_per_prompt=8
 train_prompt_mini_bsz=16
 total_rollout_steps=200000
 test_freq=10
+val_before_train=${VAL_BEFORE_TRAIN:-True}
 staleness_threshold=1.0
 trigger_parameter_sync_step=4
 require_batches=1
@@ -373,7 +376,7 @@ PY
     trainer.logger=['console','wandb'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
-    trainer.val_before_train=True \
+    trainer.val_before_train=${val_before_train} \
     trainer.save_freq=-1 \
     trainer.total_epochs=20 \
     trainer.resume_mode=auto \
