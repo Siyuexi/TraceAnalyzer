@@ -35,7 +35,9 @@ p2a_runtime_venv_rel() {
       return 2
       ;;
   esac
-  if [[ -n "${UV_PROJECT_ENVIRONMENT:-}" && "${UV_PROJECT_ENVIRONMENT}" == /* && "${UV_PROJECT_ENVIRONMENT}" != "${source_root}/${rel}" ]]; then
+  # With P2A_VENV_DIR set, an inherited UV_PROJECT_ENVIRONMENT may legitimately
+  # point at a parent launcher's staged runtime; the explicit name wins.
+  if [[ -z "${P2A_VENV_DIR:-}" && -n "${UV_PROJECT_ENVIRONMENT:-}" && "${UV_PROJECT_ENVIRONMENT}" == /* && "${UV_PROJECT_ENVIRONMENT}" != "${source_root}/${rel}" ]]; then
     echo "[stage] UV_PROJECT_ENVIRONMENT must point inside ${source_root}: ${UV_PROJECT_ENVIRONMENT}" >&2
     return 2
   fi
