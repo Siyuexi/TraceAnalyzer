@@ -149,7 +149,16 @@ NNODES_ROLLOUT=${NNODES_ROLLOUT:-4}
 NNODES_TRAIN=${NNODES_TRAIN:-4}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 infer_ep=${INFER_EP:-1}
-vllm_performance_mode="${VLLM_PERFORMANCE_MODE:-interactivity}"
+# These three require Uni-Agent's patched vLLM; stock vLLM 0.11.0 rejects the
+# --performance-mode / --enable-return-routed-experts server flags, so they
+# default off and are opt-in for runtimes that carry the patched build.
+vllm_performance_mode="${VLLM_PERFORMANCE_MODE:-}"
+router_replay_mode="${ROUTER_REPLAY_MODE:-disabled}"
+enable_routing_replay="${ENABLE_ROUTING_REPLAY:-False}"
+rollout_engine_params=()
+if [[ -n "${vllm_performance_mode}" ]]; then
+    rollout_engine_params+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.performance_mode=${vllm_performance_mode}")
+fi
 update_weights_bucket_megabytes="${P2A_UPDATE_WEIGHTS_BUCKET_MB:-2048}"
 nccl_timeout="${P2A_NCCL_TIMEOUT:-9600}"
 
@@ -321,8 +330,8 @@ PY
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
-    actor_rollout_ref.actor.router_replay.mode="R3" \
-    actor_rollout_ref.rollout.enable_rollout_routing_replay=True \
+    actor_rollout_ref.actor.router_replay.mode="${router_replay_mode}" \
+    actor_rollout_ref.rollout.enable_rollout_routing_replay=${enable_routing_replay} \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
@@ -339,7 +348,7 @@ PY
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.expert_parallel_size=${infer_ep} \
     actor_rollout_ref.rollout.max_model_len=$((max_prompt_length + max_response_length)) \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.performance_mode=${vllm_performance_mode} \
+    ${rollout_engine_params[@]+"${rollout_engine_params[@]}"} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
     actor_rollout_ref.rollout.temperature=${temperature} \
