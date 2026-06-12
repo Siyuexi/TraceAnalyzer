@@ -15,8 +15,8 @@ Key overrides:
   P2A_CU128_CUDA_HOME=/usr/local/cuda-12.8
   P2A_CU128_PYTHON=/path/to/python3.11
   P2A_CU128_REBUILD=1
-  P2A_CU128_VLLM_REF=v0.11.0
-  P2A_CU128_VLLM_SPEC=/path/to/local/vllm  # optional override, installed --no-deps
+  P2A_CU128_VLLM_SPEC=vllm==0.11.0  # pip spec installed --no-deps; "source" builds from git
+  P2A_CU128_VLLM_REF=v0.11.0        # git ref when P2A_CU128_VLLM_SPEC=source
   P2A_CU128_INSTALL_APEX=1
 EOF
 }
@@ -154,7 +154,10 @@ install_vllm() {
   local python_bin="$1"
   local repo="${BUILD_ROOT}/vllm"
   local ref="${P2A_CU128_VLLM_REF:-v0.11.0}"
+  local spec="${P2A_CU128_VLLM_SPEC:-vllm==0.11.0}"
 
+  # vllm itself is installed --no-deps to keep the torch cu128 pins authoritative,
+  # so its runtime dependency closure (vllm 0.11.0 requires_dist) is installed here.
   "${python_bin}" -m pip install --no-cache-dir \
     "cbor2" \
     "setproctitle" \
@@ -164,10 +167,36 @@ install_vllm() {
     "msgspec" \
     "partial_json_parser" \
     "py-cpuinfo" \
-    "diskcache"
+    "diskcache==5.6.3" \
+    "cachetools" \
+    "sentencepiece" \
+    "openai>=1.99.1" \
+    "pillow" \
+    "prometheus_client>=0.18.0" \
+    "prometheus-fastapi-instrumentator>=7.0.0" \
+    "tiktoken>=0.6.0" \
+    "lm-format-enforcer==0.11.3" \
+    "llguidance>=0.7.11,<0.8.0" \
+    "outlines_core==0.2.11" \
+    "lark==1.2.2" \
+    "gguf>=0.13.0" \
+    "mistral_common[audio,image]>=1.8.2" \
+    "opencv-python-headless>=4.11.0" \
+    "einops" \
+    "compressed-tensors==0.11.0" \
+    "depyf==0.19.0" \
+    "cloudpickle" \
+    "watchfiles" \
+    "python-json-logger" \
+    "scipy" \
+    "numba==0.61.2" \
+    "pyzmq>=25.0.0" \
+    "regex" \
+    "psutil"
+  "${python_bin}" -m pip install --no-deps --no-cache-dir "xformers==0.0.32.post1"
 
-  if [[ -n "${P2A_CU128_VLLM_SPEC:-}" ]]; then
-    "${python_bin}" -m pip install --no-deps --no-build-isolation --no-cache-dir "${P2A_CU128_VLLM_SPEC}"
+  if [[ "${spec}" != "source" ]]; then
+    "${python_bin}" -m pip install --no-deps --no-build-isolation --no-cache-dir "${spec}"
     return
   fi
 
