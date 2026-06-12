@@ -55,7 +55,10 @@ resolve_env_path_if_set P2A_BONUS_MAP_DIR
 resolve_env_path_if_set P2A_EVAL_BONUS_MAP_DIR
 resolve_env_path_if_set P2A_EVAL_DETAILS_DIR
 RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/swe_agent/runtime_env_arl.yaml"}
-DEFAULT_AGENT_CONFIG_PATH="${RAY_DATA_HOME}/data/swe_agent/agent_config_arl.yaml"
+# Agent-loop actors on every node load this path, so it must resolve on all of
+# them; the (staged) source tree is present per-node at the same location,
+# unlike RAY_DATA_HOME which is node-local to the head.
+DEFAULT_AGENT_CONFIG_PATH="${SRC_ROOT}/env/agent_config_arl.yaml"
 AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-"${DEFAULT_AGENT_CONFIG_PATH}"}
 PYTHON_BIN=${PYTHON_BIN:-"${UV_PROJECT_ENVIRONMENT}/bin/python"}
 RAY_BIN=${RAY_BIN:-"${UV_PROJECT_ENVIRONMENT}/bin/ray"}
@@ -181,9 +184,9 @@ mkdir -p "$(dirname "${RUNTIME_ENV}")"
 if [[ ! -f "${RUNTIME_ENV}" ]]; then
     cp "${UNI_AGENT_DIR}/examples/swe_agent_235b/runtime_env.yaml" "${RUNTIME_ENV}"
 fi
-mkdir -p "$(dirname "${AGENT_CONFIG_PATH}")"
-if [[ "${AGENT_CONFIG_PATH}" == "${DEFAULT_AGENT_CONFIG_PATH}" || ! -f "${AGENT_CONFIG_PATH}" ]]; then
-    cp "${SRC_ROOT}/env/agent_config_arl.yaml" "${AGENT_CONFIG_PATH}"
+if [[ ! -f "${AGENT_CONFIG_PATH}" ]]; then
+    echo "[P2A] AGENT_CONFIG_PATH does not exist: ${AGENT_CONFIG_PATH}" >&2
+    exit 2
 fi
 
 # Ray runtime_env working_dir packages and uploads the checkout. The GPU nodes
