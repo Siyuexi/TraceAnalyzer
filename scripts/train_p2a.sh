@@ -14,8 +14,19 @@ export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
 source "${SCRIPT_SRC_ROOT}/scripts/stage_local_runtime.sh"
+P2A_VENV_DIR="$(p2a_runtime_venv_rel "${SCRIPT_SRC_ROOT}")"
+export P2A_VENV_DIR
+export UV_PROJECT_ENVIRONMENT="${SCRIPT_SRC_ROOT}/${P2A_VENV_DIR}"
+export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
+export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
+p2a_source_runtime_profile "${UV_PROJECT_ENVIRONMENT}"
 p2a_stage_local_runtime "${SCRIPT_SRC_ROOT}"
 SRC_ROOT="${P2A_RUNTIME_SRC_ROOT}"
+UV_PROJECT_ENVIRONMENT="${SRC_ROOT}/${P2A_VENV_DIR}"
+export UV_PROJECT_ENVIRONMENT
+export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
+export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
+p2a_source_runtime_profile "${UV_PROJECT_ENVIRONMENT}"
 source "${SRC_ROOT}/scripts/shared_hf.sh"
 
 UNI_AGENT_DIR="${SRC_ROOT}/uni-agent"
@@ -46,15 +57,8 @@ resolve_env_path_if_set P2A_EVAL_DETAILS_DIR
 RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/swe_agent/runtime_env_arl.yaml"}
 DEFAULT_AGENT_CONFIG_PATH="${RAY_DATA_HOME}/data/swe_agent/agent_config_arl.yaml"
 AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-"${DEFAULT_AGENT_CONFIG_PATH}"}
-UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT:-"${SRC_ROOT}/.venv"}
-if [[ "${UV_PROJECT_ENVIRONMENT}" != /* ]]; then
-    UV_PROJECT_ENVIRONMENT="${SRC_ROOT}/${UV_PROJECT_ENVIRONMENT}"
-fi
-export UV_PROJECT_ENVIRONMENT
 PYTHON_BIN=${PYTHON_BIN:-"${UV_PROJECT_ENVIRONMENT}/bin/python"}
 RAY_BIN=${RAY_BIN:-"${UV_PROJECT_ENVIRONMENT}/bin/ray"}
-export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
-export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
 echo "[P2A] UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT}"
 if [[ "${P2A_SHARED_SRC_ROOT:-${SRC_ROOT}}" != "${SRC_ROOT}" ]]; then
     echo "[P2A] shared source: ${P2A_SHARED_SRC_ROOT}"
@@ -203,7 +207,12 @@ fi
 
 if [[ "${P2A_SKIP_TRANSFORMER_ENGINE_PREFLIGHT:-0}" != "1" ]]; then
     "${PYTHON_BIN}" - <<'PY'
+import importlib.metadata
+import os
+import sys
+
 try:
+    import torch
     import transformer_engine.pytorch  # noqa: F401
 except Exception as exc:  # noqa: BLE001 - report binary/linker failures directly
     raise SystemExit(
@@ -211,10 +220,20 @@ except Exception as exc:  # noqa: BLE001 - report binary/linker failures directl
         f"but transformer_engine.pytorch is not importable: {type(exc).__name__}: {exc}. "
         "Use a TransformerEngine build matched to the active torch/CUDA/Megatron stack; "
         "Uni-Agent's reference image builds TE v2.2.1 with torch 2.8, CUDA 12.8, "
-        "and Megatron-LM core_v0.13.0."
+        "and Megatron-LM core_v0.13.0. "
+        "Run `P2A_CU128_CUDA_HOME=/path/to/cuda-12.8 bash scripts/setup_uni_agent_cu128_runtime.sh`, "
+        "then launch with `P2A_VENV_DIR=.venv-cu128`."
     )
 else:
-    print("[P2A] TransformerEngine import check passed")
+    try:
+        te_version = importlib.metadata.version("transformer-engine")
+    except importlib.metadata.PackageNotFoundError:
+        te_version = "unknown"
+    print(
+        "[P2A] TransformerEngine import check passed "
+        f"(python={sys.executable}, torch={torch.__version__}, torch_cuda={torch.version.cuda}, "
+        f"CUDA_HOME={os.environ.get('CUDA_HOME')}, transformer_engine={te_version})"
+    )
 PY
 fi
 

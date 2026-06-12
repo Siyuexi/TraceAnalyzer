@@ -2,5 +2,8 @@
 __pycache__/
 *.pyc
 .venv/
+.venv-cu128/
+.uv-python/
+.p2a-build/
 *.egg-info/
 outputs/
