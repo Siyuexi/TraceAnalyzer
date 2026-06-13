@@ -255,7 +255,7 @@ def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment
         deployment_config = {
             "type": "arl",
             "image": image,
-            "gateway_url": os.getenv("ARL_GATEWAY_URL", "http://118.145.210.10:8080"),
+            "gateway_url": os.getenv("ARL_GATEWAY_URL", "http://118.145.201.106:80"),
             "namespace": os.getenv("ARL_NAMESPACE", "default"),
             "experiment_id": os.getenv("ARL_EXPERIMENT_ID", "p2a-uniagent-arl-precompute"),
             "timeout": float(os.getenv("ARL_TIMEOUT", "600")),

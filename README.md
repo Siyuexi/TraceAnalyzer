@@ -115,7 +115,7 @@ export PATH="$UV_PROJECT_ENVIRONMENT/bin:$PATH"
 export RAY_DATA_HOME="${RAY_DATA_HOME:-$HOME/verl}"
 export DATA="${DATA:-../../datasets/p2a}"
 export MODEL="${MODEL:-../../models/Qwen3-Coder-30B-A3B-Instruct}"
-# Usual ARL Gateway: http://118.145.210.10:8080
+# Usual ARL Gateway: http://118.145.201.106:80
 export ARL_GATEWAY_URL="${ARL_GATEWAY_URL:?set ARL_GATEWAY_URL}"
 # If submitting from the Ray head node, the local dashboard endpoint is enough.
 export RAY_API_SERVER_ADDRESS="${RAY_API_SERVER_ADDRESS:-http://127.0.0.1:8265}"

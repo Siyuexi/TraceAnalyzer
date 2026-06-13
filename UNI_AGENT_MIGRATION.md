@@ -51,7 +51,7 @@ Do not commit credentials or cluster-local endpoints. Provide them through the s
 environment or by editing the generated runtime env file under `$RAY_DATA_HOME`.
 
 ```bash
-export ARL_GATEWAY_URL="http://118.145.210.10:8080"  # override if your ARL gateway differs
+export ARL_GATEWAY_URL="http://118.145.201.106:80"  # override if your ARL gateway differs
 export ARL_NAMESPACE="default"
 export ARL_EXPERIMENT_ID="p2a-uniagent-arl"
 export UNI_AGENT_P2A_TRACE="1"  # optional process tracing; omit for pure baseline

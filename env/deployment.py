@@ -17,7 +17,7 @@ from swerex.runtime.abstract import AbstractRuntime, CreateBashSessionRequest, I
 
 from uni_agent.async_logging import get_logger
 
-DEFAULT_GATEWAY_URL = "http://118.145.210.10:8080"
+DEFAULT_GATEWAY_URL = "http://118.145.201.106:80"
 
 
 @dataclass
