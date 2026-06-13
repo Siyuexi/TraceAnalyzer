@@ -15,7 +15,7 @@ is on `main`.
 ## ARL is a sandbox, not a VRC remote
 
 ARL is the containerized compute backend. The `arl-env` SDK connects directly to the
-ARL Gateway (`ARL_GATEWAY_URL`, e.g. `http://118.145.210.10:8080`) to boot a per-instance
+ARL Gateway (`ARL_GATEWAY_URL`, e.g. `http://118.145.201.106:80`) to boot a per-instance
 sandbox where tests + P2A instrumentation run (bonus-map precompute, training rollouts),
 and it is reachable directly from CPU hosts. This has nothing to do with VRC's `remote`
 facility: `vrc remote` is the debug proxy that targets the **GPU server** when the local

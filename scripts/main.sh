@@ -53,7 +53,7 @@ if [[ -n "${MODEL:-}" ]]; then
 else
   export MODEL="$(default_model_path)"
 fi
-export ARL_GATEWAY_URL="${ARL_GATEWAY_URL:-http://118.145.210.10:8080}"
+export ARL_GATEWAY_URL="${ARL_GATEWAY_URL:-http://118.145.201.106:80}"
 export RAY_API_SERVER_ADDRESS="${RAY_API_SERVER_ADDRESS:-http://127.0.0.1:8265}"
 export NNODES_TRAIN="${NNODES_TRAIN:-2}"
 export NNODES_ROLLOUT="${NNODES_ROLLOUT:-2}"
