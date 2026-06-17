@@ -11,7 +11,7 @@ cd "${SRC_ROOT}"
 
 unset PYTHONPATH PYTHONHOME
 unset RAY_ADDRESS
-unset P2A_BONUS_MAP_DIR P2A_M_MAX P2A_TRACKING_MODE
+unset P2A_BONUS_MAP_DIR P2A_M_MAX P2A_TRACKING_MODE P2A_CREDIT_GRANULARITY
 unset P2A_EVAL_BONUS_MAP_DIR P2A_EVAL_DETAILS_DIR P2A_EVAL_NEAR_THRESHOLD
 unset UNI_AGENT_P2A_TRACE
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.0}"
@@ -158,4 +158,4 @@ bash scripts/train_p2a.sh
 #   P2A_EVAL_BONUS_MAP_DIR="${DATA}/eval_bonus_maps" bash scripts/precompute_eval_bonus_maps.sh
 #
 # Later, for P2A training, add:
-# P2A_BONUS_MAP_DIR=../../p2a/bonus_maps P2A_M_MAX=3.0
+# P2A_BONUS_MAP_DIR=../../p2a/bonus_maps P2A_M_MAX=3.0 P2A_CREDIT_GRANULARITY=step

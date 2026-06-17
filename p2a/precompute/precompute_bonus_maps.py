@@ -950,6 +950,10 @@ def _all_pass_reason_code(
 # ---------------------------------------------------------------------------
 
 
+def _clean_callables(callables: list[dict]) -> list[dict]:
+    return [{k: v for k, v in item.items() if k != "source"} for item in callables]
+
+
 def compute_static_bonus_map(task: dict) -> dict:
     """Compute a static bonus map (patched callables only, all d=0)."""
     task = normalize_task(task)
@@ -972,6 +976,7 @@ def compute_static_bonus_map(task: dict) -> dict:
                 "patched_callables": [],
                 "newly_created_callables": newly_created,
                 "call_graph_nodes": {},
+                "call_graph_edges": [],
                 "hop_max": 0,
             },
             reason_code=case_type,
@@ -989,6 +994,8 @@ def compute_static_bonus_map(task: dict) -> dict:
             "normalized_distance": 0.0,
             "observed_in_trace": False,
         }
+        if isinstance(mc.get("source"), str) and mc["source"]:
+            call_graph_nodes[node_key]["source"] = mc["source"]
 
     return _with_metadata(
         {
@@ -996,9 +1003,10 @@ def compute_static_bonus_map(task: dict) -> dict:
             "case_type": "static",
             "traceable": False,
             "error": False,
-            "patched_callables": all_modified,
+            "patched_callables": _clean_callables(all_modified),
             "newly_created_callables": newly_created,
             "call_graph_nodes": call_graph_nodes,
+            "call_graph_edges": [],
             "hop_max": 0,
         },
         reason_code="static_mode",
@@ -1534,9 +1542,10 @@ def _make_result(
             "case_type": case_type,
             "traceable": False,
             "error": error,
-            "patched_callables": patched_callables,
+            "patched_callables": _clean_callables(patched_callables),
             "newly_created_callables": newly_created_callables,
             "call_graph_nodes": {},
+            "call_graph_edges": [],
             "hop_max": 0,
         },
         reason_code=reason_code or case_type,

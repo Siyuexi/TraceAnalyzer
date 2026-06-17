@@ -9,7 +9,9 @@ ranges, the dedup, and the cross-path consistency.
 from p2a.core import (
     _parse_bash_read_commands,
     _parse_bash_read_commands_from_str,
+    normalize_action,
     parse_read_actions_from_tool_calls,
+    segment_purpose_blocks,
 )
 
 
@@ -46,3 +48,19 @@ def test_structured_execute_bash_tool_call():
     reads = parse_read_actions_from_tool_calls(tool_calls)
     assert {"file_path": "foo.py", "start_line": 1, "end_line": 999999} in reads
     assert {"file_path": "bar.py", "start_line": 5, "end_line": 9} in reads
+
+
+def test_segments_purpose_blocks_by_family_and_target():
+    traces = [
+        {"step_idx": 1, "tool_calls": [{"function": {"name": "str_replace_editor", "arguments": {"command": "view", "path": "/testbed/a.py"}}}]},
+        {"step_idx": 2, "tool_calls": [{"function": {"name": "str_replace_editor", "arguments": {"command": "view", "path": "/testbed/a.py"}}}]},
+        {"step_idx": 3, "tool_calls": [{"function": {"name": "str_replace_editor", "arguments": {"command": "view", "path": "/testbed/b.py"}}}]},
+        {"step_idx": 4, "tool_calls": [{"function": {"name": "str_replace_editor", "arguments": {"command": "str_replace", "path": "/testbed/b.py"}}}]},
+    ]
+
+    assert normalize_action(traces[0]) == {"family": "read", "target_path": "a.py"}
+    assert segment_purpose_blocks(traces) == [
+        {"family": "read", "target_path": "a.py", "step_indices": [1, 2], "trace_indices": [0, 1]},
+        {"family": "read", "target_path": "b.py", "step_indices": [3], "trace_indices": [2]},
+        {"family": "edit", "target_path": "b.py", "step_indices": [4], "trace_indices": [3]},
+    ]

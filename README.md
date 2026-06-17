@@ -152,6 +152,11 @@ PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl \
 Training maps default to `../../p2a/bonus_maps`; set `P2A_BONUS_MAP_DIR` to use a
 different read/write directory.
 
+Each generated map includes `call_graph_nodes`, `call_graph_edges`, and a
+per-node `source` snippet when the sandbox file can be read. The edge list is
+diagnostic schema for topology views; training still reshapes from node
+distances.
+
 Skip this step for a pure baseline run. P2A training reads these maps through
 `P2A_BONUS_MAP_DIR`.
 
@@ -291,12 +296,17 @@ TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet \
   P2A_EVAL_DETAILS_DIR=$DATA/eval_details \
   P2A_BONUS_MAP_DIR=../../p2a/bonus_maps \
   P2A_M_MAX=3.0 \
+  P2A_CREDIT_GRANULARITY=step \
   bash scripts/train_p2a.sh
 ```
 
+`P2A_CREDIT_GRANULARITY=step` is the default and preserves per-step reshape
+behavior. Set `P2A_CREDIT_GRANULARITY=block` to group adjacent same-purpose
+steps and apply credit to read blocks that touch the call graph.
+
 ### Step 8. Optional offline analysis
 
-For an already-dumped rollout file:
+For an already-dumped rollout file or dump directory:
 
 ```bash
 uv run python -m p2a.eval_fault_localization $ROLLOUT_JSONL \
@@ -304,6 +314,18 @@ uv run python -m p2a.eval_fault_localization $ROLLOUT_JSONL \
   --summary-out $DATA/eval_faultloc_summary.json \
   --details-out $DATA/eval_faultloc_details.jsonl
 ```
+
+To build the static trace dashboard with summary cards, per-record drill-down,
+purpose-block/order/miracle diagnostics, and an expandable graph topology panel:
+
+```bash
+uv run python scripts/p2a_dashboard.py $ROLLOUT_JSONL \
+  --bonus-map-dir $DATA/eval_bonus_maps \
+  --out-dir $DATA/p2a_dashboard
+```
+
+Add `--watch --interval 30` when `$ROLLOUT_JSONL` is a live run directory and
+you want the same artifacts rebuilt while training writes new dumps.
 
 The offline `summary-out` and `details-out` files are post-hoc artifacts for
 inspecting dumped rollouts. Training and validation do not read them; live
@@ -320,7 +342,7 @@ These are knobs you set; the repo does not pin them:
 | Train / val data | `TRAIN_FILE` / `TEST_FILE` env vars (point at the parquets built above) |
 | Ray job target | `RAY_API_SERVER_ADDRESS` (Ray Jobs endpoint, usually `http://<ray-head-ip>:8265`) |
 | GPU / CPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (32-GPU 4×8 starter: `2 / 2 / 8`); `NUM_CPUS` is the Ray CPU resource advertised per node, default 64 |
-| Bonus maps (read + write) | `P2A_BONUS_MAP_DIR` — one dir for both precompute output and training input; default `../../p2a/bonus_maps`. Training treats it as the P2A on/off switch (unset = baseline). `P2A_M_MAX` sets strength. |
+| Bonus maps (read + write) | `P2A_BONUS_MAP_DIR` — one dir for both precompute output and training input; default `../../p2a/bonus_maps`. Training treats it as the P2A on/off switch (unset = baseline). `P2A_M_MAX` sets strength. `P2A_CREDIT_GRANULARITY=step|block` selects per-step or purpose-block credit. |
 | Eval fault-localization diagnostics | `P2A_EVAL_BONUS_MAP_DIR`, `P2A_EVAL_NEAR_THRESHOLD`, `P2A_EVAL_DETAILS_DIR`, `P2A_EVAL_BONUS_N_PARALLEL`, `P2A_EVAL_BONUS_LIMIT`, `P2A_EVAL_BONUS_OFFSET` |
 | ARL gateway | `ARL_GATEWAY_URL` |
 | Hard-subset criterion | `--difficulties` flag of `build_data.py swebench-hard` (default = the `1-4 hours` / `>4 hours` difficulty set) |
@@ -348,6 +370,14 @@ reference for validation rollouts.
 | `graph_hit_rate_over_call_graphs` | Fraction whose reads hit any node in the eval call graph. |
 | `ground_truth_hit_rate_over_call_graphs` | Fraction whose reads hit a patched callable (`distance == 0`). |
 | `near_hit_rate_over_call_graphs` | Fraction whose best read distance is `<= --near-threshold` (default `0.5`). |
+| `avg_node_recall` / `avg_read_precision` / `avg_hit_f1` | Node-level hit recall, read precision, and F1 across scored rollouts. |
+| `avg_order_score` / `reverse_order_rate` | Kendall-style agreement between read order and movement from tests toward patched callables. |
+| `miracle_rate_over_gt_hits` | Fraction of ground-truth hits that jump directly to patched code before reading intermediate graph levels. |
+| `avg_block_order_score` / `block_miracle_rate_over_gt_hits` | Same order and miracle diagnostics after purpose-block segmentation. |
+| `block_achieve_rate` / `block_waste_rate` / `block_loop_rate` | Purpose-block outcomes, including repeated same-action loop blocks. |
+| `avg_block_efficiency_steps` | Average steps to first call-graph hit inside achieving read blocks. |
+| `achieving_block_step_share` / `wasted_block_step_share` / `loop_block_step_share` | Share of block-covered steps spent in each block outcome. |
+| `bad_pattern_trace_rate` / `error_spiral_rate` | Trace-level loop and repeated-error flags. |
 | `avg_min_distance_on_hits` | Lower is better; `0` means the model read the edited callable. |
 | `avg_best_positive_multiplier_on_hits` | The diagnostic P2A multiplier implied by the best read distance. |
 
@@ -365,8 +395,29 @@ val-p2a/swebench-hard/read_rate
 val-p2a/swebench-hard/graph_hit_rate_over_call_graphs
 val-p2a/swebench-hard/ground_truth_hit_rate_over_call_graphs
 val-p2a/swebench-hard/near_hit_rate_over_call_graphs
+val-p2a/swebench-hard/avg_node_recall
+val-p2a/swebench-hard/avg_read_precision
+val-p2a/swebench-hard/avg_hit_f1
+val-p2a/swebench-hard/order_defined_rate
+val-p2a/swebench-hard/reverse_order_rate
+val-p2a/swebench-hard/miracle_rate_over_gt_hits
+val-p2a/swebench-hard/block_order_defined_rate
+val-p2a/swebench-hard/block_reverse_order_rate
+val-p2a/swebench-hard/block_miracle_rate_over_gt_hits
+val-p2a/swebench-hard/avg_blocks_per_trace
+val-p2a/swebench-hard/block_achieve_rate
+val-p2a/swebench-hard/block_waste_rate
+val-p2a/swebench-hard/block_loop_rate
+val-p2a/swebench-hard/achieving_block_step_share
+val-p2a/swebench-hard/wasted_block_step_share
+val-p2a/swebench-hard/loop_block_step_share
+val-p2a/swebench-hard/bad_pattern_trace_rate
+val-p2a/swebench-hard/error_spiral_rate
 val-p2a/swebench-hard/avg_min_distance_on_hits
 val-p2a/swebench-hard/avg_best_positive_multiplier_on_hits
+val-p2a/swebench-hard/avg_order_score
+val-p2a/swebench-hard/avg_block_order_score
+val-p2a/swebench-hard/avg_block_efficiency_steps
 ```
 
 `P2A_EVAL_DETAILS_DIR` optionally writes per-case JSONL files named by validation

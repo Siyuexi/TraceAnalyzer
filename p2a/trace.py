@@ -400,7 +400,9 @@ def find_modified_callables_from_sources(
             new_lines,
         )
         if old_own_source != new_own_source:
-            modified.append(old_info.to_dict())
+            entry = old_info.to_dict()
+            entry["source"] = old_info.source
+            modified.append(entry)
     return modified
 
 
@@ -1129,6 +1131,7 @@ def instrument_sandbox(
                         **c,
                         "start_line": sb_info.start_line,
                         "end_line": sb_info.end_line,
+                        "source": sb_info.source,
                     }
                 )
             else:
@@ -1454,6 +1457,15 @@ def aggregate_traces(traces: list[list[dict]]) -> list[list[dict]]:
 # ---------------------------------------------------------------------------
 
 
+def _source_snippet(source: str, start_line: int, end_line: int) -> str:
+    if not source:
+        return ""
+    lines = source.splitlines()
+    start = max(int(start_line), 1)
+    end = max(int(end_line), start)
+    return "\n".join(lines[start - 1 : end])
+
+
 def build_call_graph_from_traces(
     traces: list[list[dict]],
     modified_callables: list[dict],
@@ -1477,7 +1489,8 @@ def build_call_graph_from_traces(
     Returns:
         Dict with keys:
             - call_graph_nodes: {node_key: {file_path, start_line, end_line,
-              hop_distance, normalized_distance}}
+              hop_distance, normalized_distance, source}}
+            - call_graph_edges: [[caller_key, callee_key], ...]
             - hop_max: maximum hop distance observed
             - patched_callables: the input modified_callables
             - traceable: True
@@ -1488,7 +1501,10 @@ def build_call_graph_from_traces(
     node_info: dict[str, dict] = {}
 
     # Strip internal instrumentation keys from output
-    clean_callables = [{k: v for k, v in mc.items() if not k.startswith("instr_")} for mc in modified_callables]
+    clean_callables = [
+        {k: v for k, v in mc.items() if not k.startswith("instr_") and k != "source"}
+        for mc in modified_callables
+    ]
 
     # Identify which patched callables appeared in runtime traces.
     observed_patched_keys: set[tuple[str, str]] = set()
@@ -1512,7 +1528,7 @@ def build_call_graph_from_traces(
                 "observed_in_trace": True,
             }
         else:
-            unobserved_patched_callables.append({k: v for k, v in mc.items() if not k.startswith("instr_")})
+            unobserved_patched_callables.append({k: v for k, v in mc.items() if not k.startswith("instr_") and k != "source"})
 
     for trace in traces:
         # Find patched frame indices in this trace
@@ -1542,6 +1558,7 @@ def build_call_graph_from_traces(
     if not node_info:
         return {
             "call_graph_nodes": {},
+            "call_graph_edges": [],
             "hop_max": 0,
             "patched_callables": clean_callables,
             "unobserved_patched_callables": unobserved_patched_callables,
@@ -1570,40 +1587,63 @@ def build_call_graph_from_traces(
 
     # Enrich patched callable nodes with full line ranges from static AST analysis
     patched_keys: set[str] = set()
+    patched_sources: dict[str, str] = {}
     for mc in modified_callables:
         key = f"{mc['file_path']}::{mc['qualified_name']}"
         if key in call_graph_nodes:
             call_graph_nodes[key]["start_line"] = mc["start_line"]
             call_graph_nodes[key]["end_line"] = mc["end_line"]
             patched_keys.add(key)
+            if isinstance(mc.get("source"), str):
+                patched_sources[key] = mc["source"]
 
     # Enrich non-patched nodes with AST-derived line ranges.
     # Each frame's line_no is the call-site execution line, which lies inside
     # the function body.  We find the enclosing callable by checking which
     # CallableInfo range contains that line, then update start_line/end_line.
     if file_reader:
-        files_needed = {node["file_path"] for nk, node in call_graph_nodes.items() if nk not in patched_keys}
+        files_needed = {node["file_path"] for node in call_graph_nodes.values()}
+        file_sources: dict[str, str] = {}
         file_callables: dict[str, dict] = {}
         for fp in files_needed:
             source = file_reader(fp)
             if source:
+                file_sources[fp] = source
                 file_callables[fp] = extract_callables_from_ast(source, fp)
 
         for node_key, node in call_graph_nodes.items():
-            if node_key in patched_keys:
-                continue
-            fp = node["file_path"]
-            call_site = node["start_line"]  # pre-enrichment = frame's line_no
-            for ci in file_callables.get(fp, {}).values():
-                if ci.start_line <= call_site <= ci.end_line:
-                    node["start_line"] = ci.start_line
-                    node["end_line"] = ci.end_line
-                    break
+            if node_key not in patched_keys:
+                fp = node["file_path"]
+                call_site = node["start_line"]  # pre-enrichment = frame's line_no
+                for ci in file_callables.get(fp, {}).values():
+                    if ci.start_line <= call_site <= ci.end_line:
+                        node["start_line"] = ci.start_line
+                        node["end_line"] = ci.end_line
+                        break
+            source = patched_sources.get(node_key)
+            if source is None:
+                source = _source_snippet(file_sources.get(node["file_path"], ""), node["start_line"], node["end_line"])
+            if source:
+                node["source"] = source
+
+    edge_set: set[tuple[str, str]] = set()
+    for trace in traces:
+        patched_indices = [j for j, frame in enumerate(trace) if frame.get("is_patched", False)]
+        for patched_idx in patched_indices:
+            for j in range(0, patched_idx):
+                caller = trace[j]
+                callee = trace[j + 1]
+                caller_key = f"{caller['file_path']}::{caller.get('qualified_name', caller['func_name'])}"
+                callee_key = f"{callee['file_path']}::{callee.get('qualified_name', callee['func_name'])}"
+                if caller_key in call_graph_nodes and callee_key in call_graph_nodes:
+                    edge_set.add((caller_key, callee_key))
+    call_graph_edges = [[caller, callee] for caller, callee in sorted(edge_set)]
 
     traceable = any(node["hop_distance"] == 0 for node in call_graph_nodes.values())
 
     return {
         "call_graph_nodes": call_graph_nodes,
+        "call_graph_edges": call_graph_edges,
         "hop_max": hop_max,
         "patched_callables": clean_callables,
         "unobserved_patched_callables": unobserved_patched_callables,

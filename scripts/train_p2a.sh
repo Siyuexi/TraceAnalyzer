@@ -6,7 +6,7 @@
 #
 # Usage:
 #   TRAIN_FILE=... TEST_FILE=... MODEL_PATH=... bash scripts/train_p2a.sh
-#   TRAIN_FILE=... TEST_FILE=... MODEL_PATH=... P2A_BONUS_MAP_DIR=... P2A_M_MAX=3.0 bash scripts/train_p2a.sh
+#   TRAIN_FILE=... TEST_FILE=... MODEL_PATH=... P2A_BONUS_MAP_DIR=... P2A_M_MAX=3.0 P2A_CREDIT_GRANULARITY=step bash scripts/train_p2a.sh
 set -xeuo pipefail
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.0}"
 export CUDA_PATH="${CUDA_PATH:-${CUDA_HOME}}"
