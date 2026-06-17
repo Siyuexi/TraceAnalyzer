@@ -23,6 +23,8 @@ dependencies = [
     "pydantic-settings",
     "aiohttp",
     "httpx",
+    "orjson",
+    "regex",
     # data build (scripts/build_data.py) + HuggingFace sourcing (latest stack is fine here:
     # datasets 5.x / pandas 3.x / numpy 2.x). The numpy<2 / pyarrow>=19 constraints that the
     # training framework needs come from verl (the [train] extra), not from here.

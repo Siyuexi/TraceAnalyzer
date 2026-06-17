@@ -137,8 +137,8 @@ def _as_python_scalar(value):
 def _extract_reads_for_trajectory(batch, idx, tracking_mode):
     """Extract read actions for a trajectory, trying two sources.
 
-    Path A (preferred): Use structured p2a_step_traces from Codex's
-    rollout-side instrumentation (UNI_AGENT_P2A_TRACE=1).
+    Path A (preferred): Use structured p2a_step_traces from the local
+    Uni-Agent loop adapter when UNI_AGENT_P2A_TRACE=1.
     Path B (fallback): Decode response_text and regex-parse.
     """
     step_traces = _get_p2a_step_traces(batch, idx)
@@ -168,7 +168,7 @@ def _get_response_text(batch, idx):
 
 
 def _get_p2a_step_traces(batch, idx):
-    """Extract P2A step traces recorded by Codex's rollout-side instrumentation.
+    """Extract P2A step traces recorded by the local Uni-Agent loop adapter.
 
     The rollout records p2a_step_traces in extra_fields when
     UNI_AGENT_P2A_TRACE=1. Each trace has tool_calls with structured

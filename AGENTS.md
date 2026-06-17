@@ -6,7 +6,7 @@ is on `main`.
 
 ## Layout
 
-- `uni-agent/` - Uni-Agent fork submodule. Use this for vanilla baseline code and upstream Uni-Agent docs.
+- `uni-agent/` - pristine Uni-Agent upstream-mirror submodule. Use this for vanilla baseline code and upstream Uni-Agent docs.
 - `env/` - local Uni-Agent environment glue for ARL SDK deployment, image routing, agent-loop adapter, and smoke/data helpers. The external `arl-env` SDK owns the `arl` import name.
 - `p2a/` - P2A trainer wrapper, advantage reshape code, and bonus-map precompute utilities.
 - `scripts/` - local launch helpers for preparing data/config and running Uni-Agent baseline checks.
@@ -50,5 +50,5 @@ https://uni-agent.readthedocs.io/en/latest/index.html
 ## Git Rules
 
 - `src/` is a git repo with a GitHub remote (`origin` = `git@github.com:Siyuexi/TraceAnalyzer.git`). Open PRs against `main`; the controller merges. Never self-merge.
-- `uni-agent/` is a nested submodule pointing at `git@github.com:Siyuexi/uni-agent.git`.
-- Do not modify `uni-agent/` unless the controller asks for Uni-Agent fork changes.
+- `uni-agent/` is a nested submodule pointing at the pristine fork mirror `git@github.com:Siyuexi/uni-agent.git`.
+- Do not modify `uni-agent/`; put P2A behavior in `p2a/`, `env/`, `scripts/`, or `config/`.

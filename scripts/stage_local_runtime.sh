@@ -15,8 +15,6 @@ p2a_preferred_venv_rel() {
     else
       printf '%s\n' "${UV_PROJECT_ENVIRONMENT%/}"
     fi
-  elif [[ -x "${source_root}/.venv-cu128/bin/python" ]]; then
-    printf '.venv-cu128\n'
   else
     printf '.venv\n'
   fi
@@ -51,11 +49,7 @@ p2a_abs_dir() {
 }
 
 p2a_source_runtime_profile() {
-  local venv_path="${1:-${UV_PROJECT_ENVIRONMENT:-}}"
-  if [[ -n "${venv_path}" && -f "${venv_path}/p2a-cu128.env" ]]; then
-    # shellcheck disable=SC1091
-    source "${venv_path}/p2a-cu128.env"
-  fi
+  :
 }
 
 p2a_runtime_stamp() {
@@ -200,8 +194,8 @@ p2a_stage_local_runtime() {
       --exclude='.git/' \
       --exclude='.venv' \
       --exclude='.venv/' \
-      --exclude='.venv-cu128' \
-      --exclude='.venv-cu128/' \
+      --exclude='.venv-*' \
+      --exclude='.venv-*/' \
       --exclude="${venv_rel}" \
       --exclude="${venv_rel}/" \
       --exclude='.uv-python' \

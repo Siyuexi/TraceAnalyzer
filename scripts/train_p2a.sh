@@ -8,6 +8,8 @@
 #   TRAIN_FILE=... TEST_FILE=... MODEL_PATH=... bash scripts/train_p2a.sh
 #   TRAIN_FILE=... TEST_FILE=... MODEL_PATH=... P2A_BONUS_MAP_DIR=... P2A_M_MAX=3.0 bash scripts/train_p2a.sh
 set -xeuo pipefail
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.0}"
+export CUDA_PATH="${CUDA_PATH:-${CUDA_HOME}}"
 export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
 export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
 
@@ -233,11 +235,9 @@ except Exception as exc:  # noqa: BLE001 - report binary/linker failures directl
     raise SystemExit(
         "[P2A] TransformerEngine is required by Uni-Agent's Megatron/mbridge path, "
         f"but transformer_engine.pytorch is not importable: {type(exc).__name__}: {exc}. "
-        "Use a TransformerEngine build matched to the active torch/CUDA/Megatron stack; "
-        "Uni-Agent's reference image builds TE v2.2.1 with torch 2.8, CUDA 12.8, "
-        "and Megatron-LM core_v0.13.0. "
-        "Run `P2A_CU128_CUDA_HOME=/path/to/cuda-12.8 bash scripts/setup_uni_agent_cu128_runtime.sh`, "
-        "then launch with `P2A_VENV_DIR=.venv-cu128`."
+        "Use the native CUDA 13.0 `.venv` stack: "
+        "`CUDA_HOME=/usr/local/cuda-13.0 UV_PROJECT_ENVIRONMENT=$PWD/.venv "
+        "uv sync --locked --extra train --extra gpu`."
     )
 else:
     try:

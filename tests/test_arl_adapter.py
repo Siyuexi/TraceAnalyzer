@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 import json
 import os
@@ -143,6 +144,113 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertEqual(agent_env.env_config.deployment.gateway_url, "http://gateway")
         self.assertEqual(agent_env.env_config.env_variables, {"PIP_CACHE_DIR": "~/.cache/pip"})
         self.assertEqual(agent_env.env_config.post_setup_cmd, "git checkout abc123")
+
+    def test_agent_loop_attaches_p2a_traces_from_rollout_cache_without_uni_agent_patch(self) -> None:
+        import env as env_package
+
+        fake_agent_loop = ModuleType("uni_agent.agent_loop")
+
+        class FakeUniAgentLoop:
+            pass
+
+        fake_agent_loop.UniAgentLoop = FakeUniAgentLoop
+        fake_interaction = ModuleType("uni_agent.interaction")
+        fake_interaction.AgentEnv = lambda run_id, env_config: SimpleNamespace(run_id=run_id, env_config=env_config)
+
+        class FakeToolsManager:
+            async def parse_action(self, model_output):
+                if "no-tool" in model_output:
+                    return model_output, []
+                return "inspect file", [
+                    {
+                        "function": {
+                            "name": "str_replace_editor",
+                            "arguments": {
+                                "command": "view",
+                                "path": "/testbed/pkg/demo.py",
+                                "view_range": [1, 5],
+                            },
+                        }
+                    }
+                ]
+
+        try:
+            sys.modules.pop("env.agent_loop", None)
+            if hasattr(env_package, "agent_loop"):
+                delattr(env_package, "agent_loop")
+            with patch.dict(
+                sys.modules,
+                {
+                    "uni_agent.agent_loop": fake_agent_loop,
+                    "uni_agent.interaction": fake_interaction,
+                },
+            ):
+                from env import agent_loop as agent_loop_module
+
+                loop = object.__new__(agent_loop_module.ArlUniAgentLoop)
+                loop.tools_manager = FakeToolsManager()
+                loop._p2a_run_kwargs = {
+                    "tools_kwargs": {
+                        "reward": {
+                            "metadata": {
+                                "instance_id": "demo__abc123",
+                            }
+                        }
+                    }
+                }
+                loop._p2a_run_config = {}
+                interaction_result = {
+                    "trajectory": [
+                        SimpleNamespace(step_idx=1, response="tool response", exit_reason="completed"),
+                        SimpleNamespace(step_idx=2, response="no-tool response", exit_reason="format_error"),
+                    ],
+                    "rollout_cache": {
+                        "response_mask": [1, 1, 0, 0, 1, 1, 1],
+                        "extra_fields": {},
+                    },
+                }
+                with patched_env({"UNI_AGENT_P2A_TRACE": "1"}):
+                    asyncio.run(loop._attach_p2a_extra_fields(interaction_result))
+        finally:
+            sys.modules.pop("env.agent_loop", None)
+            if hasattr(env_package, "agent_loop"):
+                delattr(env_package, "agent_loop")
+
+        extra_fields = interaction_result["rollout_cache"]["extra_fields"]
+        self.assertEqual(extra_fields["instance_id"], "demo__abc123")
+        self.assertEqual(extra_fields["response_text"], "tool response\nno-tool response")
+        self.assertEqual(
+            extra_fields["p2a_step_traces"],
+            [
+                {
+                    "step_idx": 1,
+                    "response_start": 0,
+                    "response_end": 2,
+                    "thought": "inspect file",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "str_replace_editor",
+                                "arguments": {
+                                    "command": "view",
+                                    "path": "/testbed/pkg/demo.py",
+                                    "view_range": [1, 5],
+                                },
+                            }
+                        }
+                    ],
+                    "parse_error": None,
+                },
+                {
+                    "step_idx": 2,
+                    "response_start": 4,
+                    "response_end": 7,
+                    "thought": "no-tool response",
+                    "tool_calls": [],
+                    "parse_error": "No function call found in the response.",
+                },
+            ],
+        )
 
     def test_image_override_and_pair_diag_routing_are_explicit(self) -> None:
         # 1. exact per-instance override wins.

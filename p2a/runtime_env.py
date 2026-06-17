@@ -121,7 +121,8 @@ ARL_ENV_KEYS = (
 REFERENCE_ENV_DEFAULTS = {
     "TORCH_NCCL_AVOID_RECORD_STREAMS": "1",
     "CUDA_DEVICE_MAX_CONNECTIONS": "1",
-    "CUDA_HOME": "/usr/local/cuda",
+    "CUDA_HOME": "/usr/local/cuda-13.0",
+    "CUDA_PATH": "/usr/local/cuda-13.0",
     "NVTE_FRAMEWORK": "pytorch",
     "MAX_JOBS": "32",
     "VLLM_WORKER_MULTIPROC_METHOD": "spawn",

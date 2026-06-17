@@ -14,6 +14,8 @@ unset RAY_ADDRESS
 unset P2A_BONUS_MAP_DIR P2A_M_MAX P2A_TRACKING_MODE
 unset P2A_EVAL_BONUS_MAP_DIR P2A_EVAL_DETAILS_DIR P2A_EVAL_NEAR_THRESHOLD
 unset UNI_AGENT_P2A_TRACE
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.0}"
+export CUDA_PATH="${CUDA_PATH:-${CUDA_HOME}}"
 
 P2A_VENV_DIR="$(p2a_runtime_venv_rel "${SCRIPT_SRC_ROOT}")"
 export P2A_VENV_DIR
@@ -23,11 +25,7 @@ export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
 export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
 p2a_source_runtime_profile "${UV_PROJECT_ENVIRONMENT}"
 if [[ -z "${P2A_SYNC_DEPS+x}" ]]; then
-  if [[ "${P2A_VENV_DIR}" == ".venv-cu128" ]]; then
-    P2A_SYNC_DEPS=0
-  else
-    P2A_SYNC_DEPS=1
-  fi
+  P2A_SYNC_DEPS=1
 fi
 
 export RAY_DATA_HOME="${RAY_DATA_HOME:-${HOME}/verl}"
@@ -69,11 +67,6 @@ fi
 export DATA MODEL
 
 if [[ "${P2A_SYNC_DEPS:-1}" == "1" ]]; then
-  if [[ "${P2A_VENV_DIR}" == ".venv-cu128" ]]; then
-    echo "[baseline] ${P2A_VENV_DIR} is pip-managed by scripts/setup_uni_agent_cu128_runtime.sh; do not run uv sync into it." >&2
-    echo "[baseline] Set P2A_SYNC_DEPS=0 or use P2A_VENV_DIR=.venv for the uv-managed cu130 environment." >&2
-    exit 2
-  fi
   UV_BIN="${UV_BIN:-$(command -v uv || true)}"
   if [[ -z "${UV_BIN}" ]]; then
     echo "[baseline] uv not found on PATH" >&2
