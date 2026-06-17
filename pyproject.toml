@@ -23,6 +23,8 @@ dependencies = [
     "pydantic-settings",
     "aiohttp",
     "httpx",
+    "openai",
+    "swebench",
     "orjson",
     "regex",
     # data build (scripts/build_data.py) + HuggingFace sourcing (latest stack is fine here:

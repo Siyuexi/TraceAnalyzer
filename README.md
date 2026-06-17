@@ -309,6 +309,38 @@ The offline `summary-out` and `details-out` files are post-hoc artifacts for
 inspecting dumped rollouts. Training and validation do not read them; live
 validation dashboards use `P2A_EVAL_BONUS_MAP_DIR`.
 
+### Step 9. Optional third-party model rollout baseline
+
+To collect pre-training trajectories from an OpenAI-compatible third-party
+model, keep the API key in the environment and run the inference-only harness:
+
+```bash
+export P2A_THIRD_PARTY_API_KEY=...
+export P2A_THIRD_PARTY_BASE_URL=https://apic1.ohmycdn.com/v1
+export P2A_THIRD_PARTY_MODEL=deepseek-v4-flash
+
+timeout 15m bash scripts/third_party_eval.sh \
+  --config config/third_party_eval.deepseek.example.yaml \
+  --data $DATA/swe_bench_verified_hard.parquet \
+  --out $DATA/third_party/deepseek_v4_flash_rollouts.jsonl \
+  --limit 1 \
+  --max-turns 3 \
+  --max-tokens 1024 \
+  --tool-install-timeout 300 \
+  --skip-tool-install str_replace_editor \
+  --bonus-map-dir $DATA/eval_bonus_maps
+```
+
+The harness uses Uni-Agent's `OpenAICompatibleChatModel`, the local ARL
+deployment adapter, and the same SWE/R2E reward specs as training. It writes
+`p2a_third_party_rollout_v1` JSONL with `messages`, structured tool calls,
+`p2a_step_traces`, reward details, and termination status. When
+`--bonus-map-dir` is set it also writes scorer details, a summary JSON, and a
+short Markdown localization baseline report. For smoke tests, `--max-turns`,
+`--max-tokens`, `--tool-install-timeout`, `--skip-tool-install`, the timeout
+overrides, and an outer shell `timeout` can bound the ARL/model spend without
+editing the checked-in config.
+
 ## What you configure yourself
 
 These are knobs you set; the repo does not pin them:
