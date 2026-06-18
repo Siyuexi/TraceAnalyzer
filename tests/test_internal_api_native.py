@@ -216,6 +216,44 @@ def test_deepseek_dsml_content_recovers_structured_tool_call():
     }
     assert info["prompt_tokens"] == 10
     assert info["completion_tokens"] == 5
+    assert info["text_blocks"] == [{"value": "I should inspect the file."}]
+
+
+def test_recovered_dsml_is_not_replayed_as_assistant_text_metadata():
+    dsml = (
+        "<｜｜DSML｜｜tool_calls>"
+        '<｜｜DSML｜｜invoke name="str_replace_editor">'
+        '<｜｜DSML｜｜parameter name="command" string="true">view'
+        "</｜｜DSML｜｜parameter>"
+        '<｜｜DSML｜｜parameter name="path" string="true">/testbed/a.py'
+        "</｜｜DSML｜｜parameter>"
+        "</｜｜DSML｜｜invoke>"
+        "</｜｜DSML｜｜tool_calls>"
+    )
+    content, tool_calls, info = parse_internal_response(
+        {"answer": [{"type": "text", "value": f"I should inspect.\n{dsml}"}]}
+    )
+
+    _prompt, history = to_prompt_history(
+        [
+            {"role": "system", "content": "You are a SWE agent."},
+            {"role": "user", "content": "Fix the bug."},
+            {"role": "assistant", "content": content, "tool_calls": tool_calls},
+        ],
+        model_name="deepseek-v4-flash-passthrough",
+        api_module=_FakeApiModule,
+        assistant_metadata_by_index={2: info},
+    )
+
+    assistant = history[-1]
+    replay_text = "".join(
+        block.get("value", "")
+        for block in assistant["content"]
+        if block.get("type") == "text"
+    )
+    assert "DSML" not in replay_text
+    assert "str_replace_editor" not in replay_text
+    assert replay_text == "I should inspect."
 
 
 def test_internal_response_preserves_reasoning_metadata_and_tool_signature():
@@ -268,10 +306,11 @@ def test_minimax_native_content_recovers_structured_tool_call():
         ]
     }
 
-    content, tool_calls, _info = parse_internal_response(payload)
+    content, tool_calls, info = parse_internal_response(payload)
 
     assert content == ""
     assert tool_calls[0]["function"]["name"] == "execute_bash"
     assert json.loads(tool_calls[0]["function"]["arguments"]) == {
         "command": "pytest -q"
     }
+    assert "text_blocks" not in info

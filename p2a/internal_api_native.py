@@ -1,7 +1,7 @@
-"""Native message shaping helpers for the private internal API adapter.
+"""Native message shaping helpers for the internal API adapter.
 
 The functions in this module are deliberately free of credentials and network
-calls. The ignored adapter under ``.secrets/`` loads the private API client and
+calls. The tracked adapter loads the private API client from ``.secrets/`` and
 uses these helpers to keep Uni-Agent rollouts in each provider family's native
 tool-call format.
 """
@@ -457,6 +457,19 @@ def _parse_tool_calls(raw_calls: Any) -> list[dict[str, Any]]:
     return parsed
 
 
+def _text_blocks_for_content(
+    content: str, original_blocks: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    if not content:
+        return []
+    if len(original_blocks) == 1:
+        block: dict[str, str] = {"value": content}
+        if original_blocks[0].get("signature"):
+            block["signature"] = original_blocks[0]["signature"]
+        return [block]
+    return [{"value": content}]
+
+
 def parse_internal_response(
     payload: dict[str, Any],
     headers: dict[str, Any] | None = None,
@@ -509,6 +522,7 @@ def parse_internal_response(
         if recovered:
             content = stripped
             tool_calls = recovered
+            text_blocks = _text_blocks_for_content(content, text_blocks)
 
     usage: dict[str, Any] = {}
     if isinstance(payload.get("usage"), dict):

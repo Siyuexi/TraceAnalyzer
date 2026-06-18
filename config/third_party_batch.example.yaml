@@ -1,10 +1,10 @@
 # Example batch config for API-backed Uni-Agent/P2A evaluation.
-# All model names are dummy placeholders. Keep real internal API adapters,
-# tokens, and private model lists under ignored .secrets/.
+# All model names are dummy placeholders. Keep internal API credentials and
+# private model lists under ignored .secrets/.
 provider:
   source: openai_compatible  # openai_compatible | internal_api
-  # For internal_api, use an ignored adapter such as:
-  # adapter: .secrets/internal_api_adapter.py
+  # For internal_api, the tracked adapter loads the private client from:
+  # api_module: .secrets/internal_api_eval.py
 
 model:
   base_url_env: P2A_THIRD_PARTY_BASE_URL

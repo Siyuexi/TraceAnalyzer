@@ -1,8 +1,8 @@
 """Provider loading for API-backed Uni-Agent evaluation.
 
-The public path uses Uni-Agent's OpenAI-compatible chat model. Private
-providers live behind ignored adapter files under ``.secrets/`` and must expose
-a factory returning the same chat-model protocol used by ``AgentInteraction``.
+The public path uses Uni-Agent's OpenAI-compatible chat model. The internal API
+path uses a tracked adapter while keeping the private client and credentials in
+an ignored module under ``.secrets/``.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import uuid
 OPENAI_COMPATIBLE = "openai_compatible"
 INTERNAL_API = "internal_api"
 SUPPORTED_PROVIDER_SOURCES = {OPENAI_COMPATIBLE, INTERNAL_API}
-DEFAULT_INTERNAL_ADAPTER = ".secrets/internal_api_adapter.py"
+DEFAULT_INTERNAL_API_MODULE = ".secrets/internal_api_eval.py"
 REQUIRED_MODEL_METHODS = (
     "set_tools_schemas",
     "prepare_rollout_cache",
@@ -36,10 +36,12 @@ def normalize_provider_config(provider_cfg: dict[str, Any] | None) -> dict[str, 
     source = str(cfg["source"])
     if source not in SUPPORTED_PROVIDER_SOURCES:
         supported = ", ".join(sorted(SUPPORTED_PROVIDER_SOURCES))
-        raise ValueError(f"Unsupported provider.source {source!r}; expected one of: {supported}")
+        raise ValueError(
+            f"Unsupported provider.source {source!r}; expected one of: {supported}"
+        )
     cfg["source"] = source
     if source == INTERNAL_API:
-        cfg.setdefault("adapter", DEFAULT_INTERNAL_ADAPTER)
+        cfg.setdefault("api_module", DEFAULT_INTERNAL_API_MODULE)
     return cfg
 
 
@@ -54,30 +56,59 @@ def resolve_adapter_path(adapter: str | Path, *, repo_root: Path | None = None) 
     return (repo_root or Path.cwd()) / path
 
 
-def load_internal_adapter(provider_cfg: dict[str, Any], *, repo_root: Path | None = None) -> ModuleType:
+def load_internal_adapter(
+    provider_cfg: dict[str, Any], *, repo_root: Path | None = None
+) -> ModuleType:
     cfg = normalize_provider_config(provider_cfg)
     if cfg["source"] != INTERNAL_API:
-        raise ProviderLoadError(f"load_internal_adapter only supports provider.source={INTERNAL_API!r}")
-    adapter_path = resolve_adapter_path(cfg.get("adapter", DEFAULT_INTERNAL_ADAPTER), repo_root=repo_root)
+        raise ProviderLoadError(
+            f"load_internal_adapter only supports provider.source={INTERNAL_API!r}"
+        )
+    adapter = cfg.get("adapter")
+    if adapter is None:
+        from p2a import internal_api_adapter
+
+        return internal_api_adapter
+
+    adapter_path = resolve_adapter_path(adapter, repo_root=repo_root)
     if not adapter_path.is_file():
         raise ProviderLoadError(
-            "internal_api provider requires an ignored adapter file at "
-            f"{adapter_path}. Create it under .secrets/ and expose make_model(model_cfg, provider_cfg)."
+            "internal_api provider custom adapter was not found at "
+            f"{adapter_path}. Omit provider.adapter to use the tracked adapter, or expose "
+            "make_model(model_cfg, provider_cfg) from that file."
         )
 
     module_name = f"p2a_internal_api_adapter_{uuid.uuid4().hex}"
     spec = importlib.util.spec_from_file_location(module_name, adapter_path)
     if spec is None or spec.loader is None:
-        raise ProviderLoadError(f"Could not import internal_api adapter from {adapter_path}")
+        raise ProviderLoadError(
+            f"Could not import internal_api adapter from {adapter_path}"
+        )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-def check_provider_available(provider_cfg: dict[str, Any], *, repo_root: Path | None = None) -> None:
+def check_provider_available(
+    provider_cfg: dict[str, Any], *, repo_root: Path | None = None
+) -> None:
     cfg = normalize_provider_config(provider_cfg)
     if cfg["source"] == INTERNAL_API:
-        load_internal_adapter(cfg, repo_root=repo_root)
+        module = load_internal_adapter(cfg, repo_root=repo_root)
+        checker = getattr(module, "check_available", None)
+        if callable(checker):
+            try:
+                try:
+                    checker(provider_cfg=cfg, repo_root=repo_root)
+                except TypeError as keyword_error:
+                    try:
+                        checker(cfg)
+                    except TypeError:
+                        raise keyword_error
+            except ProviderLoadError:
+                raise
+            except Exception as exc:
+                raise ProviderLoadError(str(exc)) from exc
 
 
 def _adapter_factory(module: ModuleType):
@@ -91,18 +122,33 @@ def _adapter_factory(module: ModuleType):
     )
 
 
-def _call_factory(factory: Any, model_cfg: dict[str, Any], provider_cfg: dict[str, Any]) -> Any:
+def _call_factory(
+    factory: Any,
+    model_cfg: dict[str, Any],
+    provider_cfg: dict[str, Any],
+    *,
+    repo_root: Path | None = None,
+) -> Any:
     try:
-        return factory(model_cfg=model_cfg, provider_cfg=provider_cfg)
+        return factory(
+            model_cfg=model_cfg, provider_cfg=provider_cfg, repo_root=repo_root
+        )
     except TypeError as keyword_error:
         try:
-            return factory(model_cfg, provider_cfg)
+            return factory(model_cfg=model_cfg, provider_cfg=provider_cfg)
         except TypeError:
-            raise keyword_error
+            try:
+                return factory(model_cfg, provider_cfg)
+            except TypeError:
+                raise keyword_error
 
 
 def _validate_model_protocol(model: Any, *, source: str) -> None:
-    missing = [name for name in REQUIRED_MODEL_METHODS if not callable(getattr(model, name, None))]
+    missing = [
+        name
+        for name in REQUIRED_MODEL_METHODS
+        if not callable(getattr(model, name, None))
+    ]
     if missing:
         raise ProviderLoadError(
             f"{source} adapter returned {type(model).__name__}, missing chat-model methods: {', '.join(missing)}"
@@ -119,21 +165,27 @@ def _usage_number(payload: dict[str, Any], *keys: str) -> int | float:
     return 0
 
 
-def _accumulate_token_usage(rollout_cache: dict[str, Any] | None, generation_info: dict[str, Any]) -> None:
+def _accumulate_token_usage(
+    rollout_cache: dict[str, Any] | None, generation_info: dict[str, Any]
+) -> None:
     if rollout_cache is None:
         return
     usage = rollout_cache.setdefault("token_usage", {})
     input_tokens = _usage_number(generation_info, "input_tokens", "prompt_tokens")
     output_tokens = _usage_number(generation_info, "output_tokens", "completion_tokens")
     reasoning_tokens = _usage_number(generation_info, "reasoning_tokens")
-    cache_hit_tokens = _usage_number(generation_info, "cache_hit_tokens", "cached_tokens")
+    cache_hit_tokens = _usage_number(
+        generation_info, "cache_hit_tokens", "cached_tokens"
+    )
     cache_write_tokens = _usage_number(generation_info, "cache_write_tokens")
 
     usage["input_tokens"] = usage.get("input_tokens", 0) + input_tokens
     usage["output_tokens"] = usage.get("output_tokens", 0) + output_tokens
     usage["reasoning_tokens"] = usage.get("reasoning_tokens", 0) + reasoning_tokens
     usage["cache_hit_tokens"] = usage.get("cache_hit_tokens", 0) + cache_hit_tokens
-    usage["cache_write_tokens"] = usage.get("cache_write_tokens", 0) + cache_write_tokens
+    usage["cache_write_tokens"] = (
+        usage.get("cache_write_tokens", 0) + cache_write_tokens
+    )
     if isinstance(generation_info.get("cost"), int | float):
         usage["cost"] = usage.get("cost", 0.0) + generation_info["cost"]
 
@@ -150,7 +202,9 @@ class MeteredChatModel:
     def set_tools_schemas(self, tools_schemas: list[dict]) -> None:
         self.inner.set_tools_schemas(tools_schemas)
 
-    async def prepare_rollout_cache(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+    async def prepare_rollout_cache(
+        self, messages: list[dict[str, str]]
+    ) -> dict[str, Any]:
         cache = await self.inner.prepare_rollout_cache(messages)
         if cache is None:
             cache = {}
@@ -163,7 +217,9 @@ class MeteredChatModel:
         new_messages: list[dict[str, Any]],
         rollout_cache: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
-        return await self.inner.append_messages_to_rollout_cache(new_messages, rollout_cache)
+        return await self.inner.append_messages_to_rollout_cache(
+            new_messages, rollout_cache
+        )
 
     async def query(
         self,
@@ -171,7 +227,9 @@ class MeteredChatModel:
         rollout_cache: dict[str, Any] | None,
         **kwargs: Any,
     ) -> tuple[str, list[dict], dict[str, Any], dict[str, Any]]:
-        text, tool_calls, cache, generation_info = await self.inner.query(messages, rollout_cache, **kwargs)
+        text, tool_calls, cache, generation_info = await self.inner.query(
+            messages, rollout_cache, **kwargs
+        )
         if not isinstance(generation_info, dict):
             generation_info = {}
         _accumulate_token_usage(cache, generation_info)
@@ -192,7 +250,9 @@ def make_chat_model(
         model = OpenAICompatibleChatModel(**model_cfg)
     elif source == INTERNAL_API:
         module = load_internal_adapter(cfg, repo_root=repo_root)
-        model = _call_factory(_adapter_factory(module), model_cfg, cfg)
+        model = _call_factory(
+            _adapter_factory(module), model_cfg, cfg, repo_root=repo_root
+        )
     else:
         raise ValueError(f"Unsupported provider.source {source!r}")
     _validate_model_protocol(model, source=source)
