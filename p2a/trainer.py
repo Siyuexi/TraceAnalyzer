@@ -20,10 +20,18 @@ from p2a.core import (
     match_reads_to_callgraph,
     parse_read_actions,
     parse_read_actions_from_tool_calls,
+    reads_from_step_trace,
+    segment_purpose_blocks,
 )
 
 
-def apply_p2a_reshape(batch, bonus_map_store, m_max=3.0, tracking_mode="view_and_bash"):
+def apply_p2a_reshape(
+    batch,
+    bonus_map_store,
+    m_max=3.0,
+    tracking_mode="view_and_bash",
+    credit_granularity="step",
+):
     """Apply P2A multiplicative advantage reshape to a batch.
 
     For each trajectory in the batch:
@@ -55,6 +63,14 @@ def apply_p2a_reshape(batch, bonus_map_store, m_max=3.0, tracking_mode="view_and
     n_trajectories = advantages.shape[0]
     n_reshaped = 0
     total_multiplier = 0.0
+    block_stats = {
+        "n_blocks": 0,
+        "n_achieving_blocks": 0,
+        "n_wasted_blocks": 0,
+        "total_block_steps": 0,
+        "reshaped_tokens": 0,
+        "valid_tokens": 0,
+    }
 
     for i in range(n_trajectories):
         instance_id = _get_instance_id(batch, i)
@@ -73,17 +89,32 @@ def apply_p2a_reshape(batch, bonus_map_store, m_max=3.0, tracking_mode="view_and
         a_sign = int(torch.sign(masked_adv.mean()).item())
         step_traces = _get_p2a_step_traces(batch, i)
         if step_traces:
-            row_reshaped, row_multiplier_sum = _reshape_step_spans(
-                advantages=advantages,
-                returns=returns,
-                response_mask=response_mask,
-                row_idx=i,
-                step_traces=step_traces,
-                bonus_map=bonus_map,
-                m_max=m_max,
-                advantage_sign=a_sign,
-                tracking_mode=tracking_mode,
-            )
+            if credit_granularity == "block":
+                row_reshaped, row_multiplier_sum, row_block_stats = _reshape_purpose_blocks(
+                    advantages=advantages,
+                    returns=returns,
+                    response_mask=response_mask,
+                    row_idx=i,
+                    step_traces=step_traces,
+                    bonus_map=bonus_map,
+                    m_max=m_max,
+                    advantage_sign=a_sign,
+                    tracking_mode=tracking_mode,
+                )
+                for key, value in row_block_stats.items():
+                    block_stats[key] += value
+            else:
+                row_reshaped, row_multiplier_sum = _reshape_step_spans(
+                    advantages=advantages,
+                    returns=returns,
+                    response_mask=response_mask,
+                    row_idx=i,
+                    step_traces=step_traces,
+                    bonus_map=bonus_map,
+                    m_max=m_max,
+                    advantage_sign=a_sign,
+                    tracking_mode=tracking_mode,
+                )
             n_reshaped += row_reshaped
             total_multiplier += row_multiplier_sum
             continue
@@ -111,7 +142,18 @@ def apply_p2a_reshape(batch, bonus_map_store, m_max=3.0, tracking_mode="view_and
         "p2a/n_total": n_trajectories,
         "p2a/reshape_rate": n_reshaped / max(n_trajectories, 1),
         "p2a/avg_multiplier": total_multiplier / max(n_reshaped, 1),
+        "p2a/credit_granularity_block": float(credit_granularity == "block"),
     }
+    if credit_granularity == "block":
+        metrics.update(
+            {
+                "p2a/block_n_blocks": block_stats["n_blocks"],
+                "p2a/block_n_achieving": block_stats["n_achieving_blocks"],
+                "p2a/block_n_wasted": block_stats["n_wasted_blocks"],
+                "p2a/block_mean_len": block_stats["total_block_steps"] / max(block_stats["n_blocks"], 1),
+                "p2a/block_reshaped_token_share": block_stats["reshaped_tokens"] / max(block_stats["valid_tokens"], 1),
+            }
+        )
     return batch, metrics
 
 
@@ -127,6 +169,8 @@ def _get_instance_id(batch, idx):
 
 
 def _as_python_scalar(value):
+    if isinstance(value, np.ndarray):
+        return value.item() if value.shape == () else value.tolist()
     if isinstance(value, np.generic):
         return value.item()
     if isinstance(value, bytes):
@@ -203,13 +247,7 @@ def _reshape_step_spans(
     for trace in step_traces:
         if not isinstance(trace, dict):
             continue
-        reads = []
-        tool_calls = trace.get("tool_calls") or []
-        if tool_calls:
-            reads.extend(parse_read_actions_from_tool_calls(tool_calls))
-        response_text = trace.get("response_text")
-        if response_text:
-            reads.extend(parse_read_actions(response_text, tracking_mode=tracking_mode))
+        reads = reads_from_step_trace(trace, tracking_mode=tracking_mode)
         if not reads:
             continue
 
@@ -237,6 +275,70 @@ def _reshape_step_spans(
     return row_reshaped, row_multiplier_sum
 
 
+def _reshape_purpose_blocks(
+    *,
+    advantages,
+    returns,
+    response_mask,
+    row_idx,
+    step_traces,
+    bonus_map,
+    m_max,
+    advantage_sign,
+    tracking_mode,
+):
+    row_reshaped = 0
+    row_multiplier_sum = 0.0
+    row_len = int(response_mask[row_idx].shape[0])
+    valid_tokens = int(response_mask[row_idx].bool().sum().item())
+    stats = {
+        "n_blocks": 0,
+        "n_achieving_blocks": 0,
+        "n_wasted_blocks": 0,
+        "total_block_steps": 0,
+        "reshaped_tokens": 0,
+        "valid_tokens": valid_tokens,
+    }
+
+    for block in segment_purpose_blocks(step_traces, tracking_mode=tracking_mode):
+        if block["family"] != "read":
+            continue
+        stats["n_blocks"] += 1
+        stats["total_block_steps"] += len(block["trace_indices"])
+        traces = [step_traces[idx] for idx in block["trace_indices"] if idx < len(step_traces)]
+        reads = []
+        for trace in traces:
+            reads.extend(reads_from_step_trace(trace, tracking_mode=tracking_mode))
+        distance = match_reads_to_callgraph(reads, bonus_map)
+        if distance < 0:
+            stats["n_wasted_blocks"] += 1
+            continue
+
+        block_mask = response_mask[row_idx].bool().clone()
+        block_mask[:] = False
+        for trace in traces:
+            start = max(int(trace.get("response_start", 0)), 0)
+            end = min(int(trace.get("response_end", row_len)), row_len)
+            if end > start:
+                span_mask = response_mask[row_idx].bool().clone()
+                span_mask[:start] = False
+                span_mask[end:] = False
+                block_mask |= span_mask
+        if not block_mask.any():
+            stats["n_wasted_blocks"] += 1
+            continue
+
+        multiplier = compute_p2a_multiplier(distance, m_max, advantage_sign)
+        advantages[row_idx][block_mask] = advantages[row_idx][block_mask] * multiplier
+        returns[row_idx][block_mask] = returns[row_idx][block_mask] * multiplier
+        stats["n_achieving_blocks"] += 1
+        stats["reshaped_tokens"] += int(block_mask.sum().item())
+        row_reshaped += 1
+        row_multiplier_sum += multiplier
+
+    return row_reshaped, row_multiplier_sum, stats
+
+
 def _unwrap_ray_actor_class(cls):
     metadata = getattr(cls, "__ray_metadata__", None)
     return getattr(metadata, "modified_class", cls)
@@ -262,13 +364,17 @@ def create_p2a_trainer_cls(base_trainer_cls):
             self._p2a_bonus_map_store = BonusMapStore(bonus_map_dir) if bonus_map_dir else None
             self._p2a_m_max = float(os.environ.get("P2A_M_MAX", "3.0"))
             self._p2a_tracking_mode = os.environ.get("P2A_TRACKING_MODE", "view_and_bash")
+            self._p2a_credit_granularity = os.environ.get("P2A_CREDIT_GRANULARITY", "step")
+            if self._p2a_credit_granularity not in {"step", "block"}:
+                raise ValueError("P2A_CREDIT_GRANULARITY must be 'step' or 'block'")
             self._p2a_enabled = self._p2a_bonus_map_store is not None
             if self._p2a_enabled:
                 print(
                     "[P2A] Enabled. "
                     f"bonus_map_dir={bonus_map_dir}, "
                     f"m_max={self._p2a_m_max}, "
-                    f"tracking={self._p2a_tracking_mode}"
+                    f"tracking={self._p2a_tracking_mode}, "
+                    f"credit_granularity={self._p2a_credit_granularity}"
                 )
             else:
                 print("[P2A] Disabled (P2A_BONUS_MAP_DIR not set). Running vanilla training.")
@@ -282,6 +388,7 @@ def create_p2a_trainer_cls(base_trainer_cls):
                     self._p2a_bonus_map_store,
                     m_max=self._p2a_m_max,
                     tracking_mode=self._p2a_tracking_mode,
+                    credit_granularity=self._p2a_credit_granularity,
                 )
                 self.metrics.update(p2a_metrics)
 
