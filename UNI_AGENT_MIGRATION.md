@@ -9,7 +9,7 @@ This project now uses a local `src/` source repository for P2A code and Uni-Agen
 - `src/p2a/`: P2A advantage reshape, bonus-map loading, and precompute utilities.
 - `src/env/`: local ARL SDK deployment glue, image routing, ARL-aware Uni-Agent loop adapter, and smoke/data helpers. The external `arl-env` SDK owns the `arl` import name.
 - `src/scripts/`: project helper scripts for baseline preparation and launch.
-- `src/uni-agent/`: Uni-Agent submodule. Its `origin` is the fork (`git@github.com:Siyuexi/uni-agent.git`), and `upstream` can point to `git@github.com:verl-project/uni-agent.git` when upstream sync is needed.
+- `src/uni-agent/`: pristine Uni-Agent submodule. Its `origin` is the fork mirror (`git@github.com:Siyuexi/uni-agent.git`), and `upstream` points to `git@github.com:verl-project/uni-agent.git` when upstream sync is needed.
 - `src/uni-agent/verl`: nested verl submodule required by Uni-Agent training scripts.
 - `src-backup/`: previous rLLM/TraceAnalyzer submodule. It is preserved as-is and should not be touched for the baseline migration.
 
@@ -26,7 +26,8 @@ Run the current ARL baseline path first, without P2A advantage reshape:
 4. Run `src/scripts/train_p2a.sh` with `P2A_BONUS_MAP_DIR` unset.
 
 P2A bonus-map instrumentation should be added only after the baseline can run end-to-end.
-Lightweight P2A rollout instrumentation is available but disabled by default; set
+Lightweight P2A rollout instrumentation is available but disabled by default. The
+local `env.agent_loop.ArlUniAgentLoop` adapter attaches it without submodule edits; set
 `UNI_AGENT_P2A_TRACE=1` before `src/scripts/uni_agent_arl.sh prepare` if you want
 per-step spans and parsed tool calls to be carried in rollout `extra_fields`.
 
@@ -64,34 +65,15 @@ Run these on the GPU server after entering the Python environment you want to us
 ```bash
 cd src
 git submodule update --init --recursive
-cd uni-agent
-pip install --no-deps -e ./verl
-pip install -e .
-pip install swe-rex loguru pydantic pydantic_settings aiohttp datasets ray orjson
-pip install arl-env==0.3.1  # required by the direct ARL SDK deployment path
-pip install git+https://github.com/R2E-Gym/R2E-Gym.git
+export CUDA_HOME=/usr/local/cuda-13.0
+export CUDA_PATH=$CUDA_HOME
+uv sync --locked --extra train --extra gpu
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --no-sync python scripts/check_uni_agent_runtime.py
 ```
 
-The exact CUDA/vLLM/SGLang/Megatron dependencies depend on the GPU server and the model recipe. Install those following the Uni-Agent/verl environment already used on that server.
-The R2E-Gym package is needed by `examples/data_preprocess/r2e_gym_subset_filtered.py` for `r2egym.commit_models.diff_classes.ParsedCommit`.
-
-For the fused Megatron/mbridge baseline, the current target is the Uni-Agent
-cu128 runtime rather than the generic cu130 uv environment:
-
-```bash
-cd src
-export P2A_CU128_CUDA_HOME=/usr/local/cuda-12.8
-bash scripts/setup_uni_agent_cu128_runtime.sh
-source .venv-cu128/p2a-cu128.env
-python scripts/check_uni_agent_runtime.py
-```
-
-The setup script follows `uni-agent/verl/docker/verl0.6-cu128-torch2.8.0-fa2.7.4`:
-torch 2.8.0/cu128, flash-attn 2.7.4.post1, TransformerEngine v2.2.1,
-Megatron-LM core_v0.13.0, and mbridge. `scripts/main.sh`,
-`scripts/train_p2a.sh`, and `scripts/ray_setup.sh` prefer `.venv-cu128` when it
-exists and stage that selected runtime to worker-local disk. `.venv` remains the
-uv-managed environment; do not run `uv sync` into `.venv-cu128`.
+The fused Megatron/mbridge launcher uses this uv-managed `.venv` and native CUDA
+13.0. `scripts/main.sh`, `scripts/train_p2a.sh`, and `scripts/ray_setup.sh`
+stage the selected venv to worker-local disk.
 
 ## One-Command Project Helper
 

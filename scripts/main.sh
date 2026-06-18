@@ -5,15 +5,17 @@ set -euo pipefail
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
 SRC_ROOT="${SCRIPT_SRC_ROOT}"
-source "${SRC_ROOT}/scripts/shared_hf.sh"
+source "${SRC_ROOT}/scripts/setup.sh"
 source "${SRC_ROOT}/scripts/stage_local_runtime.sh"
 cd "${SRC_ROOT}"
 
 unset PYTHONPATH PYTHONHOME
 unset RAY_ADDRESS
-unset P2A_BONUS_MAP_DIR P2A_M_MAX P2A_TRACKING_MODE
+unset P2A_BONUS_MAP_DIR P2A_M_MAX P2A_TRACKING_MODE P2A_CREDIT_GRANULARITY
 unset P2A_EVAL_BONUS_MAP_DIR P2A_EVAL_DETAILS_DIR P2A_EVAL_NEAR_THRESHOLD
 unset UNI_AGENT_P2A_TRACE
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.0}"
+export CUDA_PATH="${CUDA_PATH:-${CUDA_HOME}}"
 
 P2A_VENV_DIR="$(p2a_runtime_venv_rel "${SCRIPT_SRC_ROOT}")"
 export P2A_VENV_DIR
@@ -23,31 +25,14 @@ export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
 export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
 p2a_source_runtime_profile "${UV_PROJECT_ENVIRONMENT}"
 if [[ -z "${P2A_SYNC_DEPS+x}" ]]; then
-  if [[ "${P2A_VENV_DIR}" == ".venv-cu128" ]]; then
-    P2A_SYNC_DEPS=0
-  else
-    P2A_SYNC_DEPS=1
-  fi
+  P2A_SYNC_DEPS=1
 fi
 
 export RAY_DATA_HOME="${RAY_DATA_HOME:-${HOME}/verl}"
 export RAY_WORKER_HOSTS="${RAY_WORKER_HOSTS:-28.45.33.48 28.45.33.95 28.45.33.97}"
 export RAY_GCS_PORT="${RAY_GCS_PORT:-6379}"
 export RAY_SSH_OPTS="${RAY_SSH_OPTS:--p 36000 -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8}"
-default_data_dir() {
-  if [[ -n "${DATA:-}" ]]; then
-    local data_dir
-    data_dir="$(resolve_shared_path "${DATA}")"
-    mkdir -p "${data_dir}"
-    cd "${data_dir}" && pwd
-  else
-    local root
-    root="$(shared_hf_root)"
-    mkdir -p "${root}/datasets/p2a"
-    cd "${root}/datasets/p2a" && pwd
-  fi
-}
-export DATA="$(default_data_dir)"
+p2a_setup_init_data
 if [[ -n "${MODEL:-}" ]]; then
   export MODEL="$(resolve_shared_path "${MODEL}")"
 else
@@ -69,21 +54,7 @@ fi
 export DATA MODEL
 
 if [[ "${P2A_SYNC_DEPS:-1}" == "1" ]]; then
-  if [[ "${P2A_VENV_DIR}" == ".venv-cu128" ]]; then
-    echo "[baseline] ${P2A_VENV_DIR} is pip-managed by scripts/setup_uni_agent_cu128_runtime.sh; do not run uv sync into it." >&2
-    echo "[baseline] Set P2A_SYNC_DEPS=0 or use P2A_VENV_DIR=.venv for the uv-managed cu130 environment." >&2
-    exit 2
-  fi
-  UV_BIN="${UV_BIN:-$(command -v uv || true)}"
-  if [[ -z "${UV_BIN}" ]]; then
-    echo "[baseline] uv not found on PATH" >&2
-    exit 2
-  fi
-  if [[ "${P2A_REBUILD_VENV:-0}" == "1" || ! -x "${UV_PROJECT_ENVIRONMENT}/bin/python" ]]; then
-    "${UV_BIN}" python install --managed-python 3.11
-    "$("${UV_BIN}" python find --managed-python --no-project 3.11)" -m venv --clear --copies "${UV_PROJECT_ENVIRONMENT}"
-  fi
-  UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT}" "${UV_BIN}" sync --locked --extra train --extra gpu
+  p2a_setup_sync_deps train-gpu
 fi
 
 p2a_stage_local_runtime "${SCRIPT_SRC_ROOT}"
@@ -125,23 +96,9 @@ restart_ray_cluster() {
     bash "${SCRIPT_SRC_ROOT}/scripts/ray_setup.sh" "${head_ip}" restart-cluster
 }
 
-build_data() {
-  local target="$1"
-  shift
-  if [[ -f "${target}" ]]; then
-    echo "[baseline] data exists: ${target}"
-    return
-  fi
-  PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
-    "${PYTHON_BIN}" scripts/build_data.py "$@"
-}
-
-build_data "${DATA}/r2e_gym_subset_p2a.train.parquet" \
-  r2e --out "${DATA}/r2e_gym_subset_p2a.parquet"
-build_data "${DATA}/swe_bench_verified.parquet" \
-  swebench-verified --out "${DATA}/swe_bench_verified.parquet"
-build_data "${DATA}/swe_bench_verified_hard.parquet" \
-  swebench-hard --out "${DATA}/swe_bench_verified_hard.parquet"
+p2a_setup_ensure_dataset r2e-gym-subset
+p2a_setup_ensure_dataset swebench-verified
+p2a_setup_ensure_dataset swebench-hard
 
 restart_ray_cluster
 
@@ -165,4 +122,4 @@ bash scripts/train_p2a.sh
 #   P2A_EVAL_BONUS_MAP_DIR="${DATA}/eval_bonus_maps" bash scripts/precompute_eval_bonus_maps.sh
 #
 # Later, for P2A training, add:
-# P2A_BONUS_MAP_DIR=../../p2a/bonus_maps P2A_M_MAX=3.0
+# P2A_BONUS_MAP_DIR=../../p2a/bonus_maps P2A_M_MAX=3.0 P2A_CREDIT_GRANULARITY=step

@@ -29,6 +29,22 @@ If a dataset/model is already present there, scripts read it directly. If it is
 missing, the script downloads it from HuggingFace and saves it under that shared
 location.
 
+## Current capabilities
+
+This repo now has four mostly independent surfaces:
+
+| Surface | Use it for | Primary entry points |
+|---|---|---|
+| Data setup | Build R2E-Gym subset, SWE-bench Verified, and the default SWE-bench hard validation split. | `scripts/setup.sh data ...`, `scripts/build_data.py` |
+| P2A training | Run Uni-Agent baseline or P2A advantage reshaping on ARL/Ray. | `scripts/main.sh`, `scripts/train_p2a.sh` |
+| Graph diagnostics | Precompute dynamic/static bonus maps and score whether rollouts read the fault-propagation graph. | `scripts/precompute_eval_bonus_maps.sh`, `p2a.eval_fault_localization`, live `val-p2a/*` validation metrics |
+| Third-party baselines | Run an OpenAI-compatible external model through the same Uni-Agent + ARL SWE/R2E environment and produce rollout/localization artifacts. | `scripts/main_3rd.sh`, `scripts/third_party_eval.sh`, `config/third_party_eval.deepseek.example.yaml` |
+
+The shell scripts are layered deliberately: `scripts/setup.sh` owns idempotent
+data/dependency/map setup; `main.sh` and `main_3rd.sh` are high-level wrappers;
+the remaining scripts are lower-level runners or runtime checks for explicit
+control.
+
 ## Directory map
 
 ```
@@ -36,19 +52,32 @@ src/
   config/                     # ALL json/yaml config lives here
     startup_fixups.json       #   per-repo test-startup fixups (source patches + dep pins)
     bad_instances.json        #   R2E instances to exclude from training (skip-list)
+    third_party_eval.deepseek.example.yaml # third-party OpenAI-compatible model config template
   scripts/
     build_data.py             # SINGLE data builder: r2e | swebench-verified | swebench-hard | skip-list
     uni_agent_arl.sh          # prepare/data/smoke/debug launcher (ARL config)
+    setup.sh                  # idempotent data/dependency/eval-map setup helpers
     ray_setup.sh              # bring up Ray and smoke-check Ray Jobs
+    stage_local_runtime.sh    # copy checkout/venv to node-local runtime storage
     main.sh                   # one-shot baseline launcher
+    main_3rd.sh               # one-shot third-party OpenAI-compatible rollout baseline
     train_p2a.sh              # training launcher (baseline OR P2A)
+    third_party_eval.sh       # lower-level third-party rollout pass-through
+    precompute_eval_bonus_maps.sh # eval-map helper for validation diagnostics
+    check_deps_cpu.sh         # CPU dependency/import smoke check
+    check_uni_agent_runtime.py # GPU/runtime import smoke check
   p2a/
     core.py                   # bonus-map load + read->callgraph match + m(d)=m_max^(1-d) multiplier
     trainer.py                # apply_p2a_reshape: capture agent reads -> reshape advantage
     main.py                   # training entry; P2AFullyAsyncTrainer (vanilla if P2A_BONUS_MAP_DIR unset)
+    rollouter.py              # validation rollouter wrapper for live graph diagnostics
+    validation_metrics.py     # aggregate val-p2a/* localization metrics
+    third_party_eval.py       # OpenAI-compatible external model rollout harness
     test_setup.py             # startup_fixup_command(repo) — loads config/startup_fixups.json
     trace.py                  # instrumentation + call-graph build (bonus-map precompute)
     eval_fault_localization.py # offline eval rollout read->fault-localization metrics
+    hf_assets.py              # shared HuggingFace model/dataset path helpers
+    runtime_env.py            # Ray runtime-env path normalization helpers
     precompute/precompute_bonus_maps.py  # build bonus maps on the ARL backend
     skip_cases.py             # load_skip_ids() from config/bad_instances.json
   env/                        # ARL deployment + runtime (implements swe-rex AbstractRuntime; no swe-rex server)
@@ -67,41 +96,36 @@ git clone git@github.com:Siyuexi/TraceAnalyzer.git
 cd TraceAnalyzer
 git submodule update --init --recursive
 export UV_PYTHON_INSTALL_DIR=$PWD/.uv-python
+export CUDA_HOME=/usr/local/cuda-13.0
+export CUDA_PATH=$CUDA_HOME
 uv python install --managed-python 3.11
 "$(uv python find --managed-python --no-project 3.11)" -m venv --clear --copies .venv
 UV_PROJECT_ENVIRONMENT=$PWD/.venv uv sync --locked --extra train --extra gpu
 ```
 
-The `uv` path above is the generic locked environment. The fused Megatron /
-mbridge launcher used by `scripts/main.sh` should use the Uni-Agent cu128 stack
-instead:
+The `uv` path above is also the fused Megatron / mbridge training runtime.
+`scripts/main.sh`, `scripts/train_p2a.sh`, and `scripts/ray_setup.sh` default to
+`.venv` and native CUDA 13.0. Verify the runtime before launching a cluster job:
 
 ```bash
 cd TraceAnalyzer
 git submodule update --init --recursive
-export P2A_CU128_CUDA_HOME=/usr/local/cuda-12.8  # must be a CUDA 12.8 toolkit
-bash scripts/setup_uni_agent_cu128_runtime.sh
-source .venv-cu128/p2a-cu128.env
-python scripts/check_uni_agent_runtime.py
+export CUDA_HOME=/usr/local/cuda-13.0
+export CUDA_PATH=$CUDA_HOME
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --no-sync python scripts/check_uni_agent_runtime.py
 ```
 
-`scripts/setup_uni_agent_cu128_runtime.sh` builds `.venv-cu128` with the
-Uni-Agent reference versions:
+The locked GPU stack is:
 
 | Component | Version / source |
 |---|---|
-| CUDA toolkit used for builds | `P2A_CU128_CUDA_HOME` (`nvcc` release 12.8) |
-| PyTorch | `torch==2.8.0` from `https://download.pytorch.org/whl/cu128` |
-| torchvision / torchaudio | `0.23.0` / `2.8.0` from the same cu128 index |
-| flash-attn | `flash_attn==2.7.4.post1` |
-| TransformerEngine | `NVIDIA/TransformerEngine.git@v2.2.1` with `NVTE_FRAMEWORK=pytorch` |
-| Megatron-LM | `NVIDIA/Megatron-LM.git@core_v0.13.0`, editable/no-deps |
+| CUDA toolkit | `/usr/local/cuda-13.0` |
+| PyTorch | CUDA 13 wheels from `https://download.pytorch.org/whl/cu130` |
+| vLLM | `vllm==0.11.2` |
+| cupy | `cupy-cuda13x==13.6.0` |
+| TransformerEngine / Megatron | resolved by `uv sync --locked --extra train --extra gpu` |
 | mbridge | `git+https://github.com/ISEEKYAN/mbridge.git` |
-| vLLM | built from `vllm-project/vllm.git@v0.11.0` (PyPI wheels need glibc ≥ 2.29; TLinux has 2.28), dependency closure preinstalled; `P2A_CU128_VLLM_SPEC=vllm==0.11.0` uses the wheel on newer hosts |
 
-When `.venv-cu128` exists, the launchers prefer it automatically and skip `uv
-sync` by default so the cu130 lock cannot overwrite the cu128 stack. To force a
-specific runtime, set `P2A_VENV_DIR=.venv-cu128` or `P2A_VENV_DIR=.venv`.
 `scripts/ray_setup.sh` stages the selected venv to each node-local runtime path,
 so head and workers run the same Python stack.
 
@@ -156,6 +180,11 @@ PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl \
 
 Training maps default to `../../p2a/bonus_maps`; set `P2A_BONUS_MAP_DIR` to use a
 different read/write directory.
+
+Each generated map includes `call_graph_nodes`, `call_graph_edges`, and a
+per-node `source` snippet when the sandbox file can be read. The edge list is
+diagnostic schema for topology views; training still reshapes from node
+distances.
 
 Skip this step for a pure baseline run. P2A training reads these maps through
 `P2A_BONUS_MAP_DIR`.
@@ -266,10 +295,11 @@ One-shot baseline from the Ray head:
 bash scripts/main.sh
 ```
 
-`scripts/main.sh` stages code/runtime locally like the other launchers, restarts
-Ray through `scripts/ray_setup.sh`, and keeps default `DATA` / `MODEL` paths
-anchored at the shared checkout (`../../datasets/p2a` and `../../models/...`)
-instead of under `/tmp`. It defaults to the current GPU cluster
+`scripts/main.sh` stages code/runtime locally like the other launchers, calls
+`scripts/setup.sh` for idempotent dependency and data setup, restarts Ray through
+`scripts/ray_setup.sh`, and keeps default `DATA` / `MODEL` paths anchored at the
+shared checkout (`../../datasets/p2a` and `../../models/...`) instead of under
+`/tmp`. It defaults to the current GPU cluster
 (`HEAD_IP=28.45.32.245`, `RAY_WORKER_HOSTS="28.45.33.48 28.45.33.95 28.45.33.97"`,
 `RAY_GCS_PORT=6379`, `RAY_SSH_OPTS="-p 36000 ..."`). Override those env vars if
 the allocation changes. To submit to an already-running Ray cluster without a restart, set
@@ -296,12 +326,17 @@ TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet \
   P2A_EVAL_DETAILS_DIR=$DATA/eval_details \
   P2A_BONUS_MAP_DIR=../../p2a/bonus_maps \
   P2A_M_MAX=3.0 \
+  P2A_CREDIT_GRANULARITY=step \
   bash scripts/train_p2a.sh
 ```
 
+`P2A_CREDIT_GRANULARITY=step` is the default and preserves per-step reshape
+behavior. Set `P2A_CREDIT_GRANULARITY=block` to group adjacent same-purpose
+steps and apply credit to read blocks that touch the call graph.
+
 ### Step 8. Optional offline analysis
 
-For an already-dumped rollout file:
+For an already-dumped rollout file or dump directory:
 
 ```bash
 uv run python -m p2a.eval_fault_localization $ROLLOUT_JSONL \
@@ -310,9 +345,73 @@ uv run python -m p2a.eval_fault_localization $ROLLOUT_JSONL \
   --details-out $DATA/eval_faultloc_details.jsonl
 ```
 
+To build the static trace dashboard with summary cards, per-record drill-down,
+purpose-block/order/miracle diagnostics, and an expandable graph topology panel:
+
+```bash
+uv run python scripts/p2a_dashboard.py $ROLLOUT_JSONL \
+  --bonus-map-dir $DATA/eval_bonus_maps \
+  --out-dir $DATA/p2a_dashboard
+```
+
+Add `--watch --interval 30` when `$ROLLOUT_JSONL` is a live run directory and
+you want the same artifacts rebuilt while training writes new dumps.
+
 The offline `summary-out` and `details-out` files are post-hoc artifacts for
 inspecting dumped rollouts. Training and validation do not read them; live
 validation dashboards use `P2A_EVAL_BONUS_MAP_DIR`.
+
+### Step 9. Optional third-party model rollout baseline
+
+For a main-style smoke/default run, set the API key and run the wrapper. It
+defaults to `swebench-hard`, builds the parquet if missing, precomputes matching
+dependency/call-graph maps, and writes rollout + fault-localization artifacts
+under `$DATA/third_party/<dataset>/<model>/`:
+
+```bash
+export P2A_THIRD_PARTY_API_KEY=...
+export P2A_THIRD_PARTY_BASE_URL=https://apic1.ohmycdn.com/v1
+export P2A_THIRD_PARTY_MODEL=deepseek-v4-flash
+
+bash scripts/main_3rd.sh
+```
+
+Switch datasets with `THIRD_PARTY_DATASET=swebench-verified` or
+`THIRD_PARTY_DATASET=r2e-gym-subset`. Keep `P2A_THIRD_PARTY_LIMIT` small for
+smoke tests; set it higher, or to `all`, for a real baseline. The wrapper does
+not sync dependencies by default so it does not prune a shared training `.venv`;
+set `P2A_THIRD_PARTY_SYNC_DEPS=1` only when you intentionally want a core CPU
+sync in the active environment.
+
+The lower-level pass-through remains available when you want explicit control
+over every path and CLI flag:
+
+```bash
+export P2A_THIRD_PARTY_API_KEY=...
+export P2A_THIRD_PARTY_BASE_URL=https://apic1.ohmycdn.com/v1
+export P2A_THIRD_PARTY_MODEL=deepseek-v4-flash
+
+timeout 15m bash scripts/third_party_eval.sh \
+  --config config/third_party_eval.deepseek.example.yaml \
+  --data $DATA/swe_bench_verified_hard.parquet \
+  --out $DATA/third_party/deepseek_v4_flash_rollouts.jsonl \
+  --limit 1 \
+  --max-turns 3 \
+  --max-tokens 1024 \
+  --tool-install-timeout 300 \
+  --skip-tool-install str_replace_editor \
+  --bonus-map-dir $DATA/eval_bonus_maps
+```
+
+The harness uses Uni-Agent's `OpenAICompatibleChatModel`, the local ARL
+deployment adapter, and the same SWE/R2E reward specs as training. It writes
+`p2a_third_party_rollout_v1` JSONL with `messages`, structured tool calls,
+`p2a_step_traces`, reward details, and termination status. When
+`--bonus-map-dir` is set it also writes scorer details, a summary JSON, and a
+short Markdown localization baseline report. For smoke tests, `--max-turns`,
+`--max-tokens`, `--tool-install-timeout`, `--skip-tool-install`, the timeout
+overrides, and an outer shell `timeout` can bound the ARL/model spend without
+editing the checked-in config.
 
 ## What you configure yourself
 
@@ -325,8 +424,10 @@ These are knobs you set; the repo does not pin them:
 | Train / val data | `TRAIN_FILE` / `TEST_FILE` env vars (point at the parquets built above) |
 | Ray job target | `RAY_API_SERVER_ADDRESS` (Ray Jobs endpoint, usually `http://<ray-head-ip>:8265`) |
 | GPU / CPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (32-GPU 4×8 starter: `2 / 2 / 8`); `NUM_CPUS` is the Ray CPU resource advertised per node, default 64 |
-| Bonus maps (read + write) | `P2A_BONUS_MAP_DIR` — one dir for both precompute output and training input; default `../../p2a/bonus_maps`. Training treats it as the P2A on/off switch (unset = baseline). `P2A_M_MAX` sets strength. |
+| Bonus maps (read + write) | `P2A_BONUS_MAP_DIR` — one dir for both precompute output and training input; default `../../p2a/bonus_maps`. Training treats it as the P2A on/off switch (unset = baseline). `P2A_M_MAX` sets strength. `P2A_CREDIT_GRANULARITY=step|block` selects per-step or purpose-block credit. |
 | Eval fault-localization diagnostics | `P2A_EVAL_BONUS_MAP_DIR`, `P2A_EVAL_NEAR_THRESHOLD`, `P2A_EVAL_DETAILS_DIR`, `P2A_EVAL_BONUS_N_PARALLEL`, `P2A_EVAL_BONUS_LIMIT`, `P2A_EVAL_BONUS_OFFSET` |
+| Third-party provider baseline | `config/third_party_eval.deepseek.example.yaml` plus `P2A_THIRD_PARTY_BASE_URL`, `P2A_THIRD_PARTY_API_KEY`, `P2A_THIRD_PARTY_MODEL`; API keys stay in env vars, not git |
+| Third-party run scope | `THIRD_PARTY_DATASET`, `THIRD_PARTY_DATA_FILE`, `P2A_THIRD_PARTY_LIMIT`, `P2A_THIRD_PARTY_N_PARALLEL`, `P2A_THIRD_PARTY_RUN_TIMEOUT`, `P2A_THIRD_PARTY_BONUS_*` |
 | ARL gateway | `ARL_GATEWAY_URL` |
 | Hard-subset criterion | `--difficulties` flag of `build_data.py swebench-hard` (default = the `1-4 hours` / `>4 hours` difficulty set) |
 | R2E bad-case policy | `config/bad_instances.json` (pair-diag ARL gate evidence) |
@@ -353,6 +454,14 @@ reference for validation rollouts.
 | `graph_hit_rate_over_call_graphs` | Fraction whose reads hit any node in the eval call graph. |
 | `ground_truth_hit_rate_over_call_graphs` | Fraction whose reads hit a patched callable (`distance == 0`). |
 | `near_hit_rate_over_call_graphs` | Fraction whose best read distance is `<= --near-threshold` (default `0.5`). |
+| `avg_node_recall` / `avg_read_precision` / `avg_hit_f1` | Node-level hit recall, read precision, and F1 across scored rollouts. |
+| `avg_order_score` / `reverse_order_rate` | Kendall-style agreement between read order and movement from tests toward patched callables. |
+| `miracle_rate_over_gt_hits` | Fraction of ground-truth hits that jump directly to patched code before reading intermediate graph levels. |
+| `avg_block_order_score` / `block_miracle_rate_over_gt_hits` | Same order and miracle diagnostics after purpose-block segmentation. |
+| `block_achieve_rate` / `block_waste_rate` / `block_loop_rate` | Purpose-block outcomes, including repeated same-action loop blocks. |
+| `avg_block_efficiency_steps` | Average steps to first call-graph hit inside achieving read blocks. |
+| `achieving_block_step_share` / `wasted_block_step_share` / `loop_block_step_share` | Share of block-covered steps spent in each block outcome. |
+| `bad_pattern_trace_rate` / `error_spiral_rate` | Trace-level loop and repeated-error flags. |
 | `avg_min_distance_on_hits` | Lower is better; `0` means the model read the edited callable. |
 | `avg_best_positive_multiplier_on_hits` | The diagnostic P2A multiplier implied by the best read distance. |
 
@@ -370,8 +479,29 @@ val-p2a/swebench-hard/read_rate
 val-p2a/swebench-hard/graph_hit_rate_over_call_graphs
 val-p2a/swebench-hard/ground_truth_hit_rate_over_call_graphs
 val-p2a/swebench-hard/near_hit_rate_over_call_graphs
+val-p2a/swebench-hard/avg_node_recall
+val-p2a/swebench-hard/avg_read_precision
+val-p2a/swebench-hard/avg_hit_f1
+val-p2a/swebench-hard/order_defined_rate
+val-p2a/swebench-hard/reverse_order_rate
+val-p2a/swebench-hard/miracle_rate_over_gt_hits
+val-p2a/swebench-hard/block_order_defined_rate
+val-p2a/swebench-hard/block_reverse_order_rate
+val-p2a/swebench-hard/block_miracle_rate_over_gt_hits
+val-p2a/swebench-hard/avg_blocks_per_trace
+val-p2a/swebench-hard/block_achieve_rate
+val-p2a/swebench-hard/block_waste_rate
+val-p2a/swebench-hard/block_loop_rate
+val-p2a/swebench-hard/achieving_block_step_share
+val-p2a/swebench-hard/wasted_block_step_share
+val-p2a/swebench-hard/loop_block_step_share
+val-p2a/swebench-hard/bad_pattern_trace_rate
+val-p2a/swebench-hard/error_spiral_rate
 val-p2a/swebench-hard/avg_min_distance_on_hits
 val-p2a/swebench-hard/avg_best_positive_multiplier_on_hits
+val-p2a/swebench-hard/avg_order_score
+val-p2a/swebench-hard/avg_block_order_score
+val-p2a/swebench-hard/avg_block_efficiency_steps
 ```
 
 `P2A_EVAL_DETAILS_DIR` optionally writes per-case JSONL files named by validation

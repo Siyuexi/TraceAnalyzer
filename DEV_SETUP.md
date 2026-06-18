@@ -33,6 +33,8 @@ bash scripts/check_deps_cpu.sh --train  # + verl framework (heavy; downgrades nu
 ## GPU (training)
 ```bash
 cd src
+export CUDA_HOME=/usr/local/cuda-13.0
+export CUDA_PATH=$CUDA_HOME
 uv sync --locked --extra train --extra gpu
 ```
 GPU pins (vllm 0.8.5–0.12.0, flash-attn, torchvision, mbridge for Megatron, …) all come
@@ -40,24 +42,20 @@ from verl's own `extras_require`. vllm/flash-attn need a CUDA toolchain on the n
 Note: on a CPU-only `[train]` resolve, `transformers` floats to the latest; on the GPU
 `[train,gpu]` install, verl's `vllm` extra constrains it to a vllm-compatible version.
 
-### Fused Megatron cu128 runtime
+### Fused Megatron runtime
 
-For the Uni-Agent fused Megatron/mbridge path, use a separate pip-managed
-runtime instead of the cu130 `uv.lock` environment:
+For the Uni-Agent fused Megatron/mbridge path, use the same uv-managed `.venv`
+as the launcher:
 
 ```bash
 cd src
-export P2A_CU128_CUDA_HOME=/usr/local/cuda-12.8
-bash scripts/setup_uni_agent_cu128_runtime.sh
-source .venv-cu128/p2a-cu128.env
-python scripts/check_uni_agent_runtime.py
+export CUDA_HOME=/usr/local/cuda-13.0
+export CUDA_PATH=$CUDA_HOME
+UV_PROJECT_ENVIRONMENT=$PWD/.venv uv run --no-sync python scripts/check_uni_agent_runtime.py
 ```
 
-This creates `.venv-cu128` with torch 2.8.0/cu128, flash-attn 2.7.4.post1,
-TransformerEngine v2.2.1, Megatron-LM core_v0.13.0, and mbridge. The training
-launchers prefer `.venv-cu128` when it exists and stage that exact venv to Ray
-workers. Do not run `uv sync` into `.venv-cu128`; rebuild it with the setup
-script if the cu128 stack changes.
+The training launchers default to `.venv`, set CUDA 13.0 as the runtime CUDA
+home, and stage that venv to Ray workers.
 
 ## Shared HuggingFace assets
 

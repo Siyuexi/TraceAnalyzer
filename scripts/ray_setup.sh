@@ -34,6 +34,8 @@ SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SHARED_SRC_ROOT="$(cd "${P2A_SHARED_SRC_ROOT:-${SCRIPT_SRC_ROOT}}" && pwd)"
 SRC_ROOT="${SHARED_SRC_ROOT}"
 cd "${SHARED_SRC_ROOT}"
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.0}"
+export CUDA_PATH="${CUDA_PATH:-${CUDA_HOME}}"
 
 MASTER_IP="$1"
 if [[ -z "${MASTER_IP}" ]]; then
@@ -214,7 +216,7 @@ remote_node() {
   # Workers enter through the shared source, then stage their own local runtime if enabled.
   ssh ${RAY_SSH_OPTS:--o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8} \
     "${host}" \
-    "cd '${SHARED_SRC_ROOT}' && RAY_GCS_PORT='${RAY_GCS_PORT}' RAY_DASHBOARD_PORT='${RAY_DASHBOARD_PORT}' NUM_GPUS='${NUM_GPUS}' NUM_CPUS='${NUM_CPUS}' P2A_STAGE_LOCAL_RUNTIME='${P2A_STAGE_LOCAL_RUNTIME:-${P2A_LOCAL_RUNTIME:-0}}' P2A_LOCAL_ROOT='${P2A_LOCAL_ROOT:-/tmp/p2a-traceanalyzer}' P2A_LOCAL_SRC_ROOT='${P2A_LOCAL_SRC_ROOT:-}' P2A_FORCE_STAGE_LOCAL_RUNTIME='${P2A_FORCE_STAGE_LOCAL_RUNTIME:-0}' P2A_VENV_DIR='${P2A_VENV_DIR}' bash scripts/ray_setup.sh '${MASTER_IP}' '${mode}'"
+    "cd '${SHARED_SRC_ROOT}' && CUDA_HOME='${CUDA_HOME}' CUDA_PATH='${CUDA_PATH}' RAY_GCS_PORT='${RAY_GCS_PORT}' RAY_DASHBOARD_PORT='${RAY_DASHBOARD_PORT}' NUM_GPUS='${NUM_GPUS}' NUM_CPUS='${NUM_CPUS}' P2A_STAGE_LOCAL_RUNTIME='${P2A_STAGE_LOCAL_RUNTIME:-${P2A_LOCAL_RUNTIME:-0}}' P2A_LOCAL_ROOT='${P2A_LOCAL_ROOT:-/tmp/p2a-traceanalyzer}' P2A_LOCAL_SRC_ROOT='${P2A_LOCAL_SRC_ROOT:-}' P2A_FORCE_STAGE_LOCAL_RUNTIME='${P2A_FORCE_STAGE_LOCAL_RUNTIME:-0}' P2A_VENV_DIR='${P2A_VENV_DIR}' bash scripts/ray_setup.sh '${MASTER_IP}' '${mode}'"
 }
 
 restart_cluster() {

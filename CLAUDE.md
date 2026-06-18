@@ -35,6 +35,9 @@ touching this tree. The research-level `CLAUDE.md` is at the repo root.
    import, do not copy. `swe-rex` is Uni-Agent's own runtime interface — required,
    not removable (we implement its `AbstractRuntime` for ARL; we do not run a
    swe-rex server).
+6. **Training runtime = uv-managed `.venv` on native CUDA 13.0.** Launchers default
+   to `/usr/local/cuda-13.0` and the locked cu130 stack; do not add a parallel
+   pip-managed runtime path.
 
 ## Fixups & skip-list
 

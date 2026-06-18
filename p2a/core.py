@@ -19,6 +19,7 @@ Tracking modes:
 import json
 import os
 import re
+from typing import Any
 
 
 class BonusMapStore:
@@ -372,6 +373,103 @@ def parse_read_actions_from_tool_calls(tool_calls: list[dict]) -> list[dict]:
                 reads.extend(_parse_bash_read_commands_from_str(cmd))
 
     return reads
+
+
+def _tool_call_function(tool_call: Any) -> tuple[str, dict]:
+    if not isinstance(tool_call, dict):
+        return "", {}
+    func = tool_call.get("function", {})
+    if not isinstance(func, dict):
+        return "", {}
+    name = str(func.get("name", "") or "")
+    args_raw = func.get("arguments", {})
+    if isinstance(args_raw, str):
+        try:
+            args_raw = json.loads(args_raw)
+        except (json.JSONDecodeError, ValueError):
+            args_raw = {}
+    return name, args_raw if isinstance(args_raw, dict) else {}
+
+
+def _primary_tool_call(step_trace: dict) -> dict | None:
+    tool_calls = step_trace.get("tool_calls") or []
+    if not isinstance(tool_calls, list) or not tool_calls:
+        return None
+    first = tool_calls[0]
+    return first if isinstance(first, dict) else None
+
+
+def reads_from_step_trace(step_trace: dict, tracking_mode: str = "view_and_bash") -> list[dict]:
+    reads: list[dict] = []
+    tool_calls = step_trace.get("tool_calls") or []
+    if isinstance(tool_calls, list) and tool_calls:
+        reads.extend(parse_read_actions_from_tool_calls(tool_calls))
+    response_text = step_trace.get("response_text") or step_trace.get("response") or step_trace.get("assistant_response")
+    if isinstance(response_text, str) and response_text:
+        reads.extend(parse_read_actions(response_text, tracking_mode=tracking_mode))
+    return reads
+
+
+def normalize_action(step_trace: dict, tracking_mode: str = "view_and_bash") -> dict:
+    """Normalize one step trace to a tool-agnostic action family and target."""
+    if not isinstance(step_trace, dict):
+        return {"family": "other", "target_path": None}
+
+    tool_call = _primary_tool_call(step_trace)
+    if tool_call is None:
+        return {"family": "other", "target_path": None}
+
+    name, args = _tool_call_function(tool_call)
+    command = str(args.get("command", "") or "")
+    path = args.get("path")
+    if isinstance(path, str) and path:
+        target_path = _normalize_path(path)
+    else:
+        target_path = None
+
+    if name in {"str_replace_editor", "file_editor"}:
+        if command == "view":
+            return {"family": "read", "target_path": target_path}
+        if command:
+            return {"family": "edit", "target_path": target_path}
+
+    if name == "execute_bash":
+        reads = parse_read_actions_from_tool_calls([tool_call]) if tracking_mode == "view_and_bash" else []
+        if reads:
+            targets = {read["file_path"] for read in reads}
+            return {"family": "read", "target_path": sorted(targets)[0] if len(targets) == 1 else None}
+        return {"family": "exec", "target_path": None}
+
+    if parse_read_actions_from_tool_calls([tool_call]):
+        return {"family": "read", "target_path": target_path}
+    return {"family": "other", "target_path": target_path}
+
+
+def segment_purpose_blocks(step_traces: list[dict], tracking_mode: str = "view_and_bash") -> list[dict]:
+    """Segment consecutive same-family/same-target steps into purpose blocks."""
+    blocks: list[dict] = []
+    current: dict | None = None
+    for trace_idx, trace in enumerate(step_traces):
+        action = normalize_action(trace, tracking_mode=tracking_mode)
+        family = action["family"]
+        target_path = action["target_path"]
+        step_idx = trace.get("step_idx", trace_idx) if isinstance(trace, dict) else trace_idx
+        if (
+            current is None
+            or current["family"] != family
+            or current["target_path"] != target_path
+        ):
+            current = {
+                "family": family,
+                "target_path": target_path,
+                "step_indices": [step_idx],
+                "trace_indices": [trace_idx],
+            }
+            blocks.append(current)
+        else:
+            current["step_indices"].append(step_idx)
+            current["trace_indices"].append(trace_idx)
+    return blocks
 
 
 def _parse_bash_read_commands_from_str(cmd: str) -> list[dict]:
