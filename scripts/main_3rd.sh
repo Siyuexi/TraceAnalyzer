@@ -11,6 +11,8 @@ usage() {
   cat <<'EOF'
 Usage:
   bash scripts/main_3rd.sh
+  bash scripts/main_3rd.sh --batch config/third_party_batch.example.yaml
+  bash scripts/main_3rd.sh --batch .secrets/internal_api_batch.yaml
 
 Model config:
   config/third_party_eval.deepseek.example.yaml
@@ -26,12 +28,19 @@ Common overrides:
   P2A_THIRD_PARTY_PRECOMPUTE_MAPS=1
   P2A_THIRD_PARTY_SYNC_DEPS=0
   P2A_THIRD_PARTY_RUN_TIMEOUT=15m
+  P2A_THIRD_PARTY_DB=data/evals/traces.sqlite
+  P2A_THIRD_PARTY_EXPERIMENT_ID=third-party-smoke
 
 Outputs:
   $DATA/third_party/<dataset>/<model>/rollouts.jsonl
   $DATA/third_party/<dataset>/<model>/summary.json
   $DATA/third_party/<dataset>/<model>/details.jsonl
   $DATA/third_party/<dataset>/<model>/report.md
+  data/evals/traces.sqlite (unless P2A_THIRD_PARTY_DB=0)
+
+Batch outputs:
+  storage.db from the batch config, default data/evals/traces.sqlite
+  storage.artifacts_dir/<experiment_id>/<stage>/<dataset>/<model>/
 EOF
 }
 
@@ -45,6 +54,22 @@ export UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/uv-cache}"
 export P2A_DEPLOYMENT="${P2A_DEPLOYMENT:-arl}"
 export UNI_AGENT_P2A_TRACE="${UNI_AGENT_P2A_TRACE:-1}"
 export ARL_GATEWAY_URL="${ARL_GATEWAY_URL:-http://118.145.201.106:80}"
+
+if [[ "${1:-}" == "--batch" ]]; then
+  if [[ -z "${2:-}" ]]; then
+    echo "[third-party] --batch requires a config path" >&2
+    usage >&2
+    exit 2
+  fi
+  shift
+  exec uv run python -m p2a.third_party_batch --config "$@"
+fi
+
+if [[ $# -gt 0 ]]; then
+  echo "[third-party] unknown argument: $1" >&2
+  usage >&2
+  exit 2
+fi
 
 THIRD_PARTY_DATASET="${THIRD_PARTY_DATASET:-swebench-hard}"
 P2A_THIRD_PARTY_CONFIG="${P2A_THIRD_PARTY_CONFIG:-config/third_party_eval.deepseek.example.yaml}"
@@ -62,6 +87,7 @@ P2A_THIRD_PARTY_BONUS_N_PARALLEL="${P2A_THIRD_PARTY_BONUS_N_PARALLEL:-4}"
 P2A_THIRD_PARTY_BONUS_LIMIT="${P2A_THIRD_PARTY_BONUS_LIMIT:-${P2A_THIRD_PARTY_LIMIT}}"
 P2A_THIRD_PARTY_BONUS_OFFSET="${P2A_THIRD_PARTY_BONUS_OFFSET:-${P2A_THIRD_PARTY_OFFSET}}"
 P2A_THIRD_PARTY_RUN_TIMEOUT="${P2A_THIRD_PARTY_RUN_TIMEOUT:-15m}"
+P2A_THIRD_PARTY_DB="${P2A_THIRD_PARTY_DB:-data/evals/traces.sqlite}"
 
 p2a_setup_select_dataset "${THIRD_PARTY_DATASET}" "${THIRD_PARTY_DATA_FILE:-}"
 
@@ -112,6 +138,14 @@ run_cmd=(
 )
 if [[ -n "${P2A_THIRD_PARTY_LIMIT}" ]]; then
   run_cmd+=(--limit "${P2A_THIRD_PARTY_LIMIT}")
+fi
+if [[ -n "${P2A_THIRD_PARTY_DB}" && "${P2A_THIRD_PARTY_DB}" != "0" ]]; then
+  run_cmd+=(
+    --cache-db "${P2A_THIRD_PARTY_DB}"
+    --experiment-id "${P2A_THIRD_PARTY_EXPERIMENT_ID:-third-party-${DATASET_SLUG}}"
+    --dataset-name "${DATASET_SLUG}"
+    --model-label "${MODEL_SLUG}"
+  )
 fi
 for tool_name in ${P2A_THIRD_PARTY_SKIP_TOOL_INSTALL}; do
   run_cmd+=(--skip-tool-install "${tool_name}")

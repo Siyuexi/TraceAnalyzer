@@ -376,6 +376,27 @@ export P2A_THIRD_PARTY_MODEL=deepseek-v4-flash
 bash scripts/main_3rd.sh
 ```
 
+For API batches, put a non-secret config under `config/` or a private one under
+`.secrets/`, then run the same entry point in batch mode:
+
+```bash
+bash scripts/main_3rd.sh --batch config/third_party_batch.example.yaml
+bash scripts/main_3rd.sh --batch .secrets/internal_api_batch.yaml
+```
+
+Batch configs explicitly choose `provider.source` (`openai_compatible` or
+`internal_api`) and `models[]`. The committed example uses dummy model names
+only. The real internal adapter and internal model lists stay ignored under
+`.secrets/`; if the adapter is missing, batch mode fails before launching cells.
+Batch results are upserted into the unified SQLite cache configured by
+`storage.db` (default `data/evals/traces.sqlite`) and can be watched live:
+
+```bash
+uv run python scripts/watch_third_party_batch.py \
+  --db data/evals/traces.sqlite \
+  --experiment-id public-swebench-hard-demo
+```
+
 Switch datasets with `THIRD_PARTY_DATASET=swebench-verified` or
 `THIRD_PARTY_DATASET=r2e-gym-subset`. Keep `P2A_THIRD_PARTY_LIMIT` small for
 smoke tests; set it higher, or to `all`, for a real baseline. The wrapper does

@@ -7,3 +7,4 @@ __pycache__/
 .p2a-build/
 *.egg-info/
 outputs/
+data/

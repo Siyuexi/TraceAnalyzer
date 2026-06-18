@@ -1,0 +1,643 @@
+"""SQLite cache for API/local evaluation rollouts and trace-quality metrics."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+from p2a.eval_fault_localization import _json_default, iter_records
+
+
+SCHEMA_VERSION = 1
+DONE_STATUS = "done"
+ERROR_STATUS = "error"
+PENDING_STATUS = "pending"
+RUNNING_STATUS = "running"
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def json_dumps(value: Any) -> str:
+    return json.dumps(value, default=_json_default, ensure_ascii=False, sort_keys=True)
+
+
+def json_loads(value: str | None, default: Any = None) -> Any:
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
+
+
+def connect(db_path: Path | str) -> sqlite3.Connection:
+    path = Path(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def init_db(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS experiments (
+          experiment_id TEXT NOT NULL,
+          provider_source TEXT NOT NULL,
+          dataset TEXT NOT NULL,
+          config_snapshot TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (experiment_id, provider_source, dataset)
+        );
+
+        CREATE TABLE IF NOT EXISTS run_cells (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          experiment_id TEXT NOT NULL,
+          provider_source TEXT NOT NULL,
+          model_api_name TEXT NOT NULL,
+          model_label TEXT NOT NULL,
+          dataset TEXT NOT NULL,
+          instance_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          run_id TEXT,
+          artifact_rollouts TEXT,
+          artifact_details TEXT,
+          started_at TEXT,
+          ended_at TEXT,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (experiment_id, provider_source, model_api_name, dataset, instance_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS raw_rollouts (
+          run_id TEXT PRIMARY KEY,
+          cell_id INTEGER NOT NULL UNIQUE REFERENCES run_cells(id) ON DELETE CASCADE,
+          messages_json TEXT,
+          trajectory_json TEXT,
+          p2a_step_traces_json TEXT,
+          final_response TEXT,
+          reward_json TEXT,
+          resolved INTEGER,
+          token_usage_json TEXT,
+          cache_metrics_json TEXT,
+          rollout_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS quantitative_metrics (
+          cell_id INTEGER PRIMARY KEY REFERENCES run_cells(id) ON DELETE CASCADE,
+          reward REAL,
+          resolved INTEGER,
+          p2a_read INTEGER,
+          call_graph_hit INTEGER,
+          ground_truth_hit INTEGER,
+          near_hit INTEGER,
+          min_distance REAL,
+          turns INTEGER,
+          tool_calls INTEGER,
+          wall_time REAL,
+          input_tokens REAL,
+          output_tokens REAL,
+          reasoning_tokens REAL,
+          cache_hit_tokens REAL,
+          cache_write_tokens REAL,
+          cost REAL,
+          metrics_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_run_cells_exp_model
+          ON run_cells (experiment_id, provider_source, dataset, model_label);
+        CREATE INDEX IF NOT EXISTS idx_run_cells_status
+          ON run_cells (experiment_id, provider_source, dataset, status);
+        """
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+        (SCHEMA_VERSION, utc_now()),
+    )
+    conn.commit()
+
+
+def ensure_db(db_path: Path | str) -> sqlite3.Connection:
+    conn = connect(db_path)
+    init_db(conn)
+    return conn
+
+
+def upsert_experiment(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str,
+    provider_source: str,
+    dataset: str,
+    config_snapshot: dict[str, Any] | str,
+) -> None:
+    now = utc_now()
+    snapshot = config_snapshot if isinstance(config_snapshot, str) else json_dumps(config_snapshot)
+    conn.execute(
+        """
+        INSERT INTO experiments(experiment_id, provider_source, dataset, config_snapshot, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(experiment_id, provider_source, dataset) DO UPDATE SET
+          config_snapshot = excluded.config_snapshot,
+          updated_at = excluded.updated_at
+        """,
+        (experiment_id, provider_source, dataset, snapshot, now, now),
+    )
+
+
+def upsert_planned_cells(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str,
+    provider_source: str,
+    model_api_name: str,
+    model_label: str,
+    dataset: str,
+    instance_ids: Iterable[str],
+) -> None:
+    now = utc_now()
+    rows = [
+        (
+            experiment_id,
+            provider_source,
+            model_api_name,
+            model_label,
+            dataset,
+            instance_id,
+            PENDING_STATUS,
+            now,
+            now,
+        )
+        for instance_id in instance_ids
+    ]
+    conn.executemany(
+        """
+        INSERT INTO run_cells(
+          experiment_id, provider_source, model_api_name, model_label, dataset,
+          instance_id, status, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(experiment_id, provider_source, model_api_name, dataset, instance_id) DO UPDATE SET
+          model_label = excluded.model_label,
+          updated_at = excluded.updated_at
+        """,
+        rows,
+    )
+
+
+def mark_cells_running(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str,
+    provider_source: str,
+    model_api_name: str,
+    dataset: str,
+    instance_ids: Iterable[str],
+) -> None:
+    now = utc_now()
+    conn.executemany(
+        """
+        UPDATE run_cells
+        SET status = ?, started_at = COALESCE(started_at, ?), updated_at = ?
+        WHERE experiment_id = ?
+          AND provider_source = ?
+          AND model_api_name = ?
+          AND dataset = ?
+          AND instance_id = ?
+          AND status != ?
+        """,
+        [
+            (
+                RUNNING_STATUS,
+                now,
+                now,
+                experiment_id,
+                provider_source,
+                model_api_name,
+                dataset,
+                instance_id,
+                DONE_STATUS,
+            )
+            for instance_id in instance_ids
+        ],
+    )
+
+
+def completed_instance_ids(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str,
+    provider_source: str,
+    model_api_name: str,
+    dataset: str,
+) -> set[str]:
+    rows = conn.execute(
+        """
+        SELECT instance_id
+        FROM run_cells
+        WHERE experiment_id = ?
+          AND provider_source = ?
+          AND model_api_name = ?
+          AND dataset = ?
+          AND status = ?
+        """,
+        (experiment_id, provider_source, model_api_name, dataset, DONE_STATUS),
+    ).fetchall()
+    return {str(row["instance_id"]) for row in rows}
+
+
+def _bool_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return 1 if bool(value) else 0
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    return None
+
+
+def _tool_call_count(record: dict[str, Any]) -> int:
+    total = 0
+    for trace in record.get("p2a_step_traces") or []:
+        if isinstance(trace, dict):
+            calls = trace.get("tool_calls") or []
+            if isinstance(calls, list):
+                total += len(calls)
+    return total
+
+
+def _reward_number(record: dict[str, Any]) -> float | None:
+    value = record.get("reward")
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    return _number(value)
+
+
+def _cell_id(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str,
+    provider_source: str,
+    model_api_name: str,
+    model_label: str,
+    dataset: str,
+    instance_id: str,
+) -> int:
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO run_cells(
+          experiment_id, provider_source, model_api_name, model_label, dataset,
+          instance_id, status, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(experiment_id, provider_source, model_api_name, dataset, instance_id) DO UPDATE SET
+          model_label = excluded.model_label,
+          updated_at = excluded.updated_at
+        """,
+        (
+            experiment_id,
+            provider_source,
+            model_api_name,
+            model_label,
+            dataset,
+            instance_id,
+            PENDING_STATUS,
+            now,
+            now,
+        ),
+    )
+    row = conn.execute(
+        """
+        SELECT id FROM run_cells
+        WHERE experiment_id = ?
+          AND provider_source = ?
+          AND model_api_name = ?
+          AND dataset = ?
+          AND instance_id = ?
+        """,
+        (experiment_id, provider_source, model_api_name, dataset, instance_id),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("failed to create or load run cell")
+    return int(row["id"])
+
+
+def upsert_rollout_record(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str,
+    provider_source: str,
+    model_api_name: str,
+    model_label: str,
+    dataset: str,
+    record: dict[str, Any],
+    detail: dict[str, Any] | None = None,
+    artifact_rollouts: Path | str | None = None,
+    artifact_details: Path | str | None = None,
+) -> None:
+    instance_id = str(record.get("instance_id") or (detail or {}).get("instance_id") or "")
+    if not instance_id:
+        raise ValueError("rollout record has no instance_id; cannot key DB cell")
+
+    now = utc_now()
+    run_id = str(record.get("run_id") or f"{experiment_id}:{provider_source}:{model_api_name}:{dataset}:{instance_id}")
+    cell_id = _cell_id(
+        conn,
+        experiment_id=experiment_id,
+        provider_source=provider_source,
+        model_api_name=model_api_name,
+        model_label=model_label,
+        dataset=dataset,
+        instance_id=instance_id,
+    )
+    status = ERROR_STATUS if record.get("error") else DONE_STATUS
+    conn.execute(
+        """
+        UPDATE run_cells
+        SET status = ?,
+            attempts = attempts + 1,
+            run_id = ?,
+            artifact_rollouts = ?,
+            artifact_details = ?,
+            ended_at = ?,
+            error = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            status,
+            run_id,
+            str(artifact_rollouts) if artifact_rollouts else None,
+            str(artifact_details) if artifact_details else None,
+            now,
+            str(record.get("error")) if record.get("error") else None,
+            now,
+            cell_id,
+        ),
+    )
+
+    token_usage = record.get("token_usage") if isinstance(record.get("token_usage"), dict) else {}
+    cache_metrics = record.get("metrics") if isinstance(record.get("metrics"), dict) else {}
+    conn.execute("DELETE FROM raw_rollouts WHERE cell_id = ? OR run_id = ?", (cell_id, run_id))
+    conn.execute(
+        """
+        INSERT INTO raw_rollouts(
+          run_id, cell_id, messages_json, trajectory_json, p2a_step_traces_json,
+          final_response, reward_json, resolved, token_usage_json, cache_metrics_json,
+          rollout_json, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id,
+            cell_id,
+            json_dumps(record.get("messages") or []),
+            json_dumps(record.get("trajectory") or []),
+            json_dumps(record.get("p2a_step_traces") or []),
+            record.get("response_text") or "",
+            json_dumps(record.get("reward")),
+            _bool_int(record.get("resolved")),
+            json_dumps(token_usage),
+            json_dumps(cache_metrics),
+            json_dumps(record),
+            now,
+        ),
+    )
+
+    turns = len(record.get("p2a_step_traces") or record.get("trajectory") or [])
+    metrics = {
+        "detail": detail or {},
+        "token_usage": token_usage,
+        "cache_metrics": cache_metrics,
+    }
+    conn.execute(
+        """
+        INSERT INTO quantitative_metrics(
+          cell_id, reward, resolved, p2a_read, call_graph_hit, ground_truth_hit,
+          near_hit, min_distance, turns, tool_calls, wall_time, input_tokens,
+          output_tokens, reasoning_tokens, cache_hit_tokens, cache_write_tokens,
+          cost, metrics_json, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(cell_id) DO UPDATE SET
+          reward = excluded.reward,
+          resolved = excluded.resolved,
+          p2a_read = excluded.p2a_read,
+          call_graph_hit = excluded.call_graph_hit,
+          ground_truth_hit = excluded.ground_truth_hit,
+          near_hit = excluded.near_hit,
+          min_distance = excluded.min_distance,
+          turns = excluded.turns,
+          tool_calls = excluded.tool_calls,
+          wall_time = excluded.wall_time,
+          input_tokens = excluded.input_tokens,
+          output_tokens = excluded.output_tokens,
+          reasoning_tokens = excluded.reasoning_tokens,
+          cache_hit_tokens = excluded.cache_hit_tokens,
+          cache_write_tokens = excluded.cache_write_tokens,
+          cost = excluded.cost,
+          metrics_json = excluded.metrics_json,
+          updated_at = excluded.updated_at
+        """,
+        (
+            cell_id,
+            _reward_number(record),
+            _bool_int(record.get("resolved")),
+            _bool_int((detail or {}).get("n_reads")),
+            _bool_int((detail or {}).get("hit_call_graph")),
+            _bool_int((detail or {}).get("hit_ground_truth")),
+            _bool_int((detail or {}).get("hit_near")),
+            _number((detail or {}).get("min_distance")),
+            turns,
+            _tool_call_count(record),
+            _number(record.get("wall_time") or record.get("execution_time")),
+            _number(token_usage.get("input_tokens")),
+            _number(token_usage.get("output_tokens")),
+            _number(token_usage.get("reasoning_tokens")),
+            _number(token_usage.get("cache_hit_tokens")),
+            _number(token_usage.get("cache_write_tokens")),
+            _number(token_usage.get("cost")),
+            json_dumps(metrics),
+            now,
+        ),
+    )
+
+
+def _details_by_instance(details_path: Path | None) -> dict[str, dict[str, Any]]:
+    if details_path is None or not details_path.exists():
+        return {}
+    details = {}
+    for item in iter_records(details_path):
+        instance_id = item.get("instance_id")
+        if instance_id:
+            details[str(instance_id)] = item
+    return details
+
+
+def ingest_artifacts(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str,
+    provider_source: str,
+    model_api_name: str,
+    model_label: str,
+    dataset: str,
+    rollouts_path: Path,
+    details_path: Path | None = None,
+) -> int:
+    details = _details_by_instance(details_path)
+    n_records = 0
+    for record in iter_records(rollouts_path):
+        instance_id = str(record.get("instance_id") or "")
+        upsert_rollout_record(
+            conn,
+            experiment_id=experiment_id,
+            provider_source=provider_source,
+            model_api_name=model_api_name,
+            model_label=model_label,
+            dataset=dataset,
+            record=record,
+            detail=details.get(instance_id),
+            artifact_rollouts=rollouts_path,
+            artifact_details=details_path,
+        )
+        n_records += 1
+    return n_records
+
+
+def _avg(values: list[float | None]) -> float | None:
+    real = [value for value in values if value is not None]
+    return sum(real) / len(real) if real else None
+
+
+def _rate(values: list[int | None]) -> float | None:
+    real = [value for value in values if value is not None]
+    return sum(real) / len(real) if real else None
+
+
+def aggregate_model_metrics(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str | None = None,
+    provider_source: str | None = None,
+    dataset: str | None = None,
+) -> list[dict[str, Any]]:
+    where = []
+    params: list[Any] = []
+    if experiment_id:
+        where.append("c.experiment_id = ?")
+        params.append(experiment_id)
+    if provider_source:
+        where.append("c.provider_source = ?")
+        params.append(provider_source)
+    if dataset:
+        where.append("c.dataset = ?")
+        params.append(dataset)
+    where_sql = "WHERE " + " AND ".join(where) if where else ""
+
+    rows = conn.execute(
+        f"""
+        SELECT
+          c.experiment_id,
+          c.provider_source,
+          c.dataset,
+          c.model_api_name,
+          c.model_label,
+          c.status,
+          c.error,
+          q.reward,
+          q.resolved,
+          q.p2a_read,
+          q.call_graph_hit,
+          q.ground_truth_hit,
+          q.near_hit,
+          q.min_distance,
+          q.turns,
+          q.tool_calls,
+          q.wall_time,
+          q.input_tokens,
+          q.output_tokens,
+          q.reasoning_tokens,
+          q.cache_hit_tokens,
+          q.cache_write_tokens,
+          q.cost
+        FROM run_cells c
+        LEFT JOIN quantitative_metrics q ON q.cell_id = c.id
+        {where_sql}
+        ORDER BY c.model_label, c.instance_id
+        """,
+        params,
+    ).fetchall()
+
+    groups: dict[tuple[str, str, str, str, str], list[sqlite3.Row]] = defaultdict(list)
+    for row in rows:
+        key = (
+            str(row["experiment_id"]),
+            str(row["provider_source"]),
+            str(row["dataset"]),
+            str(row["model_api_name"]),
+            str(row["model_label"]),
+        )
+        groups[key].append(row)
+
+    out = []
+    for (exp_id, source, ds, api_name, label), group in sorted(groups.items(), key=lambda item: item[0][-1]):
+        done = [row for row in group if row["status"] == DONE_STATUS]
+        errors = [row for row in group if row["status"] == ERROR_STATUS]
+        metric_rows = [row for row in done if row["turns"] is not None]
+        distances = [row["min_distance"] for row in metric_rows if row["min_distance"] is not None]
+        cache_hit = sum(float(row["cache_hit_tokens"] or 0) for row in metric_rows)
+        cache_write = sum(float(row["cache_write_tokens"] or 0) for row in metric_rows)
+        input_tokens = sum(float(row["input_tokens"] or 0) for row in metric_rows)
+        out.append(
+            {
+                "experiment_id": exp_id,
+                "provider_source": source,
+                "dataset": ds,
+                "model_api_name": api_name,
+                "model_label": label,
+                "target": len(group),
+                "done": len(done),
+                "errors": len(errors),
+                "pending": sum(1 for row in group if row["status"] in {PENDING_STATUS, RUNNING_STATUS}),
+                "resolved_rate": _rate([row["resolved"] for row in metric_rows]),
+                "reward_rate": _avg([row["reward"] for row in metric_rows]),
+                "p2a_read_rate": _rate([row["p2a_read"] for row in metric_rows]),
+                "call_graph_hit_rate": _rate([row["call_graph_hit"] for row in metric_rows]),
+                "ground_truth_hit_rate": _rate([row["ground_truth_hit"] for row in metric_rows]),
+                "near_hit_rate": _rate([row["near_hit"] for row in metric_rows]),
+                "avg_min_distance": (sum(float(v) for v in distances) / len(distances)) if distances else None,
+                "avg_turns": _avg([row["turns"] for row in metric_rows]),
+                "avg_tool_calls": _avg([row["tool_calls"] for row in metric_rows]),
+                "avg_wall_time": _avg([row["wall_time"] for row in metric_rows]),
+                "avg_input_tokens": _avg([row["input_tokens"] for row in metric_rows]),
+                "avg_output_tokens": _avg([row["output_tokens"] for row in metric_rows]),
+                "avg_reasoning_tokens": _avg([row["reasoning_tokens"] for row in metric_rows]),
+                "cache_hit_rate": (cache_hit / (input_tokens + cache_hit)) if cache_hit and (input_tokens + cache_hit) else None,
+                "cache_write_rate": (cache_write / (input_tokens + cache_write)) if cache_write and (input_tokens + cache_write) else None,
+                "total_cost": sum(float(row["cost"] or 0) for row in metric_rows) if metric_rows else None,
+            }
+        )
+    return out
