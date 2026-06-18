@@ -11,6 +11,7 @@ from p2a.third_party_eval import (
     apply_cli_overrides,
     build_dump_record,
     build_step_traces,
+    cache_rollouts,
     format_report,
     load_config,
     parse_limit_arg,
@@ -247,3 +248,49 @@ def test_format_report_contains_aggregate_and_instance_rows():
 
     assert "Third-Party P2A Localization Baseline" in report
     assert "| demo__abc123 | 1 | yes | yes | 0.0 | 0 |" in report
+
+
+def test_cache_rollouts_upserts_standard_third_party_artifacts(tmp_path):
+    rollout_path = tmp_path / "rollouts.jsonl"
+    details_path = tmp_path / "details.jsonl"
+    db_path = tmp_path / "traces.sqlite"
+    record = build_dump_record(
+        _row(),
+        run_id="run-cache",
+        model_name="demo-model",
+        base_url="https://example.test",
+        interaction_result=_interaction_result(),
+        reward_score=True,
+        reward_details={"resolved": True},
+    )
+    record["wall_time"] = 1.2
+    record["token_usage"] = {"input_tokens": 10, "output_tokens": 3, "cache_hit_tokens": 2}
+    rollout_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    details_path.write_text(
+        json.dumps(
+            {
+                "instance_id": "demo__abc123",
+                "n_reads": 1,
+                "hit_call_graph": True,
+                "hit_ground_truth": True,
+                "hit_near": True,
+                "min_distance": 0.0,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    n_cached = cache_rollouts(
+        db_path=db_path,
+        experiment_id="single",
+        provider_source_name="openai_compatible",
+        model_api_name="demo-model",
+        model_label="demo-model",
+        dataset_name="swebench-hard",
+        config_snapshot={"model": "demo-model"},
+        rollouts_path=rollout_path,
+        details_path=details_path,
+    )
+
+    assert n_cached == 1

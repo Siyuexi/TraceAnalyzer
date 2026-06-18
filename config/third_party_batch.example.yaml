@@ -1,0 +1,38 @@
+# Example batch config for API-backed Uni-Agent/P2A evaluation.
+# All model names are dummy placeholders. Keep real internal API adapters,
+# tokens, and private model lists under ignored .secrets/.
+provider:
+  source: openai_compatible  # openai_compatible | internal_api
+  # For internal_api, use an ignored adapter such as:
+  # adapter: .secrets/internal_api_adapter.py
+
+model:
+  base_url_env: P2A_THIRD_PARTY_BASE_URL
+  api_key_env: P2A_THIRD_PARTY_API_KEY
+  timeout: 300
+  sampling_params:
+    temperature: 0.0
+    max_tokens: 4096
+
+dataset:
+  name: swebench-hard
+
+experiment:
+  id: public-swebench-hard-demo
+  stage: smoke
+  limit: 500
+  offset: 0
+  max_turns: 20
+  run_timeout: 15m
+  per_model_concurrency: 8
+  model_parallelism: 2
+
+models:
+  - api_name: dummy-model-a
+    label: dummy-model-a
+  - api_name: dummy-model-b
+    label: dummy-model-b
+
+storage:
+  db: data/evals/traces.sqlite
+  artifacts_dir: data/third_party

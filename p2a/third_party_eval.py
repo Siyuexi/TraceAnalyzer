@@ -15,7 +15,9 @@ import uuid
 
 import yaml
 
+from p2a.api_providers import make_chat_model, normalize_provider_config, provider_source
 from p2a.core import BonusMapStore
+from p2a.eval_cache import ensure_db, ingest_artifacts, upsert_experiment
 from p2a.eval_fault_localization import (
     _json_default,
     iter_records,
@@ -63,6 +65,7 @@ DEFAULT_CONFIG = {
         "m_max": 3.0,
     },
 }
+_REDACT_KEYS = ("api_key", "apikey", "token", "secret", "password", "authorization")
 
 
 def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
@@ -73,6 +76,21 @@ def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, An
         else:
             result[key] = value
     return result
+
+
+def _redact_config(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if any(token in lowered for token in _REDACT_KEYS):
+                redacted[key] = "<redacted>"
+            else:
+                redacted[key] = _redact_config(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_config(item) for item in value]
+    return value
 
 
 def load_config(path: Path | None) -> dict[str, Any]:
@@ -127,12 +145,13 @@ def _env_or_value(config: dict[str, Any], key: str, env_key: str | None = None) 
 
 def resolve_model_config(config: dict[str, Any]) -> dict[str, Any]:
     model_cfg = dict(config.get("model") or {})
+    provider_cfg = normalize_provider_config(config.get("provider"))
     base_url = _env_or_value(model_cfg, "base_url")
     api_key = _env_or_value(model_cfg, "api_key")
     model_name = _env_or_value(model_cfg, "model_name")
-    if not base_url:
+    if provider_cfg["source"] == "openai_compatible" and not base_url:
         raise ValueError("model.base_url is required, either directly or via model.base_url_env")
-    if not api_key:
+    if provider_cfg["source"] == "openai_compatible" and not api_key:
         raise ValueError("model.api_key is required via model.api_key_env; do not commit API keys")
     if not model_name:
         raise ValueError("model.model_name is required, either directly or via model.model_name_env")
@@ -279,10 +298,8 @@ def _make_tools(agent_cfg: dict[str, Any]):
     )
 
 
-def _make_model(model_cfg: dict[str, Any]):
-    from uni_agent.interaction import OpenAICompatibleChatModel
-
-    return OpenAICompatibleChatModel(**model_cfg)
+def _make_model(model_cfg: dict[str, Any], provider_cfg: dict[str, Any] | None = None):
+    return make_chat_model(model_cfg, provider_cfg)
 
 
 def _make_interaction(*, run_id: str, env: Any, model: Any, tools_manager: Any, messages: list[dict], agent_cfg: dict):
@@ -401,12 +418,13 @@ def build_dump_record(
         "termination_reason": termination_reason,
         "execution_time": (interaction_result or {}).get("execution_time"),
         "metrics": _as_jsonable((interaction_result or {}).get("rollout_cache", {}).get("metrics", {})),
+        "token_usage": _as_jsonable((interaction_result or {}).get("rollout_cache", {}).get("token_usage", {})),
         "extra_info": extra_info,
         "error": error,
     }
 
 
-async def run_provider_smoke(model_cfg: dict[str, Any]) -> dict[str, Any]:
+async def run_provider_smoke(model_cfg: dict[str, Any], provider_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     model = _make_model(
         {
             **model_cfg,
@@ -414,7 +432,8 @@ async def run_provider_smoke(model_cfg: dict[str, Any]) -> dict[str, Any]:
                 **dict(model_cfg.get("sampling_params") or {}),
                 "max_tokens": min(int((model_cfg.get("sampling_params") or {}).get("max_tokens", 16)), 16),
             },
-        }
+        },
+        provider_cfg,
     )
     messages = [
         {"role": "system", "content": "You are a terse smoke-test assistant."},
@@ -431,7 +450,13 @@ async def run_provider_smoke(model_cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def run_one(row: dict[str, Any], *, model_cfg: dict[str, Any], agent_cfg: dict[str, Any]) -> dict[str, Any]:
+async def run_one(
+    row: dict[str, Any],
+    *,
+    model_cfg: dict[str, Any],
+    agent_cfg: dict[str, Any],
+    provider_cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     instance_id = _instance_id(row)
     run_id = f"p2a-third-party-{uuid.uuid4()}"
     env = None
@@ -448,7 +473,7 @@ async def run_one(row: dict[str, Any], *, model_cfg: dict[str, Any], agent_cfg: 
         env = _make_env(row, instance_id=instance_id, deployment=agent_cfg.get("deployment", "arl"))
         run_id = getattr(getattr(env, "deployment", None), "run_id", run_id)
         tools_manager = _make_tools(agent_cfg)
-        model = _make_model(model_cfg)
+        model = _make_model(model_cfg, provider_cfg)
         model.set_tools_schemas(tools_manager.tools_schemas)
         interaction = _make_interaction(
             run_id=run_id,
@@ -484,7 +509,7 @@ async def run_one(row: dict[str, Any], *, model_cfg: dict[str, Any], agent_cfg: 
         row,
         run_id=run_id,
         model_name=model_cfg["model_name"],
-        base_url=model_cfg["base_url"],
+        base_url=model_cfg.get("base_url") or provider_source(provider_cfg),
         interaction_result=interaction_result,
         reward_score=reward_score,
         reward_details=reward_details,
@@ -494,12 +519,19 @@ async def run_one(row: dict[str, Any], *, model_cfg: dict[str, Any], agent_cfg: 
     return record
 
 
-async def run_batch(rows: list[dict[str, Any]], *, model_cfg: dict[str, Any], agent_cfg: dict[str, Any], n_parallel: int) -> list[dict[str, Any]]:
+async def run_batch(
+    rows: list[dict[str, Any]],
+    *,
+    model_cfg: dict[str, Any],
+    agent_cfg: dict[str, Any],
+    n_parallel: int,
+    provider_cfg: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     semaphore = asyncio.Semaphore(max(n_parallel, 1))
 
     async def guarded(row: dict[str, Any]) -> dict[str, Any]:
         async with semaphore:
-            return await run_one(row, model_cfg=model_cfg, agent_cfg=agent_cfg)
+            return await run_one(row, model_cfg=model_cfg, agent_cfg=agent_cfg, provider_cfg=provider_cfg)
 
     return await asyncio.gather(*(guarded(row) for row in rows))
 
@@ -541,6 +573,40 @@ def write_analysis(
     if report_out:
         report_out.parent.mkdir(parents=True, exist_ok=True)
         report_out.write_text(format_report(summary, details), encoding="utf-8")
+
+
+def cache_rollouts(
+    *,
+    db_path: Path,
+    experiment_id: str,
+    provider_source_name: str,
+    model_api_name: str,
+    model_label: str,
+    dataset_name: str,
+    config_snapshot: dict[str, Any],
+    rollouts_path: Path,
+    details_path: Path | None = None,
+) -> int:
+    with ensure_db(db_path) as conn:
+        upsert_experiment(
+            conn,
+            experiment_id=experiment_id,
+            provider_source=provider_source_name,
+            dataset=dataset_name,
+            config_snapshot=config_snapshot,
+        )
+        n_ingested = ingest_artifacts(
+            conn,
+            experiment_id=experiment_id,
+            provider_source=provider_source_name,
+            model_api_name=model_api_name,
+            model_label=model_label,
+            dataset=dataset_name,
+            rollouts_path=rollouts_path,
+            details_path=details_path,
+        )
+        conn.commit()
+    return n_ingested
 
 
 def format_report(summary: dict[str, Any], details: list[dict[str, Any]]) -> str:
@@ -608,14 +674,19 @@ def main() -> int:
     parser.add_argument("--summary-out", type=Path, default=None)
     parser.add_argument("--details-out", type=Path, default=None)
     parser.add_argument("--report-out", type=Path, default=None)
+    parser.add_argument("--cache-db", type=Path, default=None, help="Optional unified SQLite cache to upsert rollouts/metrics into")
+    parser.add_argument("--experiment-id", default=None, help="Experiment id used with --cache-db")
+    parser.add_argument("--dataset-name", default=None, help="Dataset key used with --cache-db")
+    parser.add_argument("--model-label", default=None, help="Display label used with --cache-db")
     args = parser.parse_args()
 
     config = apply_cli_overrides(load_config(args.config), args)
+    provider_cfg = normalize_provider_config(config.get("provider"))
     model_cfg = resolve_model_config(config)
     agent_cfg = dict(config.get("agent") or {})
 
     if args.provider_smoke_only:
-        smoke = asyncio.run(run_provider_smoke(model_cfg))
+        smoke = asyncio.run(run_provider_smoke(model_cfg, provider_cfg))
         print(json.dumps(smoke, indent=2, default=_json_default))
         return 0
 
@@ -631,19 +702,38 @@ def main() -> int:
         raise ValueError("No rows selected")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    records = asyncio.run(run_batch(rows, model_cfg=model_cfg, agent_cfg=agent_cfg, n_parallel=args.n_parallel))
+    records = asyncio.run(
+        run_batch(rows, model_cfg=model_cfg, agent_cfg=agent_cfg, n_parallel=args.n_parallel, provider_cfg=provider_cfg)
+    )
     write_jsonl(args.out, records)
     print(json.dumps({"rollouts": str(args.out), "n_records": len(records)}, indent=2))
 
     if args.bonus_map_dir:
+        details_path = args.details_out or args.out.with_suffix(".details.jsonl")
         write_analysis(
             rollouts=args.out,
             bonus_map_dir=args.bonus_map_dir,
             summary_out=args.summary_out or args.out.with_suffix(".summary.json"),
-            details_out=args.details_out or args.out.with_suffix(".details.jsonl"),
+            details_out=details_path,
             report_out=args.report_out or args.out.with_suffix(".report.md"),
             analysis_cfg=dict(config.get("analysis") or {}),
         )
+    else:
+        details_path = None
+    if args.cache_db:
+        dataset_name = args.dataset_name or _data_source(rows[0])
+        n_cached = cache_rollouts(
+            db_path=args.cache_db,
+            experiment_id=args.experiment_id or f"third-party-{dataset_name}",
+            provider_source_name=provider_source(provider_cfg),
+            model_api_name=model_cfg["model_name"],
+            model_label=args.model_label or model_cfg["model_name"],
+            dataset_name=dataset_name,
+            config_snapshot=_redact_config(config),
+            rollouts_path=args.out,
+            details_path=details_path,
+        )
+        print(json.dumps({"cache_db": str(args.cache_db), "n_cached": n_cached}, indent=2))
     return 0
 
 
