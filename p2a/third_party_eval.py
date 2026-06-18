@@ -209,6 +209,18 @@ def _select_rows(
     return rows
 
 
+def parse_limit_arg(value: str) -> int | None:
+    if value.lower() == "all":
+        return None
+    try:
+        limit = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--limit must be a non-negative integer or 'all'") from exc
+    if limit < 0:
+        raise argparse.ArgumentTypeError("--limit must be a non-negative integer or 'all'")
+    return limit
+
+
 def _extra_info(row: dict[str, Any]) -> dict[str, Any]:
     value = _maybe_json(row.get("extra_info"))
     return value if isinstance(value, dict) else {}
@@ -572,7 +584,7 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=Path("config/third_party_eval.deepseek.example.yaml"))
     parser.add_argument("--data", type=Path, help="Input parquet/json/jsonl with Uni-Agent prompt and extra_info fields")
     parser.add_argument("--out", type=Path, default=Path("outputs/third_party_rollouts.jsonl"))
-    parser.add_argument("--limit", type=int, default=1)
+    parser.add_argument("--limit", type=parse_limit_arg, default=1)
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--instance-id", action="append", default=[])
     parser.add_argument("--n-parallel", type=int, default=1)

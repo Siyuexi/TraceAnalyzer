@@ -7,11 +7,13 @@ from p2a.core import BonusMapStore
 from p2a.eval_fault_localization import score_record
 from p2a.third_party_eval import (
     _prompt,
+    _select_rows,
     apply_cli_overrides,
     build_dump_record,
     build_step_traces,
     format_report,
     load_config,
+    parse_limit_arg,
     resolve_model_config,
 )
 
@@ -126,6 +128,20 @@ def test_prompt_accepts_parquet_numpy_array():
     ]
 
     assert _prompt({"instance_id": "demo__abc123", "prompt": np.array(prompt, dtype=object)}) == prompt
+
+
+def test_limit_arg_accepts_all_and_numeric_values():
+    assert parse_limit_arg("all") is None
+    assert parse_limit_arg("ALL") is None
+    assert parse_limit_arg("0") == 0
+    assert parse_limit_arg("3") == 3
+
+
+def test_select_rows_treats_none_limit_as_unlimited():
+    rows = [{"instance_id": "a"}, {"instance_id": "b"}, {"instance_id": "c"}]
+
+    assert _select_rows(rows, limit=None, offset=1, instance_ids=None) == rows[1:]
+    assert _select_rows(rows, limit=1, offset=1, instance_ids=None) == rows[1:2]
 
 
 def test_build_step_traces_preserves_structured_tool_calls():

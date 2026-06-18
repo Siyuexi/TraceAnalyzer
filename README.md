@@ -29,6 +29,22 @@ If a dataset/model is already present there, scripts read it directly. If it is
 missing, the script downloads it from HuggingFace and saves it under that shared
 location.
 
+## Current capabilities
+
+This repo now has four mostly independent surfaces:
+
+| Surface | Use it for | Primary entry points |
+|---|---|---|
+| Data setup | Build R2E-Gym subset, SWE-bench Verified, and the default SWE-bench hard validation split. | `scripts/setup.sh data ...`, `scripts/build_data.py` |
+| P2A training | Run Uni-Agent baseline or P2A advantage reshaping on ARL/Ray. | `scripts/main.sh`, `scripts/train_p2a.sh` |
+| Graph diagnostics | Precompute dynamic/static bonus maps and score whether rollouts read the fault-propagation graph. | `scripts/precompute_eval_bonus_maps.sh`, `p2a.eval_fault_localization`, live `val-p2a/*` validation metrics |
+| Third-party baselines | Run an OpenAI-compatible external model through the same Uni-Agent + ARL SWE/R2E environment and produce rollout/localization artifacts. | `scripts/main_3rd.sh`, `scripts/third_party_eval.sh`, `config/third_party_eval.deepseek.example.yaml` |
+
+The shell scripts are layered deliberately: `scripts/setup.sh` owns idempotent
+data/dependency/map setup; `main.sh` and `main_3rd.sh` are high-level wrappers;
+the remaining scripts are lower-level runners or runtime checks for explicit
+control.
+
 ## Directory map
 
 ```
@@ -36,19 +52,32 @@ src/
   config/                     # ALL json/yaml config lives here
     startup_fixups.json       #   per-repo test-startup fixups (source patches + dep pins)
     bad_instances.json        #   R2E instances to exclude from training (skip-list)
+    third_party_eval.deepseek.example.yaml # third-party OpenAI-compatible model config template
   scripts/
     build_data.py             # SINGLE data builder: r2e | swebench-verified | swebench-hard | skip-list
     uni_agent_arl.sh          # prepare/data/smoke/debug launcher (ARL config)
+    setup.sh                  # idempotent data/dependency/eval-map setup helpers
     ray_setup.sh              # bring up Ray and smoke-check Ray Jobs
+    stage_local_runtime.sh    # copy checkout/venv to node-local runtime storage
     main.sh                   # one-shot baseline launcher
+    main_3rd.sh               # one-shot third-party OpenAI-compatible rollout baseline
     train_p2a.sh              # training launcher (baseline OR P2A)
+    third_party_eval.sh       # lower-level third-party rollout pass-through
+    precompute_eval_bonus_maps.sh # eval-map helper for validation diagnostics
+    check_deps_cpu.sh         # CPU dependency/import smoke check
+    check_uni_agent_runtime.py # GPU/runtime import smoke check
   p2a/
     core.py                   # bonus-map load + read->callgraph match + m(d)=m_max^(1-d) multiplier
     trainer.py                # apply_p2a_reshape: capture agent reads -> reshape advantage
     main.py                   # training entry; P2AFullyAsyncTrainer (vanilla if P2A_BONUS_MAP_DIR unset)
+    rollouter.py              # validation rollouter wrapper for live graph diagnostics
+    validation_metrics.py     # aggregate val-p2a/* localization metrics
+    third_party_eval.py       # OpenAI-compatible external model rollout harness
     test_setup.py             # startup_fixup_command(repo) — loads config/startup_fixups.json
     trace.py                  # instrumentation + call-graph build (bonus-map precompute)
     eval_fault_localization.py # offline eval rollout read->fault-localization metrics
+    hf_assets.py              # shared HuggingFace model/dataset path helpers
+    runtime_env.py            # Ray runtime-env path normalization helpers
     precompute/precompute_bonus_maps.py  # build bonus maps on the ARL backend
     skip_cases.py             # load_skip_ids() from config/bad_instances.json
   env/                        # ARL deployment + runtime (implements swe-rex AbstractRuntime; no swe-rex server)
@@ -261,10 +290,11 @@ One-shot baseline from the Ray head:
 bash scripts/main.sh
 ```
 
-`scripts/main.sh` stages code/runtime locally like the other launchers, restarts
-Ray through `scripts/ray_setup.sh`, and keeps default `DATA` / `MODEL` paths
-anchored at the shared checkout (`../../datasets/p2a` and `../../models/...`)
-instead of under `/tmp`. It defaults to the current GPU cluster
+`scripts/main.sh` stages code/runtime locally like the other launchers, calls
+`scripts/setup.sh` for idempotent dependency and data setup, restarts Ray through
+`scripts/ray_setup.sh`, and keeps default `DATA` / `MODEL` paths anchored at the
+shared checkout (`../../datasets/p2a` and `../../models/...`) instead of under
+`/tmp`. It defaults to the current GPU cluster
 (`HEAD_IP=28.45.32.245`, `RAY_WORKER_HOSTS="28.45.33.48 28.45.33.95 28.45.33.97"`,
 `RAY_GCS_PORT=6379`, `RAY_SSH_OPTS="-p 36000 ..."`). Override those env vars if
 the allocation changes. To submit to an already-running Ray cluster without a restart, set
@@ -311,8 +341,28 @@ validation dashboards use `P2A_EVAL_BONUS_MAP_DIR`.
 
 ### Step 9. Optional third-party model rollout baseline
 
-To collect pre-training trajectories from an OpenAI-compatible third-party
-model, keep the API key in the environment and run the inference-only harness:
+For a main-style smoke/default run, set the API key and run the wrapper. It
+defaults to `swebench-hard`, builds the parquet if missing, precomputes matching
+dependency/call-graph maps, and writes rollout + fault-localization artifacts
+under `$DATA/third_party/<dataset>/<model>/`:
+
+```bash
+export P2A_THIRD_PARTY_API_KEY=...
+export P2A_THIRD_PARTY_BASE_URL=https://apic1.ohmycdn.com/v1
+export P2A_THIRD_PARTY_MODEL=deepseek-v4-flash
+
+bash scripts/main_3rd.sh
+```
+
+Switch datasets with `THIRD_PARTY_DATASET=swebench-verified` or
+`THIRD_PARTY_DATASET=r2e-gym-subset`. Keep `P2A_THIRD_PARTY_LIMIT` small for
+smoke tests; set it higher, or to `all`, for a real baseline. The wrapper does
+not sync dependencies by default so it does not prune a shared training `.venv`;
+set `P2A_THIRD_PARTY_SYNC_DEPS=1` only when you intentionally want a core CPU
+sync in the active environment.
+
+The lower-level pass-through remains available when you want explicit control
+over every path and CLI flag:
 
 ```bash
 export P2A_THIRD_PARTY_API_KEY=...
@@ -354,6 +404,8 @@ These are knobs you set; the repo does not pin them:
 | GPU / CPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (32-GPU 4×8 starter: `2 / 2 / 8`); `NUM_CPUS` is the Ray CPU resource advertised per node, default 64 |
 | Bonus maps (read + write) | `P2A_BONUS_MAP_DIR` — one dir for both precompute output and training input; default `../../p2a/bonus_maps`. Training treats it as the P2A on/off switch (unset = baseline). `P2A_M_MAX` sets strength. |
 | Eval fault-localization diagnostics | `P2A_EVAL_BONUS_MAP_DIR`, `P2A_EVAL_NEAR_THRESHOLD`, `P2A_EVAL_DETAILS_DIR`, `P2A_EVAL_BONUS_N_PARALLEL`, `P2A_EVAL_BONUS_LIMIT`, `P2A_EVAL_BONUS_OFFSET` |
+| Third-party provider baseline | `config/third_party_eval.deepseek.example.yaml` plus `P2A_THIRD_PARTY_BASE_URL`, `P2A_THIRD_PARTY_API_KEY`, `P2A_THIRD_PARTY_MODEL`; API keys stay in env vars, not git |
+| Third-party run scope | `THIRD_PARTY_DATASET`, `THIRD_PARTY_DATA_FILE`, `P2A_THIRD_PARTY_LIMIT`, `P2A_THIRD_PARTY_N_PARALLEL`, `P2A_THIRD_PARTY_RUN_TIMEOUT`, `P2A_THIRD_PARTY_BONUS_*` |
 | ARL gateway | `ARL_GATEWAY_URL` |
 | Hard-subset criterion | `--difficulties` flag of `build_data.py swebench-hard` (default = the `1-4 hours` / `>4 hours` difficulty set) |
 | R2E bad-case policy | `config/bad_instances.json` (pair-diag ARL gate evidence) |
