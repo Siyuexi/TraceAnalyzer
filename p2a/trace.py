@@ -502,7 +502,7 @@ def generate_tracer_module(repo_path: str, alt_path: str = "") -> str:
                 return default
             return value if value >= 0 else default
 
-        _MAX_EVENTS = _env_int("P2A_TRACE_MAX_EVENTS", 2000)
+        _MAX_EVENTS = _env_int("P2A_TRACE_MAX_EVENTS", 10000)
         _MAX_FRAMES = _env_int("P2A_TRACE_MAX_FRAMES", 80)
 
         def _is_test_file_path(path):
