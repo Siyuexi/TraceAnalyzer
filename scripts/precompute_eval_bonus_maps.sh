@@ -7,24 +7,10 @@
 set -euo pipefail
 
 SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "${SRC_ROOT}/scripts/shared_hf.sh"
+source "${SRC_ROOT}/scripts/setup.sh"
 cd "${SRC_ROOT}"
 
-default_data_dir() {
-  if [[ -n "${DATA:-}" ]]; then
-    local data_dir
-    data_dir="$(resolve_shared_path "${DATA}")"
-    mkdir -p "${data_dir}"
-    cd "${data_dir}" && pwd
-  else
-    local root
-    root="$(shared_hf_root)"
-    mkdir -p "${root}/datasets/p2a"
-    cd "${root}/datasets/p2a" && pwd
-  fi
-}
-
-DATA_DIR="$(default_data_dir)"
+DATA_DIR="$(p2a_setup_data_dir)"
 EVAL_FILE="${EVAL_FILE:-${TEST_FILE:-${DATA_DIR}/swe_bench_verified_hard.parquet}}"
 P2A_EVAL_BONUS_MAP_DIR="${P2A_EVAL_BONUS_MAP_DIR:-${DATA_DIR}/eval_bonus_maps}"
 P2A_EVAL_BONUS_MODE="${P2A_EVAL_BONUS_MODE:-dynamic}"
@@ -45,37 +31,15 @@ EOF
   exit 2
 fi
 
-mkdir -p "${P2A_EVAL_BONUS_MAP_DIR}"
-
-cmd=(
-  uv run python p2a/precompute/precompute_bonus_maps.py
-  "${EVAL_FILE}"
-  --output_dir "${P2A_EVAL_BONUS_MAP_DIR}"
-  --mode "${P2A_EVAL_BONUS_MODE}"
-  --n_parallel "${P2A_EVAL_BONUS_N_PARALLEL}"
-)
-
-if [[ "${P2A_EVAL_BONUS_SKIP_EXISTING}" == "0" ]]; then
-  cmd+=(--rebuild)
-fi
-if [[ -n "${P2A_EVAL_BONUS_LIMIT:-}" ]]; then
-  cmd+=(--limit "${P2A_EVAL_BONUS_LIMIT}")
-fi
-if [[ -n "${P2A_EVAL_BONUS_OFFSET:-}" ]]; then
-  cmd+=(--offset "${P2A_EVAL_BONUS_OFFSET}")
-fi
-if [[ "${P2A_EVAL_BONUS_SAVE_SIDECARS:-0}" != "0" ]]; then
-  cmd+=(--save_trace_sidecars)
-  if [[ -n "${P2A_EVAL_TRACE_SIDECAR_DIR:-}" ]]; then
-    cmd+=(--trace_sidecar_dir "${P2A_EVAL_TRACE_SIDECAR_DIR}")
-  fi
-fi
-
 printf 'Eval parquet: %s\n' "${EVAL_FILE}"
 printf 'Eval bonus maps: %s\n' "${P2A_EVAL_BONUS_MAP_DIR}"
 printf 'Deployment: %s\n' "${P2A_DEPLOYMENT}"
-printf 'Command:'
-printf ' %q' "${cmd[@]}"
-printf '\n'
 
-"${cmd[@]}"
+P2A_SETUP_BONUS_MODE="${P2A_EVAL_BONUS_MODE}" \
+P2A_SETUP_BONUS_N_PARALLEL="${P2A_EVAL_BONUS_N_PARALLEL}" \
+P2A_SETUP_BONUS_LIMIT="${P2A_EVAL_BONUS_LIMIT:-}" \
+P2A_SETUP_BONUS_OFFSET="${P2A_EVAL_BONUS_OFFSET:-}" \
+P2A_SETUP_REBUILD_MAPS="$([[ "${P2A_EVAL_BONUS_SKIP_EXISTING}" == "0" ]] && printf '1' || printf '0')" \
+P2A_SETUP_SAVE_TRACE_SIDECARS="${P2A_EVAL_BONUS_SAVE_SIDECARS:-0}" \
+P2A_SETUP_TRACE_SIDECAR_DIR="${P2A_EVAL_TRACE_SIDECAR_DIR:-}" \
+  p2a_setup_ensure_bonus_maps swebench-hard "${EVAL_FILE}" "${P2A_EVAL_BONUS_MAP_DIR}"

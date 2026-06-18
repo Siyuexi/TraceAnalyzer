@@ -24,7 +24,7 @@ else
   # core pulls uni-agent (editable, via [tool.uv.sources]); no torch/framework.
   echo ">> syncing core (data-build + bonus-map pipeline + uni-agent + r2e-gym) ..."
   uv sync --locked
-  MODS="datasets r2egym pandas pyarrow numpy arl swerex uni_agent"
+  MODS="datasets r2egym pandas pyarrow numpy swebench arl swerex uni_agent"
 fi
 
 echo ">> smoke-importing: $MODS"

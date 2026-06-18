@@ -1,0 +1,35 @@
+# Example OpenAI-compatible third-party rollout config for issue #27.
+# Keep the API key in the environment; never commit it.
+model:
+  base_url_env: P2A_THIRD_PARTY_BASE_URL
+  api_key_env: P2A_THIRD_PARTY_API_KEY
+  model_name_env: P2A_THIRD_PARTY_MODEL
+  base_url: https://apic1.ohmycdn.com/v1
+  model_name: deepseek-v4-flash
+  timeout: 300
+  sampling_params:
+    temperature: 0.0
+    max_tokens: 4096
+
+agent:
+  deployment: arl
+  tool_parser: qwen3_coder
+  tools:
+    - name: str_replace_editor
+    - name: execute_bash
+    - name: submit
+  interaction:
+    action_timeout: 300
+    timeout_budget: 3
+    max_turns: 100
+  tool_install_timeout: 300
+  # Tree-sitter only improves large-file previews; the editor still supports basic view/edit commands.
+  skip_tool_install_commands:
+    - str_replace_editor
+  reward_eval_timeout: 600
+  log_dir: /tmp/p2a_third_party_eval
+
+analysis:
+  tracking_mode: view_and_bash
+  near_threshold: 0.5
+  m_max: 3.0
