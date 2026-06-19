@@ -17,7 +17,6 @@ import uuid
 OPENAI_COMPATIBLE = "openai_compatible"
 INTERNAL_API = "internal_api"
 SUPPORTED_PROVIDER_SOURCES = {OPENAI_COMPATIBLE, INTERNAL_API}
-DEFAULT_INTERNAL_API_MODULE = ".secrets/internal_api_eval.py"
 REQUIRED_MODEL_METHODS = (
     "set_tools_schemas",
     "prepare_rollout_cache",
@@ -40,8 +39,6 @@ def normalize_provider_config(provider_cfg: dict[str, Any] | None) -> dict[str, 
             f"Unsupported provider.source {source!r}; expected one of: {supported}"
         )
     cfg["source"] = source
-    if source == INTERNAL_API:
-        cfg.setdefault("api_module", DEFAULT_INTERNAL_API_MODULE)
     return cfg
 
 

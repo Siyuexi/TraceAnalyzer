@@ -2,7 +2,8 @@
 
 This module owns the runtime request/response path for ``provider.source:
 internal_api``. The private API client, credentials, and model lists remain in
-``provider.api_module`` (default ``.secrets/internal_api_eval.py``).
+``provider.api_module`` or ``P2A_INTERNAL_API_MODULE`` (default
+``.secrets/internal_api_eval.py``).
 """
 
 from __future__ import annotations
@@ -170,18 +171,16 @@ class InternalApiChatModel:
             assistant_metadata_by_index=assistant_metadata,
         )
         tools = self.tools_schemas or []
-        chain_seeded = uses_openai_responses_api(model_name, self.api_module) and bool(
+        chain_active = uses_openai_responses_api(model_name, self.api_module) and bool(
             save_id.get("response_id")
         )
-        chain_active = chain_seeded and history and history[-1].get("role") == "tool"
         call_kwargs: dict[str, Any] = {
             "history": history,
             "tools": tools,
             "tools_mode": bool(tools),
             "history_process": True,
+            "save_id": save_id,
         }
-        if chain_active:
-            call_kwargs["save_id"] = save_id
 
         try:
             response_obj = await asyncio.to_thread(
