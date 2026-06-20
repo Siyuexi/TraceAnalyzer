@@ -138,7 +138,7 @@ class ArlRuntime(AbstractRuntime):
 
     @property
     def _arl_session_id(self) -> str:
-        sid = getattr(self._session, "session_id", None)
+        sid = getattr(self._session, "session_id", None) or getattr(self._session, "_session_id", None)
         if not sid:
             raise RuntimeError("ARL ManagedSession has no session_id (not created?).")
         return sid

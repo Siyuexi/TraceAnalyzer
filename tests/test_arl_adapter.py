@@ -85,6 +85,47 @@ class ArlAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "runtime not started"):
             _ = deployment.runtime
 
+    def test_arl_runtime_uses_managed_session_private_id(self) -> None:
+        from env.runtime import ArlRuntime
+
+        class FakeClient:
+            base_url = "http://gateway"
+
+        class FakeSession:
+            _client = FakeClient()
+            _session_id = "arl-session-1"
+
+        runtime = ArlRuntime(FakeSession(), run_id="run-1")
+        self.assertEqual(runtime._arl_session_id, "arl-session-1")
+
+    def test_uni_agent_sandbox_adapter_runs_post_setup_via_execute(self) -> None:
+        from p2a.precompute.uni_agent_sandbox import UniAgentSandboxAdapter
+
+        calls = {"start": 0, "commands": []}
+
+        class FakeRuntime:
+            async def execute(self, command):
+                calls["commands"].append(command)
+                return SimpleNamespace(stdout="", stderr="", exit_code=0)
+
+        fake_env = SimpleNamespace(
+            start=lambda: calls.__setitem__("start", calls["start"] + 1),
+            deployment=SimpleNamespace(runtime=FakeRuntime()),
+        )
+
+        adapter = UniAgentSandboxAdapter(
+            fake_env,
+            startup_env_variables={"PAGER": "cat"},
+            post_setup_cmd="echo ready",
+        )
+        adapter.start()
+
+        self.assertEqual(calls["start"], 1)
+        self.assertEqual(len(calls["commands"]), 1)
+        command = calls["commands"][0].command
+        self.assertIn("export PAGER=cat", command)
+        self.assertIn("echo ready", command)
+
     def test_agent_loop_maps_arl_env_without_pydantic_deployment_union(self) -> None:
         import env as env_package
 
