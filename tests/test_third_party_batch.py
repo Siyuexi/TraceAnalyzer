@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pytest
 
-from p2a.api_providers import ProviderLoadError, check_provider_available
 from p2a.third_party_batch import load_batch_config, sanitized_config_snapshot
 
 
@@ -14,7 +13,10 @@ def test_load_batch_config_defaults_and_dummy_models():
     assert config.experiment_id == "public-swebench-hard-demo"
     assert config.stage == "smoke"
     assert config.limit == 500
-    assert [model.api_name for model in config.models] == ["dummy-model-a", "dummy-model-b"]
+    assert [model.api_name for model in config.models] == [
+        "dummy-model-a",
+        "dummy-model-b",
+    ]
     assert config.db_path.as_posix() == "data/evals/traces.sqlite"
 
 
@@ -41,13 +43,6 @@ storage:
     snapshot = sanitized_config_snapshot(config)
 
     assert snapshot["config"]["model"]["api_key"] == "<redacted>"
-
-
-def test_missing_internal_adapter_fails_clearly(tmp_path):
-    missing = tmp_path / "missing_adapter.py"
-
-    with pytest.raises(ProviderLoadError, match="internal_api provider requires an ignored adapter file"):
-        check_provider_available({"source": "internal_api", "adapter": str(missing)}, repo_root=tmp_path)
 
 
 def test_batch_config_requires_explicit_models(tmp_path):

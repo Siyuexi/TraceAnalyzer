@@ -386,8 +386,10 @@ bash scripts/main_3rd.sh --batch .secrets/internal_api_batch.yaml
 
 Batch configs explicitly choose `provider.source` (`openai_compatible` or
 `internal_api`) and `models[]`. The committed example uses dummy model names
-only. The real internal adapter and internal model lists stay ignored under
-`.secrets/`; if the adapter is missing, batch mode fails before launching cells.
+only. The internal adapter is tracked in `p2a/`; the private internal API client,
+tokens, and model lists stay ignored under `.secrets/internal_api_eval.py` (or
+the path set by `provider.api_module` / `P2A_INTERNAL_API_MODULE`). If that
+private module is missing, batch mode fails before launching cells.
 Batch results are upserted into the unified SQLite cache configured by
 `storage.db` (default `data/evals/traces.sqlite`) and can be watched live:
 
