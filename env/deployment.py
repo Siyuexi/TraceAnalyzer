@@ -116,7 +116,7 @@ class ArlDeployment(AbstractDeployment):
         last_error: Exception | None = None
         for retry in range(max_retries):
             try:
-                self._session = await self._blocking(
+                session = await self._blocking(
                     ManagedSession,
                     image=self._config.image,
                     experiment_id=experiment_id,
@@ -131,7 +131,14 @@ class ArlDeployment(AbstractDeployment):
                 # when create_sandbox() runs (it sets session_id + pool_ref).
                 # The interactive-shell runtime needs session_id, so provision
                 # here, inside the retry loop, before attaching the adapter.
-                await self._blocking(self._session.create_sandbox)
+                info = await self._blocking(session.create_sandbox)
+                if not (getattr(session, "session_id", None) or getattr(session, "_session_id", None)):
+                    session_id = getattr(info, "id", None)
+                    if session_id:
+                        setattr(session, "_session_id", session_id)
+                if not (getattr(session, "session_id", None) or getattr(session, "_session_id", None)):
+                    raise RuntimeError("ARL create_sandbox returned without a session id")
+                self._session = session
                 break
             except Exception as exc:
                 last_error = exc
@@ -143,13 +150,16 @@ class ArlDeployment(AbstractDeployment):
 
         self._hooks.on_custom_step("Attaching ARL runtime adapter")
         self._runtime = ArlRuntime(self._session, run_id=self.run_id, logger=self.logger)
-        # Best-effort: eagerly open the interactive PTY shell so the agent rollout path has
-        # it ready, but DON'T let a transient WS ``connect`` (HTTP 404 against a freshly
-        # provisioned pod) abort the whole deployment. The bonus-map precompute drives the
-        # sandbox purely through the one-shot ``execute`` path (no shell), and ``run_in_session``
-        # reopens the shell lazily on first use, so a startup-open failure stays recoverable.
+        # The interactive PTY is an optimization for agent rollouts. Precompute uses
+        # one-shot execute calls, and interactive shell startup can lag behind sandbox
+        # readiness, so keep this bounded and let callers open it lazily if needed.
+        eager_shell_timeout = float(os.getenv("ARL_EAGER_SHELL_TIMEOUT", "10"))
         try:
-            await self._runtime.create_session(CreateBashSessionRequest())
+            if eager_shell_timeout > 0:
+                await asyncio.wait_for(
+                    self._runtime.create_session(CreateBashSessionRequest()),
+                    timeout=eager_shell_timeout,
+                )
         except Exception as exc:  # noqa: BLE001 - shell is reopened lazily by run_in_session
             self.logger.warning(
                 f"Eager ARL shell open failed ({exc!r}); will open lazily on first interactive use"

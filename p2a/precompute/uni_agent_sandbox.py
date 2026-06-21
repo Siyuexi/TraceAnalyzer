@@ -280,13 +280,33 @@ class UniAgentSandboxAdapter:
     repo_path = "/testbed"
     alt_path = "/root"
 
-    def __init__(self, agent_env, *, default_timeout: int = 300, swebench_verified: bool = False):
+    def __init__(
+        self,
+        agent_env,
+        *,
+        default_timeout: int = 300,
+        swebench_verified: bool = False,
+        startup_env_variables: dict[str, str] | None = None,
+        post_setup_cmd: str | None = None,
+    ):
         self.agent_env = agent_env
         self.default_timeout = default_timeout
         self.swebench_verified = swebench_verified
+        self.startup_env_variables = startup_env_variables or {}
+        self.post_setup_cmd = post_setup_cmd
 
     def start(self) -> None:
         self.agent_env.start()
+        setup_parts = [
+            f"export {key}={shlex.quote(str(value))}"
+            for key, value in sorted(self.startup_env_variables.items())
+        ]
+        if self.post_setup_cmd:
+            setup_parts.append(self.post_setup_cmd)
+        if setup_parts:
+            stdout, stderr, exit_code = self._execute_raw(" && ".join(setup_parts), timeout=300)
+            if exit_code != 0:
+                raise RuntimeError(f"sandbox post-setup failed exit={exit_code}: {(stderr or stdout)[-1000:]}")
 
     def close(self) -> None:
         self.agent_env.close()
@@ -417,13 +437,20 @@ def create_uni_agent_sandbox(task: dict[str, Any], *, instance_id: str) -> UniAg
 
         env_config = make_env_config(
             config["deployment"],
-            env_variables=config.get("env_variables"),
-            post_setup_cmd=config.get("post_setup_cmd"),
+            env_variables=None,
+            post_setup_cmd=None,
             tool_install_dir=config.get("tool_install_dir", "/usr/local/bin"),
         )
     else:
         env_config = AgentEnvConfig(**config)
     env = AgentEnv(run_id=f"p2a-bonus-{uuid.uuid4()}", env_config=env_config)
+    if config["deployment"].get("type") == "arl":
+        return UniAgentSandboxAdapter(
+            env,
+            swebench_verified=swebench_verified,
+            startup_env_variables=config.get("env_variables"),
+            post_setup_cmd=config.get("post_setup_cmd"),
+        )
     return UniAgentSandboxAdapter(env, swebench_verified=swebench_verified)
 
 

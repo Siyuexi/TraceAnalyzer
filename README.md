@@ -560,6 +560,14 @@ maps. The remaining residuals are 2 deterministic `all_pass` Django cases and 1
 | `no_f2p` | 3 | F2P failures remain unaligned with traces after description-to-method recovery. |
 | `all_pass` | 2 | Buggy F2P tests exit 0 after checkout/test-selection verification, so the bug does not reproduce locally. |
 
+Trace parsing covers all captured tracer JSONL lines by default.  Set
+`P2A_TRACE_PARSE_MAX_LINES` only as an explicit debugging cap; bonus-map
+metadata records both `trace_parse_line_cap_reached` and
+`trace_event_cap_reached`.  The runtime tracer still keeps a finite
+`P2A_TRACE_MAX_EVENTS` guard, defaulting to `10000`; when a trace cap is
+reached before missing F2P evidence can be proven, the map is classified as
+`trace_cap_inconclusive` instead of a confident `no_f2p`.
+
 ## Training Smoke Check
 
 Before a full P2A run, do a small smoke run and confirm validation logs include

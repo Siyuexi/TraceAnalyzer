@@ -85,6 +85,47 @@ class ArlAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "runtime not started"):
             _ = deployment.runtime
 
+    def test_arl_runtime_uses_managed_session_private_id(self) -> None:
+        from env.runtime import ArlRuntime
+
+        class FakeClient:
+            base_url = "http://gateway"
+
+        class FakeSession:
+            _client = FakeClient()
+            _session_id = "arl-session-1"
+
+        runtime = ArlRuntime(FakeSession(), run_id="run-1")
+        self.assertEqual(runtime._arl_session_id, "arl-session-1")
+
+    def test_uni_agent_sandbox_adapter_runs_post_setup_via_execute(self) -> None:
+        from p2a.precompute.uni_agent_sandbox import UniAgentSandboxAdapter
+
+        calls = {"start": 0, "commands": []}
+
+        class FakeRuntime:
+            async def execute(self, command):
+                calls["commands"].append(command)
+                return SimpleNamespace(stdout="", stderr="", exit_code=0)
+
+        fake_env = SimpleNamespace(
+            start=lambda: calls.__setitem__("start", calls["start"] + 1),
+            deployment=SimpleNamespace(runtime=FakeRuntime()),
+        )
+
+        adapter = UniAgentSandboxAdapter(
+            fake_env,
+            startup_env_variables={"PAGER": "cat"},
+            post_setup_cmd="echo ready",
+        )
+        adapter.start()
+
+        self.assertEqual(calls["start"], 1)
+        self.assertEqual(len(calls["commands"]), 1)
+        command = calls["commands"][0].command
+        self.assertIn("export PAGER=cat", command)
+        self.assertIn("echo ready", command)
+
     def test_agent_loop_maps_arl_env_without_pydantic_deployment_union(self) -> None:
         import env as env_package
 
@@ -697,6 +738,52 @@ class ArlAdapterTests(unittest.TestCase):
 
         self.assertEqual(funcs, {"test_loading_namespace_package"})
 
+    def test_r2e_f2p_intersects_buggy_failures_with_fixed_passes(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import (
+            _filter_traces_to_f2p,
+            _get_f2p_test_funcs,
+            _test_func_names_from_traces,
+        )
+
+        raw_output = "\n".join(
+            [
+                "FAILED r2e_tests/test_1.py::TestImportDialog::test_dialog - AssertionError",
+                "FAILED r2e_tests/test_1.py::TestUtils::test_open_compressed - AssertionError",
+            ]
+        )
+        task = {
+            "extra_info": {
+                "tools_kwargs": {
+                    "reward": {
+                        "metadata": {
+                            "expected_output_json": json.dumps(
+                                {
+                                    "TestUtils.test_open_compressed": "PASSED",
+                                    "TestImportDialog.test_dialog": "FAILED",
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        funcs = _get_f2p_test_funcs(task, raw_output, swebench_verified=False)
+
+        self.assertEqual(funcs, {"test_open_compressed"})
+        raw_gt_traces = [
+            [
+                {"file_path": "r2e_tests/test_1.py", "func_name": "test_dialog"},
+                {"file_path": "Orange/widgets/data/owcsvimport.py", "func_name": "_open"},
+            ],
+            [
+                {"file_path": "r2e_tests/test_1.py", "func_name": "test_open_compressed"},
+                {"file_path": "Orange/widgets/data/owcsvimport.py", "func_name": "_open"},
+            ],
+        ]
+        f2p_traces = _filter_traces_to_f2p(raw_gt_traces, funcs)
+        self.assertEqual(_test_func_names_from_traces(f2p_traces), ["test_open_compressed"])
+
     def test_swebench_exit_override_classifies_signature_mismatch(self) -> None:
         from p2a.precompute import precompute_bonus_maps as bonus_maps
 
@@ -951,6 +1038,392 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertEqual(result["case_type"], "no_trace")
         self.assertEqual(result["reason_code"], "f2p_collection_missing")
         self.assertEqual(result["swebench_f2p_missing_nodeids"], ["tests/test_demo.py::test_foo"])
+
+    def test_trace_parse_cap_is_disabled_by_default(self) -> None:
+        from p2a.precompute import precompute_bonus_maps as bonus_maps
+
+        modified = [
+            {
+                "name": "demo",
+                "qualified_name": "demo",
+                "file_path": "pkg/demo.py",
+                "start_line": 10,
+                "end_line": 12,
+                "instr_start_line": 10,
+                "instr_end_line": 12,
+            }
+        ]
+        trace = [
+            {
+                "file_path": "tests/test_demo.py",
+                "line_no": 1,
+                "func_name": "test_foo",
+                "qualified_name": "test_foo",
+                "is_patched": False,
+            },
+            {
+                "file_path": "pkg/demo.py",
+                "line_no": 10,
+                "func_name": "demo",
+                "qualified_name": "demo",
+                "is_patched": True,
+            },
+        ]
+
+        class FakeEnv:
+            swebench_verified = True
+            repo_path = "/testbed"
+            alt_path = "/root"
+
+            def __init__(self) -> None:
+                self.commands: list[str] = []
+
+            def start(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def checkout_buggy_commit(self, task, *, instance_id):
+                return {"buggy_checkout_ref": "abc123^", "buggy_checkout_exit": 0}
+
+            def _run(self, command: str, timeout: int | float | None = None):
+                self.commands.append(command)
+                return "", ""
+
+            def _execute_raw(self, command: str, timeout: int | float | None = None):
+                self.commands.append(command)
+                if "wc -l" in command:
+                    return "1500\n", "", 0
+                return "", "", 0
+
+            def write_file(self, path: str, content: str) -> None:
+                pass
+
+        task = {
+            "instance_id": "pytest__pytest-1",
+            "repo": "pytest-dev/pytest",
+            "patch": "diff --git a/pkg/demo.py b/pkg/demo.py\n",
+            "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_foo"]),
+            "extra_info": {
+                "tools_kwargs": {
+                    "reward": {"name": "swe_bench", "metadata": {}},
+                }
+            },
+        }
+        env = FakeEnv()
+        parse_calls: list[str] = []
+
+        def fake_parse(*args, **kwargs):
+            parse_calls.append(kwargs["trace_file_path"])
+            return [trace]
+
+        with (
+            patched_env(remove=("P2A_TRACE_PARSE_MAX_LINES", "P2A_TRACE_MAX_EVENTS")),
+            patch.object(bonus_maps, "find_modified_callables_from_task", return_value=modified),
+            patch.object(bonus_maps, "find_newly_created_callables", return_value=[]),
+            patch.object(
+                bonus_maps,
+                "_prepare_swebench_test_script",
+                return_value={"swebench_test_script_patch_stdout": ""},
+            ),
+            patch.object(
+                bonus_maps,
+                "_run_tests_with_file_capture",
+                return_value=(
+                    "tests/test_demo.py::test_foo FAILED\n",
+                    "",
+                    1,
+                    {
+                        "stdout_read_exit": 0,
+                        "stderr_read_exit": 0,
+                        "exit_read_exit": 0,
+                        "wrapper_exit": 1,
+                        "exit_parse_failed": False,
+                        "all_three_read_failed": False,
+                        "trusted_test_exit": True,
+                    },
+                ),
+            ),
+            patch(
+                "p2a.precompute.uni_agent_sandbox.create_uni_agent_sandbox",
+                return_value=env,
+            ),
+            patch("p2a.trace.instrument_sandbox", return_value=modified),
+            patch("p2a.trace.parse_fault_traces_from_file", side_effect=fake_parse),
+            patch(
+                "p2a.trace.build_call_graph_from_traces",
+                return_value={
+                    "call_graph_nodes": {
+                        "tests/test_demo.py::test_foo": {
+                            "file_path": "tests/test_demo.py",
+                            "normalized_distance": 0,
+                        }
+                    },
+                    "call_graph_edges": [],
+                    "hop_max": 0,
+                },
+            ),
+        ):
+            result = bonus_maps.compute_dynamic_bonus_map(task)
+
+        self.assertEqual(result["case_type"], "direct")
+        self.assertIsNone(result["trace_parse_line_cap"])
+        self.assertFalse(result["trace_parse_line_cap_reached"])
+        self.assertEqual(result["trace_event_cap"], 10000)
+        self.assertEqual(parse_calls, [bonus_maps.TRACE_PARSE_PATH, bonus_maps.TRACE_PARSE_PATH])
+        self.assertTrue(any("sed -n '1,1000p'" in command for command in env.commands))
+        self.assertTrue(any("sed -n '1001,1500p'" in command for command in env.commands))
+        self.assertFalse(any("head -n 500" in command for command in env.commands))
+
+    def test_explicit_trace_parse_cap_sets_metadata(self) -> None:
+        from p2a.precompute import precompute_bonus_maps as bonus_maps
+
+        modified = [
+            {
+                "name": "demo",
+                "qualified_name": "demo",
+                "file_path": "pkg/demo.py",
+                "start_line": 10,
+                "end_line": 12,
+                "instr_start_line": 10,
+                "instr_end_line": 12,
+            }
+        ]
+        trace = [
+            {
+                "file_path": "tests/test_demo.py",
+                "line_no": 1,
+                "func_name": "test_foo",
+                "qualified_name": "test_foo",
+                "is_patched": False,
+            },
+            {
+                "file_path": "pkg/demo.py",
+                "line_no": 10,
+                "func_name": "demo",
+                "qualified_name": "demo",
+                "is_patched": True,
+            },
+        ]
+
+        class FakeEnv:
+            swebench_verified = True
+            repo_path = "/testbed"
+            alt_path = "/root"
+
+            def __init__(self) -> None:
+                self.commands: list[str] = []
+
+            def start(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def checkout_buggy_commit(self, task, *, instance_id):
+                return {"buggy_checkout_ref": "abc123^", "buggy_checkout_exit": 0}
+
+            def _run(self, command: str, timeout: int | float | None = None):
+                self.commands.append(command)
+                return "", ""
+
+            def _execute_raw(self, command: str, timeout: int | float | None = None):
+                self.commands.append(command)
+                if "wc -l" in command:
+                    return "1500\n", "", 0
+                return "", "", 0
+
+            def write_file(self, path: str, content: str) -> None:
+                pass
+
+        task = {
+            "instance_id": "pytest__pytest-1",
+            "repo": "pytest-dev/pytest",
+            "patch": "diff --git a/pkg/demo.py b/pkg/demo.py\n",
+            "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_foo"]),
+            "extra_info": {
+                "tools_kwargs": {
+                    "reward": {"name": "swe_bench", "metadata": {}},
+                }
+            },
+        }
+        env = FakeEnv()
+
+        with (
+            patched_env({"P2A_TRACE_PARSE_MAX_LINES": "500"}, remove=("P2A_TRACE_MAX_EVENTS",)),
+            patch.object(bonus_maps, "find_modified_callables_from_task", return_value=modified),
+            patch.object(bonus_maps, "find_newly_created_callables", return_value=[]),
+            patch.object(
+                bonus_maps,
+                "_prepare_swebench_test_script",
+                return_value={"swebench_test_script_patch_stdout": ""},
+            ),
+            patch.object(
+                bonus_maps,
+                "_run_tests_with_file_capture",
+                return_value=(
+                    "tests/test_demo.py::test_foo FAILED\n",
+                    "",
+                    1,
+                    {
+                        "stdout_read_exit": 0,
+                        "stderr_read_exit": 0,
+                        "exit_read_exit": 0,
+                        "wrapper_exit": 1,
+                        "exit_parse_failed": False,
+                        "all_three_read_failed": False,
+                        "trusted_test_exit": True,
+                    },
+                ),
+            ),
+            patch(
+                "p2a.precompute.uni_agent_sandbox.create_uni_agent_sandbox",
+                return_value=env,
+            ),
+            patch("p2a.trace.instrument_sandbox", return_value=modified),
+            patch("p2a.trace.parse_fault_traces_from_file", return_value=[trace]),
+            patch(
+                "p2a.trace.build_call_graph_from_traces",
+                return_value={
+                    "call_graph_nodes": {
+                        "tests/test_demo.py::test_foo": {
+                            "file_path": "tests/test_demo.py",
+                            "normalized_distance": 0,
+                        }
+                    },
+                    "call_graph_edges": [],
+                    "hop_max": 0,
+                },
+            ),
+        ):
+            result = bonus_maps.compute_dynamic_bonus_map(task)
+
+        self.assertEqual(result["case_type"], "direct")
+        self.assertEqual(result["trace_parse_line_cap"], 500)
+        self.assertTrue(result["trace_parse_line_cap_reached"])
+        self.assertTrue(any("sed -n '1,500p'" in command for command in env.commands))
+        self.assertFalse(any("sed -n '501," in command for command in env.commands))
+
+    def test_event_cap_reached_no_f2p_is_inconclusive(self) -> None:
+        from p2a.precompute import precompute_bonus_maps as bonus_maps
+
+        modified = [
+            {
+                "name": "demo",
+                "qualified_name": "demo",
+                "file_path": "pkg/demo.py",
+                "start_line": 10,
+                "end_line": 12,
+                "instr_start_line": 10,
+                "instr_end_line": 12,
+            }
+        ]
+        trace = [
+            {
+                "file_path": "tests/test_demo.py",
+                "line_no": 1,
+                "func_name": "test_unrelated",
+                "qualified_name": "test_unrelated",
+                "is_patched": False,
+            },
+            {
+                "file_path": "pkg/demo.py",
+                "line_no": 10,
+                "func_name": "demo",
+                "qualified_name": "demo",
+                "is_patched": True,
+            },
+        ]
+
+        class FakeEnv:
+            swebench_verified = True
+            repo_path = "/testbed"
+            alt_path = "/root"
+
+            def start(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def checkout_buggy_commit(self, task, *, instance_id):
+                return {"buggy_checkout_ref": "abc123^", "buggy_checkout_exit": 0}
+
+            def _run(self, command: str, timeout: int | float | None = None):
+                return "", ""
+
+            def _execute_raw(self, command: str, timeout: int | float | None = None):
+                if "wc -l" in command:
+                    return "2\n", "", 0
+                return "", "", 0
+
+            def write_file(self, path: str, content: str) -> None:
+                pass
+
+        task = {
+            "instance_id": "pytest__pytest-1",
+            "repo": "pytest-dev/pytest",
+            "patch": "diff --git a/pkg/demo.py b/pkg/demo.py\n",
+            "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_foo"]),
+            "extra_info": {
+                "tools_kwargs": {
+                    "reward": {"name": "swe_bench", "metadata": {}},
+                }
+            },
+        }
+
+        with (
+            patched_env({"P2A_TRACE_MAX_EVENTS": "2"}, remove=("P2A_TRACE_PARSE_MAX_LINES",)),
+            patch.object(bonus_maps, "find_modified_callables_from_task", return_value=modified),
+            patch.object(bonus_maps, "find_newly_created_callables", return_value=[]),
+            patch.object(
+                bonus_maps,
+                "_prepare_swebench_test_script",
+                return_value={"swebench_test_script_patch_stdout": ""},
+            ),
+            patch.object(
+                bonus_maps,
+                "_run_tests_with_file_capture",
+                return_value=(
+                    "tests/test_demo.py::test_foo FAILED\n",
+                    "",
+                    1,
+                    {
+                        "stdout_read_exit": 0,
+                        "stderr_read_exit": 0,
+                        "exit_read_exit": 0,
+                        "wrapper_exit": 1,
+                        "exit_parse_failed": False,
+                        "all_three_read_failed": False,
+                        "trusted_test_exit": True,
+                    },
+                ),
+            ),
+            patch(
+                "p2a.precompute.uni_agent_sandbox.create_uni_agent_sandbox",
+                return_value=FakeEnv(),
+            ),
+            patch("p2a.trace.instrument_sandbox", return_value=modified),
+            patch("p2a.trace.parse_fault_traces_from_file", return_value=[trace]),
+        ):
+            result = bonus_maps.compute_dynamic_bonus_map(task)
+
+        self.assertEqual(result["case_type"], "trace_cap_inconclusive")
+        self.assertEqual(result["reason_code"], "trace_event_cap_no_f2p_inconclusive")
+        self.assertTrue(result["trace_event_cap_reached"])
+        self.assertFalse(result["trace_parse_line_cap_reached"])
+        self.assertTrue(result["trace_cap_inconclusive"])
+        self.assertEqual(result["would_be_case_type"], "no_f2p")
+        self.assertEqual(result["would_be_reason_code"], "f2p_filter_dropped")
+        self.assertEqual(result["f2p_trace_count"], 0)
+
+    def test_generated_tracer_default_event_cap_is_10000(self) -> None:
+        from p2a.trace import generate_tracer_module
+
+        tracer_source = generate_tracer_module("/testbed")
+
+        self.assertIn('_MAX_EVENTS = _env_int("P2A_TRACE_MAX_EVENTS", 10000)', tracer_source)
 
 
 if __name__ == "__main__":
