@@ -427,6 +427,35 @@ def _parse_pytest_status_lines(raw_output: str) -> dict[str, str]:
     return statuses
 
 
+def _r2e_fixed_passed_test_funcs(task: dict) -> set[str] | None:
+    """Return fixed-run passing R2E tests from ``expected_output_json``."""
+    expected_raw = task.get("expected_output_json")
+    if expected_raw is None:
+        return None
+
+    if isinstance(expected_raw, str):
+        try:
+            expected_status = json.loads(expected_raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    elif isinstance(expected_raw, dict):
+        expected_status = expected_raw
+    else:
+        return None
+
+    if not isinstance(expected_status, dict):
+        return None
+
+    passed_funcs: set[str] = set()
+    for name, status in expected_status.items():
+        if str(status or "").strip().upper() != "PASSED":
+            continue
+        bare = _normalize_test_func_name(str(name).split(" - ", 1)[0])
+        if bare:
+            passed_funcs.add(bare)
+    return passed_funcs
+
+
 def _looks_like_test_func(name: str) -> bool:
     return bool(name and (name.startswith("test") or name in _FIXTURE_NAMES))
 
@@ -460,7 +489,8 @@ def _get_f2p_test_funcs(task: dict, raw_output: str, swebench_verified: bool) ->
     F2P = tests that FAIL on buggy code and PASS after the developer's fix.
 
     For SWE-Bench Verified: uses the ``FAIL_TO_PASS`` field from the task.
-    For R2E-Gym: parses pytest output for FAILED tests on buggy code.
+    For R2E-Gym: intersects buggy pytest failures with fixed-run passes from
+    ``expected_output_json``.
 
     Returns:
         set[str]: bare test function names (may be empty if no tests failed).
@@ -469,6 +499,7 @@ def _get_f2p_test_funcs(task: dict, raw_output: str, swebench_verified: bool) ->
     Note: parametrize suffixes (``[param1-param2]``) are stripped so that
     ``test_foo[True]`` matches trace frames that only contain ``test_foo``.
     """
+    task = normalize_task(task)
     if swebench_verified:
         f2p_raw = task.get("FAIL_TO_PASS")
         if f2p_raw:
@@ -497,13 +528,16 @@ def _get_f2p_test_funcs(task: dict, raw_output: str, swebench_verified: bool) ->
             test_status = _parse_pytest_status_lines(raw_output)
         if not test_status:
             return None  # genuinely can't parse
+        fixed_passed_funcs = _r2e_fixed_passed_test_funcs(task)
+        if fixed_passed_funcs is None:
+            return None
         failed_funcs = set()
         for name, status in test_status.items():
-            if status in ("FAILED", "ERROR"):
-                bare = _normalize_test_func_name(name)
+            if str(status or "").strip().upper() in ("FAILED", "ERROR"):
+                bare = _normalize_test_func_name(str(name).split(" - ", 1)[0])
                 if bare:
                     failed_funcs.add(bare)
-        return failed_funcs  # empty set = parsed OK but no failures
+        return failed_funcs & fixed_passed_funcs  # empty set = parsed OK but no true F2P
 
 
 def _filter_traces_to_f2p(traces: list[list[dict]], f2p_test_funcs: set[str]) -> list[list[dict]]:
@@ -1531,6 +1565,7 @@ def compute_dynamic_bonus_map(
         f2p_diag["f2p_trace_count"] = len(f2p_traces)
         f2p_diag["f2p_recovery_source"] = None
         f2p_diag["f2p_recovery_test_funcs"] = None
+        f2p_diag["raw_gt_test_funcs_before_f2p"] = f2p_diag.get("raw_gt_test_funcs", [])
         print(f"  [{instance_id}] F2P filter: {len(raw_traces)} → {len(f2p_traces)} (F2P funcs: {f2p_test_funcs})")
 
         if not f2p_traces and not env.swebench_verified:
@@ -1549,6 +1584,8 @@ def compute_dynamic_bonus_map(
             f2p_diag["f2p_trace_count"] = len(f2p_traces)
             f2p_diag["f2p_recovery_source"] = "targeted_swebench_run"
             f2p_diag["f2p_recovery_test_funcs"] = sorted(f2p_test_funcs)
+
+        f2p_diag["raw_gt_test_funcs"] = _test_func_names_from_traces(f2p_traces)
 
         if not f2p_traces:
             case_type = "no_f2p"
