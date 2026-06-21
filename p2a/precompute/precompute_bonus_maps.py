@@ -70,7 +70,7 @@ _FIXTURE_NAMES = frozenset(
     }
 )
 
-BONUS_MAP_SCHEMA_VERSION = 3
+BONUS_MAP_SCHEMA_VERSION = 4
 TRACE_SIDECAR_FORMAT = "p2a_trace_sidecar_v1"
 DEFAULT_TRACE_MAX_EVENTS = 10_000
 DEFAULT_TRACE_MAX_FRAMES = 80
@@ -82,6 +82,19 @@ TRACE_PARSE_PATH = "/root/_p2a_swe_fault_traces.parse.jsonl"
 
 
 _PRODUCER_METADATA: dict | None = None
+
+
+def _empty_graph_metadata() -> dict:
+    return {
+        "raw_hop_max": 0,
+        "rewardable_node_count": 0,
+        "excluded_non_rewardable_node_count": 0,
+        "excluded_test_harness_node_count": 0,
+        "excluded_test_harness_nodes": [],
+        "excluded_symptom_prefix_node_count": 0,
+        "excluded_symptom_prefix_nodes": [],
+        "test_harness_file_patterns": [],
+    }
 
 
 def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
@@ -1100,6 +1113,7 @@ def compute_static_bonus_map(task: dict) -> dict:
                 "call_graph_nodes": {},
                 "call_graph_edges": [],
                 "hop_max": 0,
+                **_empty_graph_metadata(),
             },
             reason_code=case_type,
         )
@@ -1113,8 +1127,12 @@ def compute_static_bonus_map(task: dict) -> dict:
             "start_line": mc["start_line"],
             "end_line": mc["end_line"],
             "hop_distance": 0,
+            "raw_hop_distance": 0,
             "normalized_distance": 0.0,
             "observed_in_trace": False,
+            "rewardable": True,
+            "node_role": "program",
+            "excluded_from_hop_max": False,
         }
         if isinstance(mc.get("source"), str) and mc["source"]:
             call_graph_nodes[node_key]["source"] = mc["source"]
@@ -1130,6 +1148,14 @@ def compute_static_bonus_map(task: dict) -> dict:
             "call_graph_nodes": call_graph_nodes,
             "call_graph_edges": [],
             "hop_max": 0,
+            "raw_hop_max": 0,
+            "rewardable_node_count": len(call_graph_nodes),
+            "excluded_non_rewardable_node_count": 0,
+            "excluded_test_harness_node_count": 0,
+            "excluded_test_harness_nodes": [],
+            "excluded_symptom_prefix_node_count": 0,
+            "excluded_symptom_prefix_nodes": [],
+            "test_harness_file_patterns": [],
         },
         reason_code="static_mode",
     )
@@ -1636,10 +1662,13 @@ def compute_dynamic_bonus_map(
 
         # ── Decision node: STANDARD vs DIRECT ────────────────────────
         nodes = result.get("call_graph_nodes", {})
-        n_test_entries = sum(1 for v in nodes.values() if _is_test_file(v.get("file_path", "")))
-        n_intermediate = sum(1 for v in nodes.values() if not _is_test_file(v.get("file_path", "")) and v.get("normalized_distance", 0) > 0)
+        n_intermediate = sum(
+            1
+            for v in nodes.values()
+            if v.get("rewardable", True) and v.get("normalized_distance", 0) > 0
+        )
 
-        if n_test_entries > 0 and n_intermediate > 0:
+        if n_intermediate > 0:
             case_type = "standard"
         else:
             case_type = "direct"
@@ -1710,6 +1739,7 @@ def _make_result(
             "call_graph_nodes": {},
             "call_graph_edges": [],
             "hop_max": 0,
+            **_empty_graph_metadata(),
         },
         reason_code=reason_code or case_type,
         diagnostics=diagnostics,

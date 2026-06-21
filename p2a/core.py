@@ -514,6 +514,11 @@ def parse_read_actions(response_text: str, tracking_mode: str = "view_only") -> 
 # ---------------------------------------------------------------------------
 
 
+def is_rewardable_call_graph_node(node: dict) -> bool:
+    """Whether a call-graph node participates in P2A reward matching."""
+    return bool(node.get("rewardable", True))
+
+
 def match_reads_to_callgraph(reads: list[dict], bonus_map: dict) -> float:
     """Match Read actions against call graph nodes.
 
@@ -543,6 +548,8 @@ def match_reads_to_callgraph(reads: list[dict], bonus_map: dict) -> float:
         read_end = read["end_line"]
 
         for _node_key, node in nodes.items():
+            if not is_rewardable_call_graph_node(node):
+                continue
             node_path = node["file_path"]
             node_start = node["start_line"]
             node_end = node["end_line"]

@@ -18,6 +18,7 @@ from typing import Any, Iterable
 from p2a.core import (
     BonusMapStore,
     compute_p2a_multiplier,
+    is_rewardable_call_graph_node,
     match_reads_to_callgraph,
     normalize_action,
     parse_read_actions,
@@ -393,6 +394,8 @@ def _read_hit_nodes(read: dict, bonus_map: dict) -> set[str]:
     nodes = bonus_map.get("call_graph_nodes", {}) if bonus_map else {}
     hits = set()
     for node_key, node in nodes.items():
+        if not is_rewardable_call_graph_node(node):
+            continue
         if read["file_path"] != node["file_path"]:
             continue
         if read["start_line"] <= node["end_line"] and read["end_line"] >= node["start_line"]:
@@ -515,6 +518,10 @@ def _graph_topology(bonus_map: dict, hit_nodes: set[str], first_hits: dict[str, 
                 "start_line": node.get("start_line"),
                 "end_line": node.get("end_line"),
                 "normalized_distance": node.get("normalized_distance"),
+                "rewardable": node.get("rewardable", True),
+                "node_role": node.get("node_role"),
+                "excluded_from_hop_max": node.get("excluded_from_hop_max"),
+                "exclusion_reason": node.get("exclusion_reason"),
                 "hit": node_key in hit_nodes,
                 "first_step": first_hits.get(node_key),
                 "source_preview": _source_preview(node),
@@ -536,6 +543,8 @@ def _node_summaries(node_keys: Iterable[str], bonus_map: dict) -> list[dict]:
                 "start_line": node.get("start_line"),
                 "end_line": node.get("end_line"),
                 "normalized_distance": node.get("normalized_distance"),
+                "rewardable": node.get("rewardable", True),
+                "node_role": node.get("node_role"),
             }
         )
     return summaries
@@ -789,8 +798,10 @@ def score_record(
     result["bonus_case_type"] = bonus_map.get("case_type")
     result["bonus_traceable"] = bool(bonus_map.get("traceable"))
     nodes = bonus_map.get("call_graph_nodes", {})
+    rewardable_nodes = {key: node for key, node in nodes.items() if is_rewardable_call_graph_node(node)}
     result["has_call_graph"] = bool(nodes)
     result["n_call_graph_nodes"] = len(nodes)
+    result["n_rewardable_call_graph_nodes"] = len(rewardable_nodes)
     step_first_hits = _step_node_first_hits(step_reads, bonus_map) if step_reads else {}
     result["graph_topology"] = _graph_topology(bonus_map, set(), step_first_hits)
 
@@ -801,8 +812,8 @@ def score_record(
     hit_nodes = _all_read_hit_nodes(reads, bonus_map)
     result["n_hit_nodes"] = len(hit_nodes)
     result["graph_topology"] = _graph_topology(bonus_map, hit_nodes, step_first_hits)
-    if nodes:
-        result["hit_recall"] = len(hit_nodes) / len(nodes)
+    if rewardable_nodes:
+        result["hit_recall"] = len(hit_nodes) / len(rewardable_nodes)
         hit_read_count = sum(1 for read in reads if _read_hit_nodes(read, bonus_map))
         result["hit_precision"] = hit_read_count / len(reads) if reads else None
         if result["hit_precision"] is not None and result["hit_recall"] is not None:
