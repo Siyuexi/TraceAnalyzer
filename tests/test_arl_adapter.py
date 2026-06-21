@@ -738,6 +738,52 @@ class ArlAdapterTests(unittest.TestCase):
 
         self.assertEqual(funcs, {"test_loading_namespace_package"})
 
+    def test_r2e_f2p_intersects_buggy_failures_with_fixed_passes(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import (
+            _filter_traces_to_f2p,
+            _get_f2p_test_funcs,
+            _test_func_names_from_traces,
+        )
+
+        raw_output = "\n".join(
+            [
+                "FAILED r2e_tests/test_1.py::TestImportDialog::test_dialog - AssertionError",
+                "FAILED r2e_tests/test_1.py::TestUtils::test_open_compressed - AssertionError",
+            ]
+        )
+        task = {
+            "extra_info": {
+                "tools_kwargs": {
+                    "reward": {
+                        "metadata": {
+                            "expected_output_json": json.dumps(
+                                {
+                                    "TestUtils.test_open_compressed": "PASSED",
+                                    "TestImportDialog.test_dialog": "FAILED",
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        funcs = _get_f2p_test_funcs(task, raw_output, swebench_verified=False)
+
+        self.assertEqual(funcs, {"test_open_compressed"})
+        raw_gt_traces = [
+            [
+                {"file_path": "r2e_tests/test_1.py", "func_name": "test_dialog"},
+                {"file_path": "Orange/widgets/data/owcsvimport.py", "func_name": "_open"},
+            ],
+            [
+                {"file_path": "r2e_tests/test_1.py", "func_name": "test_open_compressed"},
+                {"file_path": "Orange/widgets/data/owcsvimport.py", "func_name": "_open"},
+            ],
+        ]
+        f2p_traces = _filter_traces_to_f2p(raw_gt_traces, funcs)
+        self.assertEqual(_test_func_names_from_traces(f2p_traces), ["test_open_compressed"])
+
     def test_swebench_exit_override_classifies_signature_mismatch(self) -> None:
         from p2a.precompute import precompute_bonus_maps as bonus_maps
 
