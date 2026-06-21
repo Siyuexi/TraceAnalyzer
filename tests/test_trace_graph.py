@@ -45,6 +45,45 @@ def test_call_graph_persists_edges_and_node_source():
     assert "source" not in result["unobserved_patched_callables"][0]
 
 
+def test_call_graph_uses_nested_helper_source_for_nested_frames():
+    traces = [
+        [
+            {"file_path": "tests/test_nested.py", "line_no": 5, "func_name": "C.outer", "qualified_name": "C.outer"},
+            {"file_path": "tests/test_nested.py", "line_no": 4, "func_name": "C.inner", "qualified_name": "C.inner"},
+            {"file_path": "pkg/target.py", "line_no": 2, "func_name": "target", "qualified_name": "target", "is_patched": True},
+        ]
+    ]
+    modified = [
+        {
+            "file_path": "pkg/target.py",
+            "qualified_name": "target",
+            "name": "target",
+            "start_line": 1,
+            "end_line": 2,
+            "source": "def target():\n    return 1",
+        },
+    ]
+    sources = {
+        "tests/test_nested.py": (
+            "class C:\n"
+            "    def outer(self):\n"
+            "        def inner():\n"
+            "            target()\n"
+            "        inner()\n"
+        ),
+        "pkg/target.py": "def target():\n    return 1\n",
+    }
+
+    result = build_call_graph_from_traces(traces, modified, file_reader=sources.get)
+
+    outer = result["call_graph_nodes"]["tests/test_nested.py::C.outer"]
+    inner = result["call_graph_nodes"]["tests/test_nested.py::C.inner"]
+    assert (outer["start_line"], outer["end_line"]) == (2, 5)
+    assert outer["source"] == "    def outer(self):\n        def inner():\n            target()\n        inner()"
+    assert (inner["start_line"], inner["end_line"]) == (3, 4)
+    assert inner["source"] == "        def inner():\n            target()"
+
+
 def test_modified_callable_metadata_carries_source_for_node_enrichment():
     modified = find_modified_callables_from_sources(
         "def target():\n    return 1\n",

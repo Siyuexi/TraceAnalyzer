@@ -1466,6 +1466,22 @@ def _source_snippet(source: str, start_line: int, end_line: int) -> str:
     return "\n".join(lines[start - 1 : end])
 
 
+def _select_enclosing_callable(
+    node_key: str,
+    call_site: int,
+    callables: dict[str, CallableInfo],
+) -> CallableInfo | None:
+    _, _, qualified_name = node_key.partition("::")
+    exact = callables.get(qualified_name)
+    if exact and exact.start_line <= call_site <= exact.end_line:
+        return exact
+
+    candidates = [ci for ci in callables.values() if ci.start_line <= call_site <= ci.end_line]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda ci: (ci.end_line - ci.start_line, -ci.start_line))
+
+
 def build_call_graph_from_traces(
     traces: list[list[dict]],
     modified_callables: list[dict],
@@ -1599,12 +1615,13 @@ def build_call_graph_from_traces(
 
     # Enrich non-patched nodes with AST-derived line ranges.
     # Each frame's line_no is the call-site execution line, which lies inside
-    # the function body.  We find the enclosing callable by checking which
-    # CallableInfo range contains that line, then update start_line/end_line.
+    # the function body.  We resolve the callable by qualified name when the
+    # tracer and AST agree, otherwise by the innermost callable containing that
+    # execution line.
     if file_reader:
         files_needed = {node["file_path"] for node in call_graph_nodes.values()}
         file_sources: dict[str, str] = {}
-        file_callables: dict[str, dict] = {}
+        file_callables: dict[str, dict[str, CallableInfo]] = {}
         for fp in files_needed:
             source = file_reader(fp)
             if source:
@@ -1615,11 +1632,10 @@ def build_call_graph_from_traces(
             if node_key not in patched_keys:
                 fp = node["file_path"]
                 call_site = node["start_line"]  # pre-enrichment = frame's line_no
-                for ci in file_callables.get(fp, {}).values():
-                    if ci.start_line <= call_site <= ci.end_line:
-                        node["start_line"] = ci.start_line
-                        node["end_line"] = ci.end_line
-                        break
+                ci = _select_enclosing_callable(node_key, call_site, file_callables.get(fp, {}))
+                if ci:
+                    node["start_line"] = ci.start_line
+                    node["end_line"] = ci.end_line
             source = patched_sources.get(node_key)
             if source is None:
                 source = _source_snippet(file_sources.get(node["file_path"], ""), node["start_line"], node["end_line"])
