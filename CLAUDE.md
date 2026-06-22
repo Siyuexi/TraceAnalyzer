@@ -53,9 +53,10 @@ touching this tree. The research-level `CLAUDE.md` is at the repo root.
 
 ## Research concept docs
 
-- The root `proposal.md` is the proposal source of truth, and root
-  `proposal.html` is its web rendering. Keep both synchronized when proposal
-  text changes.
+- The root `proposal.md` is the proposal source of truth, root
+  `proposal.html` is the canonical web rendering, and root
+  `report/proposal.html` is the VRC-hosted copy. Keep all three synchronized
+  when proposal text changes.
 - The root `report/2026-06-18_traceanalyzer-logic-map.html` is the living
   implementation/concept map. New P2A concepts should be recorded there with
   stable fully-qualified symbol anchors (`module::function` or
@@ -64,7 +65,7 @@ touching this tree. The research-level `CLAUDE.md` is at the repo root.
   reference for bonus-map taxonomy, capture, and classification semantics.
 - If a code change introduces a concept that changes research claims, method
   semantics, experiment definitions, or public terminology, update root
-  `proposal.md` and `proposal.html` in the same unit.
+  `proposal.md`, `proposal.html`, and `report/proposal.html` in the same unit.
 
 ## P2A advantage — verify before trusting (TODO)
 
