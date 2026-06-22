@@ -10,6 +10,15 @@ Everything is **self-contained**: data comes from HuggingFace, images from the
 pair-diag mirror of the original R2E images. There is **no dependency on the old
 `src-backup` fork**.
 
+## Bonus-map node roles
+
+Dynamic bonus maps keep all observed call-graph nodes for diagnostics, but only
+`program` nodes are rewardable. `test_harness` nodes are test files, runners,
+fixtures, and framework test utilities matched by path. `symptom_prefix` nodes
+are non-test framework/app frames before the trace enters the modified-code
+prefix for the patched callable. Both non-rewardable roles are excluded from
+`hop_max` and read matching, and their normalized distance is forced to `1.0`.
+
 > **ARL is the sandbox, not a "remote".** The `arl-env` SDK connects directly to the
 > ARL Gateway (`ARL_GATEWAY_URL`) to boot a per-instance container sandbox where tests
 > and P2A instrumentation run (bonus-map precompute, training rollouts); it is reachable
