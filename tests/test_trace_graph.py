@@ -1,6 +1,29 @@
 from p2a.trace import build_call_graph_from_traces, find_modified_callables_from_sources
 
 
+def _frame(file_path: str, qualified_name: str, line_no: int, *, patched: bool = False) -> dict:
+    frame = {
+        "file_path": file_path,
+        "line_no": line_no,
+        "func_name": qualified_name,
+        "qualified_name": qualified_name,
+    }
+    if patched:
+        frame["is_patched"] = True
+    return frame
+
+
+def _modified(file_path: str, qualified_name: str, start_line: int = 1, end_line: int = 2) -> dict:
+    return {
+        "file_path": file_path,
+        "qualified_name": qualified_name,
+        "name": qualified_name.rsplit(".", 1)[-1],
+        "start_line": start_line,
+        "end_line": end_line,
+        "source": f"def {qualified_name.rsplit('.', 1)[-1]}():\n    pass",
+    }
+
+
 def test_call_graph_persists_edges_and_node_source():
     traces = [
         [
@@ -259,3 +282,174 @@ def test_django_test_client_prefix_does_not_determine_hop_max():
     assert patched["rewardable"] is True
     assert patched["hop_distance"] == 0
     assert patched["normalized_distance"] == 0.0
+
+
+def test_upstream_patched_callable_gets_positive_distance_from_deeper_root():
+    traces = [
+        [
+            _frame("tests/test_root.py", "test_root", 1),
+            _frame("pkg/foo.py", "foo1", 10, patched=True),
+            _frame("pkg/mid.py", "mid", 20),
+            _frame("pkg/foo.py", "foo2", 30, patched=True),
+        ]
+    ]
+    modified = [
+        _modified("pkg/foo.py", "foo1", 10, 12),
+        _modified("pkg/foo.py", "foo2", 30, 32),
+    ]
+
+    result = build_call_graph_from_traces(traces, modified)
+
+    foo1 = result["call_graph_nodes"]["pkg/foo.py::foo1"]
+    foo2 = result["call_graph_nodes"]["pkg/foo.py::foo2"]
+    assert foo2["hop_distance"] == 0
+    assert foo2["normalized_distance"] == 0.0
+    assert foo1["rewardable"] is True
+    assert foo1["hop_distance"] > 0
+    assert result["patched_root_selection"]["terminal_root_seeds"] == ["pkg/foo.py::foo2"]
+    assert result["patched_root_selection"]["upstream_adapter_patched_callables"] == ["pkg/foo.py::foo1"]
+    assert result["patched_root_selection"]["legacy_distance_zero_node_count"] == 2
+    assert result["patched_root_selection"]["distance_zero_node_count"] == 1
+
+
+def test_independent_patched_callables_remain_separate_roots():
+    traces = [
+        [
+            _frame("tests/test_a.py", "test_a", 1),
+            _frame("pkg/a.py", "foo1", 10, patched=True),
+        ],
+        [
+            _frame("tests/test_b.py", "test_b", 1),
+            _frame("pkg/b.py", "foo2", 20, patched=True),
+        ],
+    ]
+    modified = [
+        _modified("pkg/a.py", "foo1", 10, 12),
+        _modified("pkg/b.py", "foo2", 20, 22),
+    ]
+
+    result = build_call_graph_from_traces(traces, modified)
+
+    assert result["call_graph_nodes"]["pkg/a.py::foo1"]["normalized_distance"] == 0.0
+    assert result["call_graph_nodes"]["pkg/b.py::foo2"]["normalized_distance"] == 0.0
+    assert result["patched_root_selection"]["terminal_root_seeds"] == ["pkg/a.py::foo1", "pkg/b.py::foo2"]
+    assert result["patched_root_selection"]["patched_dependency_edges"] == []
+
+
+def test_mixed_role_patched_callable_is_not_global_root():
+    traces = [
+        [
+            _frame("tests/test_short.py", "test_short", 1),
+            _frame("pkg/foo.py", "foo1", 10, patched=True),
+        ],
+        [
+            _frame("tests/test_long.py", "test_long", 1),
+            _frame("pkg/foo.py", "foo1", 10, patched=True),
+            _frame("pkg/mid.py", "mid", 20),
+            _frame("pkg/foo.py", "foo2", 30, patched=True),
+        ],
+    ]
+    modified = [
+        _modified("pkg/foo.py", "foo1", 10, 12),
+        _modified("pkg/foo.py", "foo2", 30, 32),
+    ]
+
+    result = build_call_graph_from_traces(traces, modified)
+
+    assert result["call_graph_nodes"]["pkg/foo.py::foo2"]["normalized_distance"] == 0.0
+    assert result["call_graph_nodes"]["pkg/foo.py::foo1"]["hop_distance"] > 0
+    trace_frames = result["patched_root_selection"]["observed_patched_frames_by_trace"]
+    short_foo1 = trace_frames[0]["patched_frames"][0]
+    long_foo1 = trace_frames[1]["patched_frames"][0]
+    assert short_foo1["trace_terminal"] is True
+    assert short_foo1["selected_root_seed"] is False
+    assert short_foo1["upstream_adapter"] is True
+    assert long_foo1["trace_terminal"] is False
+    assert long_foo1["downstream_patched_frame_keys"] == ["pkg/foo.py::foo2"]
+
+
+def test_overlapping_traces_use_deepest_terminal_patched_root():
+    traces = [
+        [
+            _frame("tests/test_long.py", "test_long", 1),
+            _frame("pkg/foo.py", "foo1", 10),
+            _frame("pkg/foo.py", "foo2", 20, patched=True),
+            _frame("pkg/foo.py", "foo3", 30, patched=True),
+        ],
+        [
+            _frame("tests/test_short.py", "test_short", 1),
+            _frame("pkg/foo.py", "foo2", 20, patched=True),
+            _frame("pkg/foo.py", "foo3", 30, patched=True),
+        ],
+    ]
+    modified = [
+        _modified("pkg/foo.py", "foo2", 20, 22),
+        _modified("pkg/foo.py", "foo3", 30, 32),
+    ]
+
+    result = build_call_graph_from_traces(traces, modified)
+
+    foo1 = result["call_graph_nodes"]["pkg/foo.py::foo1"]
+    foo2 = result["call_graph_nodes"]["pkg/foo.py::foo2"]
+    foo3 = result["call_graph_nodes"]["pkg/foo.py::foo3"]
+    assert result["patched_root_selection"]["terminal_root_seeds"] == ["pkg/foo.py::foo3"]
+    assert foo3["normalized_distance"] == 0.0
+    assert foo2["hop_distance"] == 1
+    assert foo1["hop_distance"] == 2
+    assert result["hop_max"] == 2
+
+
+def test_hop_max_uses_rewardable_program_nodes_with_shared_root():
+    traces = [
+        [
+            _frame("tests/test_long.py", "test_long", 1),
+            _frame("pkg/a.py", "a", 10),
+            _frame("pkg/b.py", "b", 20),
+            _frame("pkg/root.py", "root", 30, patched=True),
+        ],
+        [
+            _frame("tests/test_short.py", "test_short", 1),
+            _frame("pkg/root.py", "root", 30, patched=True),
+        ],
+    ]
+    modified = [_modified("pkg/root.py", "root", 30, 32)]
+
+    result = build_call_graph_from_traces(traces, modified)
+
+    assert result["hop_max"] == 2
+    assert result["call_graph_nodes"]["pkg/a.py::a"]["normalized_distance"] == 1.0
+    assert result["call_graph_nodes"]["pkg/b.py::b"]["normalized_distance"] == 0.5
+    for key, node in result["call_graph_nodes"].items():
+        if key.startswith("tests/"):
+            assert node["rewardable"] is False
+            assert node["normalized_distance"] == 1.0
+
+
+def test_orange3_70a4df3348_regression_uses_number_of_decimals_as_root():
+    traces = [
+        [
+            _frame("r2e_tests/test_1.py", "TestContinuousVariable.test_decimals", 8),
+            _frame("Orange/data/variable.py", "ContinuousVariable.__init__", 525, patched=True),
+            _frame("Orange/data/variable.py", "ContinuousVariable.number_of_decimals", 560, patched=True),
+        ]
+    ]
+    modified = [
+        _modified("Orange/data/variable.py", "ContinuousVariable.__init__", 519, 530),
+        _modified("Orange/data/variable.py", "ContinuousVariable.number_of_decimals", 559, 562),
+    ]
+
+    result = build_call_graph_from_traces(traces, modified)
+
+    init = result["call_graph_nodes"]["Orange/data/variable.py::ContinuousVariable.__init__"]
+    number = result["call_graph_nodes"]["Orange/data/variable.py::ContinuousVariable.number_of_decimals"]
+    assert number["hop_distance"] == 0
+    assert number["normalized_distance"] == 0.0
+    assert init["rewardable"] is True
+    assert init["hop_distance"] == 1
+    assert init["normalized_distance"] == 1.0
+    assert result["patched_root_selection"]["terminal_root_seeds"] == [
+        "Orange/data/variable.py::ContinuousVariable.number_of_decimals"
+    ]
+    assert result["patched_root_selection"]["upstream_adapter_patched_callables"] == [
+        "Orange/data/variable.py::ContinuousVariable.__init__"
+    ]

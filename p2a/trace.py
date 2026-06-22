@@ -1553,6 +1553,14 @@ def _trace_reward_start_index(
     return fallback if fallback is not None else patched_idx
 
 
+def _frame_node_key(frame: dict) -> str:
+    return f"{frame['file_path']}::{frame.get('qualified_name', frame['func_name'])}"
+
+
+def _callable_node_key(callable_info: dict) -> str:
+    return f"{callable_info['file_path']}::{callable_info['qualified_name']}"
+
+
 def build_call_graph_from_traces(
     traces: list[list[dict]],
     modified_callables: list[dict],
@@ -1561,9 +1569,9 @@ def build_call_graph_from_traces(
     """Build a call graph with hop distances from aggregated traces.
 
     Each trace is a call chain from test → ... → patched callable.
-    Patched frames (is_patched=True) get hop_distance=0.
-    From each patched frame, we walk backward through the trace to assign
-    hop distances to callers.
+    Terminal patched frames in the trace-induced patched-callable dependency
+    graph get hop_distance=0. From each terminal patched frame, we walk
+    backward through the trace to assign hop distances to callers.
 
     For callables appearing in multiple traces, the minimum hop distance is kept.
 
@@ -1583,9 +1591,6 @@ def build_call_graph_from_traces(
             - traceable: True
     """
     # PRECONDITION: each trace in `traces` is ordered outer -> inner. See generate_tracer_module.
-    # node_key → {file_path, func_name, min_hop_distance, line_no}
-    # We use file_path::qualified_name as node key
-    node_info: dict[str, dict] = {}
 
     # Strip internal instrumentation keys from output
     clean_callables = [
@@ -1593,74 +1598,141 @@ def build_call_graph_from_traces(
         for mc in modified_callables
     ]
 
-    # Identify which patched callables appeared in runtime traces.
-    observed_patched_keys: set[tuple[str, str]] = set()
-    for trace in traces:
-        for frame in trace:
+    # Identify patched-callable reachability induced by the observed traces.
+    observed_patched_keys: set[str] = set()
+    patched_frames_by_trace: list[dict[str, Any]] = []
+    patched_dependency_edges: set[tuple[str, str]] = set()
+    for trace_idx, trace in enumerate(traces):
+        patched_frames: list[dict[str, Any]] = []
+        for frame_idx, frame in enumerate(trace):
             if frame.get("is_patched"):
-                qn = frame.get("qualified_name", frame.get("func_name"))
-                observed_patched_keys.add((frame["file_path"], qn))
+                node_key = _frame_node_key(frame)
+                patched_frames.append(
+                    {
+                        "frame_index": frame_idx,
+                        "node_key": node_key,
+                        "downstream_patched_frame_keys": [],
+                    }
+                )
+                observed_patched_keys.add(node_key)
+
+        for upstream_pos, upstream in enumerate(patched_frames):
+            downstream_keys = {
+                downstream["node_key"]
+                for downstream in patched_frames[upstream_pos + 1 :]
+                if downstream["node_key"] != upstream["node_key"]
+            }
+            upstream["downstream_patched_frame_keys"] = sorted(downstream_keys)
+            for downstream_key in downstream_keys:
+                patched_dependency_edges.add((upstream["node_key"], downstream_key))
+
+        patched_frames_by_trace.append(
+            {
+                "trace_index": trace_idx,
+                "patched_frames": patched_frames,
+            }
+        )
+
+    upstream_patched_keys = {upstream for upstream, _ in patched_dependency_edges}
+    terminal_root_keys = observed_patched_keys - upstream_patched_keys
+    upstream_adapter_patched_keys = observed_patched_keys - terminal_root_keys
+    for trace_item in patched_frames_by_trace:
+        for frame_item in trace_item["patched_frames"]:
+            frame_item["trace_terminal"] = not frame_item["downstream_patched_frame_keys"]
+            frame_item["selected_root_seed"] = frame_item["node_key"] in terminal_root_keys
+            frame_item["upstream_adapter"] = frame_item["node_key"] in upstream_adapter_patched_keys
 
     unobserved_patched_callables: list[dict] = []
     reward_prefixes = _reward_prefixes(modified_callables)
-    rewardable_seen: set[str] = set()
-    excluded_reasons: dict[str, set[str]] = {}
 
-    def mark_excluded(node_key: str, reason: str) -> None:
-        excluded_reasons.setdefault(node_key, set()).add(reason)
-
-    def mark_rewardable(node_key: str) -> None:
-        rewardable_seen.add(node_key)
-
-    # 4a. Seed only observed patched callables at d=0
     for mc in modified_callables:
-        if (mc["file_path"], mc["qualified_name"]) in observed_patched_keys:
-            seed_key = f"{mc['file_path']}::{mc['qualified_name']}"
-            node_info[seed_key] = {
-                "file_path": mc["file_path"],
-                "func_name": mc["qualified_name"],
-                "line_no": mc["start_line"],
-                "hop_distance": 0,
-                "observed_in_trace": True,
-            }
-            mark_rewardable(seed_key)
-        else:
+        if _callable_node_key(mc) not in observed_patched_keys:
             unobserved_patched_callables.append({k: v for k, v in mc.items() if not k.startswith("instr_") and k != "source"})
 
-    for trace in traces:
-        # Find patched frame indices in this trace
-        patched_indices = [j for j, frame in enumerate(trace) if frame.get("is_patched", False)]
-        if not patched_indices:
-            continue
+    def collect_node_distances(root_indices_by_trace: list[list[int]]) -> tuple[dict[str, dict], set[str], dict[str, set[str]]]:
+        collected_info: dict[str, dict] = {}
+        collected_rewardable: set[str] = set()
+        collected_excluded: dict[str, set[str]] = {}
 
-        # For each patched frame, walk backward assigning hop distances
-        for patched_idx in patched_indices:
-            reward_start_idx = _trace_reward_start_index(trace, patched_idx, reward_prefixes)
-            for hop, j in enumerate(range(patched_idx, -1, -1)):
-                frame = trace[j]
-                node_key = f"{frame['file_path']}::{frame.get('qualified_name', frame['func_name'])}"
-                test_reason = _test_file_reason(str(frame.get("file_path") or ""))
-                if test_reason:
-                    mark_excluded(node_key, f"test_suite_or_harness:{test_reason}")
-                elif j < reward_start_idx:
-                    mark_excluded(node_key, "symptom_prefix")
-                else:
-                    mark_rewardable(node_key)
+        def mark_excluded(node_key: str, reason: str) -> None:
+            collected_excluded.setdefault(node_key, set()).add(reason)
 
-                if node_key not in node_info:
-                    node_info[node_key] = {
-                        "file_path": frame["file_path"],
-                        "func_name": frame.get("qualified_name", frame["func_name"]),
-                        "line_no": frame["line_no"],
-                        "hop_distance": hop,
-                        "observed_in_trace": True,
-                    }
-                else:
-                    # Keep minimum hop distance
-                    node_info[node_key]["hop_distance"] = min(node_info[node_key]["hop_distance"], hop)
-                    node_info[node_key]["observed_in_trace"] = True
+        def mark_rewardable(node_key: str) -> None:
+            collected_rewardable.add(node_key)
+
+        for trace, root_indices in zip(traces, root_indices_by_trace, strict=False):
+            for root_idx in root_indices:
+                reward_start_idx = _trace_reward_start_index(trace, root_idx, reward_prefixes)
+                for hop, j in enumerate(range(root_idx, -1, -1)):
+                    frame = trace[j]
+                    node_key = _frame_node_key(frame)
+                    test_reason = _test_file_reason(str(frame.get("file_path") or ""))
+                    if test_reason:
+                        mark_excluded(node_key, f"test_suite_or_harness:{test_reason}")
+                    elif j < reward_start_idx:
+                        mark_excluded(node_key, "symptom_prefix")
+                    else:
+                        mark_rewardable(node_key)
+
+                    if node_key not in collected_info:
+                        collected_info[node_key] = {
+                            "file_path": frame["file_path"],
+                            "func_name": frame.get("qualified_name", frame["func_name"]),
+                            "line_no": frame["line_no"],
+                            "hop_distance": hop,
+                            "observed_in_trace": True,
+                        }
+                    else:
+                        collected_info[node_key]["hop_distance"] = min(collected_info[node_key]["hop_distance"], hop)
+                        collected_info[node_key]["observed_in_trace"] = True
+        return collected_info, collected_rewardable, collected_excluded
+
+    def rewardable_keys_for(info_by_key: dict[str, dict], rewardable: set[str], excluded: dict[str, set[str]]) -> set[str]:
+        return {
+            key
+            for key in info_by_key
+            if key in rewardable and not any(reason.startswith("test_suite_or_harness:") for reason in excluded.get(key, ()))
+        }
+
+    def diagnostic_hop_max(info_by_key: dict[str, dict], rewardable: set[str], excluded: dict[str, set[str]]) -> int:
+        keys = rewardable_keys_for(info_by_key, rewardable, excluded)
+        hops = [info_by_key[key]["hop_distance"] for key in keys]
+        return max(max(hops, default=0), 1) if info_by_key else 0
+
+    legacy_root_indices_by_trace = [
+        [frame["frame_index"] for frame in item["patched_frames"]]
+        for item in patched_frames_by_trace
+    ]
+    legacy_info, legacy_rewardable, legacy_excluded = collect_node_distances(legacy_root_indices_by_trace)
+    legacy_rewardable_keys = rewardable_keys_for(legacy_info, legacy_rewardable, legacy_excluded)
+    legacy_zero_node_count = sum(
+        1
+        for key in legacy_rewardable_keys
+        if legacy_info[key]["hop_distance"] == 0
+    )
+    legacy_hop_max = diagnostic_hop_max(legacy_info, legacy_rewardable, legacy_excluded)
+
+    root_indices_by_trace = [
+        [
+            frame["frame_index"]
+            for frame in item["patched_frames"]
+            if frame["node_key"] in terminal_root_keys
+        ]
+        for item in patched_frames_by_trace
+    ]
+    node_info, rewardable_seen, excluded_reasons = collect_node_distances(root_indices_by_trace)
 
     if not node_info:
+        patched_root_selection = {
+            "observed_patched_frames_by_trace": patched_frames_by_trace,
+            "terminal_root_seeds": sorted(terminal_root_keys),
+            "upstream_adapter_patched_callables": sorted(upstream_adapter_patched_keys),
+            "patched_dependency_edges": [[upstream, downstream] for upstream, downstream in sorted(patched_dependency_edges)],
+            "legacy_distance_zero_node_count": legacy_zero_node_count,
+            "distance_zero_node_count": 0,
+            "legacy_hop_max": legacy_hop_max,
+            "hop_max": 0,
+        }
         return {
             "call_graph_nodes": {},
             "call_graph_edges": [],
@@ -1673,17 +1745,14 @@ def build_call_graph_from_traces(
             "excluded_symptom_prefix_node_count": 0,
             "excluded_symptom_prefix_nodes": [],
             "test_harness_file_patterns": [],
+            "patched_root_selection": patched_root_selection,
             "patched_callables": clean_callables,
             "unobserved_patched_callables": unobserved_patched_callables,
             "traceable": False,
         }
 
     raw_hop_max = max(n["hop_distance"] for n in node_info.values())
-    rewardable_keys = {
-        key
-        for key in node_info
-        if key in rewardable_seen and not any(reason.startswith("test_suite_or_harness:") for reason in excluded_reasons.get(key, ()))
-    }
+    rewardable_keys = rewardable_keys_for(node_info, rewardable_seen, excluded_reasons)
     rewardable_hops = [node_info[key]["hop_distance"] for key in rewardable_keys]
     hop_max = max(max(rewardable_hops, default=0), 1)  # avoid division by zero
 
@@ -1763,13 +1832,28 @@ def build_call_graph_from_traces(
             for j in range(0, patched_idx):
                 caller = trace[j]
                 callee = trace[j + 1]
-                caller_key = f"{caller['file_path']}::{caller.get('qualified_name', caller['func_name'])}"
-                callee_key = f"{callee['file_path']}::{callee.get('qualified_name', callee['func_name'])}"
+                caller_key = _frame_node_key(caller)
+                callee_key = _frame_node_key(callee)
                 if caller_key in call_graph_nodes and callee_key in call_graph_nodes:
                     edge_set.add((caller_key, callee_key))
     call_graph_edges = [[caller, callee] for caller, callee in sorted(edge_set)]
 
     traceable = any(node["rewardable"] and node["hop_distance"] == 0 for node in call_graph_nodes.values())
+    distance_zero_node_count = sum(
+        1
+        for node in call_graph_nodes.values()
+        if node.get("rewardable") and node.get("normalized_distance") == 0.0
+    )
+    patched_root_selection = {
+        "observed_patched_frames_by_trace": patched_frames_by_trace,
+        "terminal_root_seeds": sorted(terminal_root_keys),
+        "upstream_adapter_patched_callables": sorted(upstream_adapter_patched_keys),
+        "patched_dependency_edges": [[upstream, downstream] for upstream, downstream in sorted(patched_dependency_edges)],
+        "legacy_distance_zero_node_count": legacy_zero_node_count,
+        "distance_zero_node_count": distance_zero_node_count,
+        "legacy_hop_max": legacy_hop_max,
+        "hop_max": hop_max,
+    }
     excluded_nodes = sorted(key for key, node in call_graph_nodes.items() if not node.get("rewardable"))
     excluded_test_nodes = sorted(
         key
@@ -1801,6 +1885,7 @@ def build_call_graph_from_traces(
                 if reason.startswith("test_suite_or_harness:")
             }
         ),
+        "patched_root_selection": patched_root_selection,
         "patched_callables": clean_callables,
         "unobserved_patched_callables": unobserved_patched_callables,
         "traceable": traceable,
