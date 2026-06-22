@@ -101,7 +101,8 @@ def test_call_graph_uses_nested_helper_source_for_nested_frames():
     traces = [
         [
             {"file_path": "tests/test_nested.py", "line_no": 5, "func_name": "C.outer", "qualified_name": "C.outer"},
-            {"file_path": "tests/test_nested.py", "line_no": 4, "func_name": "C.inner", "qualified_name": "C.inner"},
+            {"file_path": "pkg/nested.py", "line_no": 5, "func_name": "C.outer", "qualified_name": "C.outer"},
+            {"file_path": "pkg/nested.py", "line_no": 4, "func_name": "C.inner", "qualified_name": "C.inner"},
             {"file_path": "pkg/target.py", "line_no": 2, "func_name": "target", "qualified_name": "target", "is_patched": True},
         ]
     ]
@@ -116,7 +117,8 @@ def test_call_graph_uses_nested_helper_source_for_nested_frames():
         },
     ]
     sources = {
-        "tests/test_nested.py": (
+        "tests/test_nested.py": "def test_nested():\n    C().outer()\n",
+        "pkg/nested.py": (
             "class C:\n"
             "    def outer(self):\n"
             "        def inner():\n"
@@ -128,8 +130,8 @@ def test_call_graph_uses_nested_helper_source_for_nested_frames():
 
     result = build_call_graph_from_traces(traces, modified, file_reader=sources.get)
 
-    outer = result["call_graph_nodes"]["tests/test_nested.py::C.outer"]
-    inner = result["call_graph_nodes"]["tests/test_nested.py::C.inner"]
+    outer = result["call_graph_nodes"]["pkg/nested.py::C.outer"]
+    inner = result["call_graph_nodes"]["pkg/nested.py::C.inner"]
     assert (outer["start_line"], outer["end_line"]) == (2, 5)
     assert outer["source"] == "    def outer(self):\n        def inner():\n            target()\n        inner()"
     assert (inner["start_line"], inner["end_line"]) == (3, 4)
@@ -426,6 +428,7 @@ def test_generic_issue_anchor_names_do_not_anchor_without_context():
             _frame("pkg/helpers.py", "inner", 10),
             _frame("pkg/wrappers.py", "wrapper", 20),
             _frame("pkg/views.py", "View.get", 30),
+            _frame("pkg/factory.py", "Factory.__new__", 35),
             _frame("pkg/root.py", "patched_root", 40, patched=True),
         ]
     ]
@@ -434,7 +437,7 @@ def test_generic_issue_anchor_names_do_not_anchor_without_context():
     result = build_call_graph_from_traces(
         traces,
         modified,
-        issue_text="The issue mentions `inner`, `wrapper`, get(), and `__call__` generically.",
+        issue_text="The issue mentions `inner`, `wrapper`, get(), `__new__`, and `__call__` generically.",
     )
 
     assert result["reward_start_source"] == "test_filtered_fallback"
@@ -443,6 +446,108 @@ def test_generic_issue_anchor_names_do_not_anchor_without_context():
     for key, node in result["call_graph_nodes"].items():
         if key.startswith("pkg/"):
             assert node["rewardable"] is True
+
+
+def test_bare_file_issue_anchor_does_not_match_every_same_basename():
+    traces = [
+        [
+            _frame("tests/test_init.py", "test_init", 1),
+            _frame("src/_pytest/config/__init__.py", "main", 10),
+            _frame("src/_pytest/python.py", "Package.collect", 20, patched=True),
+        ]
+    ]
+    modified = [_modified("src/_pytest/python.py", "Package.collect", 20, 22)]
+
+    result = build_call_graph_from_traces(
+        traces,
+        modified,
+        issue_text="pytest tries to collect random `__init__.py` files.",
+    )
+
+    assert result["reward_start_source"] == "test_filtered_fallback"
+    assert result["selected_issue_anchor_nodes"] == []
+
+
+def test_issue_anchor_matches_module_qualified_function_by_leaf():
+    traces = [
+        [
+            _frame("tests/test_autoreload.py", "test_child_arguments", 1),
+            _frame("django/test/runner.py", "DiscoverRunner.run_tests", 10),
+            _frame("django/utils/autoreload.py", "get_child_arguments", 20, patched=True),
+        ]
+    ]
+    modified = [_modified("django/utils/autoreload.py", "get_child_arguments", 20, 22)]
+
+    result = build_call_graph_from_traces(
+        traces,
+        modified,
+        issue_text="Allow `django.utils.autoreload.get_child_arguments` to handle module execution.",
+    )
+
+    assert result["reward_start_source"] == "issue_anchor"
+    assert result["selected_issue_anchor_nodes"] == ["django/utils/autoreload.py::get_child_arguments"]
+
+
+def test_issue_anchor_matches_qualified_class_methods():
+    traces = [
+        [
+            _frame("tests/test_delete.py", "test_delete", 1),
+            _frame("django/db/models/deletion.py", "Collector.collect", 10),
+            _frame("django/db/models/deletion.py", "Collector.can_fast_delete", 20, patched=True),
+        ]
+    ]
+    modified = [_modified("django/db/models/deletion.py", "Collector.can_fast_delete", 20, 22)]
+
+    result = build_call_graph_from_traces(
+        traces,
+        modified,
+        issue_text="The issue reproduces through `deletion.Collector`.",
+    )
+
+    assert result["selected_issue_anchor_nodes"] == ["django/db/models/deletion.py::Collector.can_fast_delete"]
+
+
+def test_issue_anchor_prefers_specific_class_match_over_deeper_leaf_match():
+    traces = [
+        [
+            _frame("tests/test_filters.py", "test_filters", 1),
+            _frame("django/contrib/admin/filters.py", "RelatedFieldListFilter.field_choices", 10),
+            _frame("django/db/models/fields/__init__.py", "ForeignKey.get_choices", 20, patched=True),
+        ]
+    ]
+    modified = [_modified("django/db/models/fields/__init__.py", "ForeignKey.get_choices", 20, 22)]
+
+    result = build_call_graph_from_traces(
+        traces,
+        modified,
+        issue_text="Ordering problem in `admin.RelatedFieldListFilter`; it calls field.get_choices.",
+    )
+
+    assert result["selected_issue_anchor_nodes"] == [
+        "django/contrib/admin/filters.py::RelatedFieldListFilter.field_choices"
+    ]
+
+
+def test_issue_anchor_matches_public_api_values_suffix():
+    traces = [
+        [
+            _frame("tests/test_wcs.py", "test_wcs", 1),
+            _frame("astropy/wcs/wcsapi/wrappers/sliced_wcs.py", "SlicedLowLevelWCS.world_to_pixel_values", 20, patched=True),
+        ]
+    ]
+    modified = [
+        _modified("astropy/wcs/wcsapi/wrappers/sliced_wcs.py", "SlicedLowLevelWCS.world_to_pixel_values", 20, 22)
+    ]
+
+    result = build_call_graph_from_traces(
+        traces,
+        modified,
+        issue_text="Inconsistent behavior of `world_to_pixel` in `SlicedLowLevelWCS`.",
+    )
+
+    assert result["selected_issue_anchor_nodes"] == [
+        "astropy/wcs/wcsapi/wrappers/sliced_wcs.py::SlicedLowLevelWCS.world_to_pixel_values"
+    ]
 
 
 def test_disambiguated_generic_issue_anchor_can_match():

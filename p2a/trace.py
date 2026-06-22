@@ -1512,6 +1512,7 @@ def _select_enclosing_callable(
 
 _GENERIC_ISSUE_ANCHOR_NAMES = {
     "__call__",
+    "__new__",
     "call",
     "delete",
     "dispatch",
@@ -1564,6 +1565,7 @@ class IssueAnchorCandidate:
 
 def _normalize_anchor_path(path: str) -> str:
     value = path.replace("\\", "/").strip().strip("\"'")
+    value = value.split("#", 1)[0]
     value = re.sub(r":\d+(?::\d+)?$", "", value)
     return value.lstrip("./")
 
@@ -1700,7 +1702,11 @@ def _normalize_qualname(value: str) -> str:
 def _path_suffix_matches(frame_path: str, candidate_path: str) -> bool:
     frame_norm = _normalize_anchor_path(frame_path)
     candidate_norm = _normalize_anchor_path(candidate_path)
-    return frame_norm == candidate_norm or frame_norm.endswith(f"/{candidate_norm}")
+    return (
+        frame_norm == candidate_norm
+        or frame_norm.endswith(f"/{candidate_norm}")
+        or candidate_norm.endswith(f"/{frame_norm}")
+    )
 
 
 def _qualname_suffix_matches(frame_qualname: str, candidate_qualname: str) -> bool:
@@ -1709,31 +1715,66 @@ def _qualname_suffix_matches(frame_qualname: str, candidate_qualname: str) -> bo
     return frame_norm == candidate_norm or frame_norm.endswith(f".{candidate_norm}")
 
 
+def _qualified_leaf_matches_frame(frame_qualname: str, candidate_qualname: str) -> bool:
+    candidate_name = _anchor_leaf(candidate_qualname)
+    if _is_generic_issue_anchor(candidate_name):
+        return False
+    return _name_matches_frame(frame_qualname, candidate_name)
+
+
+def _qualified_class_matches_frame(frame_qualname: str, candidate_qualname: str) -> bool:
+    candidate_name = _anchor_leaf(candidate_qualname)
+    if not candidate_name[:1].isupper():
+        return False
+    frame_norm = _normalize_qualname(frame_qualname)
+    return f".{candidate_name}." in f".{frame_norm}."
+
+
 def _name_matches_frame(frame_qualname: str, candidate_name: str) -> bool:
     frame_norm = _normalize_qualname(frame_qualname)
-    return frame_norm.rsplit(".", 1)[-1] == candidate_name
+    frame_name = frame_norm.rsplit(".", 1)[-1]
+    if frame_name == candidate_name:
+        return True
+    if _is_generic_issue_anchor(candidate_name):
+        return False
+    return any(
+        frame_name == f"{candidate_name}{suffix}"
+        for suffix in ("_value", "_values")
+    )
 
 
-def _issue_anchor_matches_frame(candidate: IssueAnchorCandidate, frame: dict) -> bool:
+def _issue_anchor_match_score(candidate: IssueAnchorCandidate, frame: dict) -> int | None:
     frame_path = str(frame.get("file_path") or "")
     frame_qualname = str(frame.get("qualified_name") or frame.get("func_name") or "")
 
     if candidate.file_path:
+        if "/" not in _normalize_anchor_path(candidate.file_path) and not candidate.qualified_name and not candidate.name:
+            return None
         if not _path_suffix_matches(frame_path, candidate.file_path):
-            return False
+            return None
         if candidate.qualified_name:
-            return _qualname_suffix_matches(frame_qualname, candidate.qualified_name)
+            return 100 if _qualname_suffix_matches(frame_qualname, candidate.qualified_name) else None
         if candidate.name:
-            return _name_matches_frame(frame_qualname, candidate.name)
-        return True
+            return 80 if _name_matches_frame(frame_qualname, candidate.name) else None
+        return 30
 
     if candidate.qualified_name:
-        return _qualname_suffix_matches(frame_qualname, candidate.qualified_name)
+        if _qualname_suffix_matches(frame_qualname, candidate.qualified_name):
+            return 90
+        if _qualified_class_matches_frame(frame_qualname, candidate.qualified_name):
+            return 70
+        if _qualified_leaf_matches_frame(frame_qualname, candidate.qualified_name):
+            return 60
+        return None
 
     if candidate.name:
-        return _name_matches_frame(frame_qualname, candidate.name)
+        return 50 if _name_matches_frame(frame_qualname, candidate.name) else None
 
-    return False
+    return None
+
+
+def _issue_anchor_matches_frame(candidate: IssueAnchorCandidate, frame: dict) -> bool:
+    return _issue_anchor_match_score(candidate, frame) is not None
 
 
 def _select_issue_anchor(
@@ -1742,12 +1783,21 @@ def _select_issue_anchor(
     candidates: list[IssueAnchorCandidate],
 ) -> tuple[int, list[IssueAnchorCandidate]] | None:
     selected: tuple[int, list[IssueAnchorCandidate]] | None = None
+    selected_rank: tuple[int, int] | None = None
     for idx, frame in enumerate(trace[: root_idx + 1]):
         if _test_file_reason(str(frame.get("file_path") or "")):
             continue
-        matches = [candidate for candidate in candidates if _issue_anchor_matches_frame(candidate, frame)]
+        scored_matches = [
+            (score, candidate)
+            for candidate in candidates
+            if (score := _issue_anchor_match_score(candidate, frame)) is not None
+        ]
+        matches = [candidate for _score, candidate in scored_matches]
         if matches:
-            selected = (idx, matches)
+            rank = (max(score for score, _candidate in scored_matches), idx)
+            if selected_rank is None or rank > selected_rank:
+                selected = (idx, matches)
+                selected_rank = rank
     return selected
 
 
@@ -2156,7 +2206,7 @@ def build_call_graph_from_traces(
             source = patched_sources.get(node_key)
             if source is None:
                 source = _source_snippet(file_sources.get(node["file_path"], ""), node["start_line"], node["end_line"])
-            if source:
+            if source and node.get("rewardable"):
                 node["source"] = source
 
     edge_set: set[tuple[str, str]] = set()
