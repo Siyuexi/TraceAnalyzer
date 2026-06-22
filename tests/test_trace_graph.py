@@ -77,6 +77,26 @@ def test_call_graph_persists_edges_and_node_source():
     assert result["excluded_test_harness_nodes"] == ["tests/test_demo.py::test_demo"]
 
 
+def test_call_graph_skips_recursive_self_edges():
+    traces = [
+        [
+            _frame("tests/test_recursive.py", "test_recursive", 1),
+            _frame("pkg/recursive.py", "recursive", 10),
+            _frame("pkg/recursive.py", "recursive", 11),
+            _frame("pkg/root.py", "root", 20, patched=True),
+        ]
+    ]
+    modified = [_modified("pkg/root.py", "root", 20, 22)]
+
+    result = build_call_graph_from_traces(traces, modified)
+
+    assert ["pkg/recursive.py::recursive", "pkg/recursive.py::recursive"] not in result["call_graph_edges"]
+    assert result["call_graph_edges"] == [
+        ["pkg/recursive.py::recursive", "pkg/root.py::root"],
+        ["tests/test_recursive.py::test_recursive", "pkg/recursive.py::recursive"],
+    ]
+
+
 def test_call_graph_uses_nested_helper_source_for_nested_frames():
     traces = [
         [
@@ -480,6 +500,31 @@ def test_mixed_role_patched_callable_is_not_global_root():
     assert short_foo1["upstream_adapter"] is True
     assert long_foo1["trace_terminal"] is False
     assert long_foo1["downstream_patched_frame_keys"] == ["pkg/foo.py::foo2"]
+
+
+def test_repeated_patched_frames_are_deduplicated_in_trace_diagnostics():
+    traces = [
+        [
+            _frame("tests/test_repeated.py", "test_repeated", 1),
+            _frame("pkg/a.py", "A", 10, patched=True),
+            _frame("pkg/a.py", "A", 11, patched=True),
+            _frame("pkg/b.py", "B", 20, patched=True),
+        ]
+    ]
+    modified = [
+        _modified("pkg/a.py", "A", 10, 12),
+        _modified("pkg/b.py", "B", 20, 22),
+    ]
+
+    result = build_call_graph_from_traces(traces, modified)
+
+    assert ["pkg/a.py::A", "pkg/a.py::A"] not in result["call_graph_edges"]
+    assert result["patched_root_selection"]["patched_dependency_edges"] == [["pkg/a.py::A", "pkg/b.py::B"]]
+    trace_frames = result["patched_root_selection"]["observed_patched_frames_by_trace"][0]["patched_frames"]
+    assert [frame["node_key"] for frame in trace_frames] == ["pkg/a.py::A", "pkg/b.py::B"]
+    assert trace_frames[0]["frame_index"] == 1
+    assert trace_frames[0]["frame_indices"] == [1, 2]
+    assert trace_frames[0]["downstream_patched_frame_keys"] == ["pkg/b.py::B"]
 
 
 def test_cyclic_patched_dependency_component_remains_traceable():

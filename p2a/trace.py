@@ -1871,28 +1871,40 @@ def build_call_graph_from_traces(
     patched_frames_by_trace: list[dict[str, Any]] = []
     patched_dependency_edges: set[tuple[str, str]] = set()
     for trace_idx, trace in enumerate(traces):
-        patched_frames: list[dict[str, Any]] = []
+        patched_occurrences: list[tuple[int, str]] = []
         for frame_idx, frame in enumerate(trace):
             if frame.get("is_patched"):
                 node_key = _frame_node_key(frame)
-                patched_frames.append(
-                    {
-                        "frame_index": frame_idx,
-                        "node_key": node_key,
-                        "downstream_patched_frame_keys": [],
-                    }
-                )
+                patched_occurrences.append((frame_idx, node_key))
                 observed_patched_keys.add(node_key)
 
-        for upstream_pos, upstream in enumerate(patched_frames):
+        patched_frame_items: dict[str, dict[str, Any]] = {}
+        for frame_idx, node_key in patched_occurrences:
+            frame_item = patched_frame_items.setdefault(
+                node_key,
+                {
+                    "frame_index": frame_idx,
+                    "frame_indices": [],
+                    "node_key": node_key,
+                    "downstream_patched_frame_keys": set(),
+                },
+            )
+            frame_item["frame_indices"].append(frame_idx)
+
+        for upstream_pos, (_frame_idx, upstream_key) in enumerate(patched_occurrences):
             downstream_keys = {
-                downstream["node_key"]
-                for downstream in patched_frames[upstream_pos + 1 :]
-                if downstream["node_key"] != upstream["node_key"]
+                downstream_key
+                for _downstream_idx, downstream_key in patched_occurrences[upstream_pos + 1 :]
+                if downstream_key != upstream_key
             }
-            upstream["downstream_patched_frame_keys"] = sorted(downstream_keys)
+            patched_frame_items[upstream_key]["downstream_patched_frame_keys"].update(downstream_keys)
             for downstream_key in downstream_keys:
-                patched_dependency_edges.add((upstream["node_key"], downstream_key))
+                patched_dependency_edges.add((upstream_key, downstream_key))
+
+        patched_frames: list[dict[str, Any]] = []
+        for frame_item in sorted(patched_frame_items.values(), key=lambda item: item["frame_index"]):
+            frame_item["downstream_patched_frame_keys"] = sorted(frame_item["downstream_patched_frame_keys"])
+            patched_frames.append(frame_item)
 
         patched_frames_by_trace.append(
             {
@@ -2152,7 +2164,11 @@ def build_call_graph_from_traces(
                 callee = trace[j + 1]
                 caller_key = _frame_node_key(caller)
                 callee_key = _frame_node_key(callee)
-                if caller_key in call_graph_nodes and callee_key in call_graph_nodes:
+                if (
+                    caller_key != callee_key
+                    and caller_key in call_graph_nodes
+                    and callee_key in call_graph_nodes
+                ):
                     edge_set.add((caller_key, callee_key))
     call_graph_edges = [[caller, callee] for caller, callee in sorted(edge_set)]
 
