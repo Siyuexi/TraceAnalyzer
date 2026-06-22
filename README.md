@@ -2,22 +2,25 @@
 
 Program-Analysis-based Process Advantage (P2A) for SWE agentic RL, implemented on
 the **Uni-Agent** training stack with our **ARL** cluster as the sandbox backend.
-P2A reshapes the per-step RL advantage using a precomputed **bonus map** (the
-golden runtime call graph from failing test → patched callable): steps whose agent
-actions land on the fault-propagation path get a larger advantage.
+P2A reshapes the per-step RL advantage using a precomputed **bonus map**: a
+runtime fault-propagation graph from the issue symptom to the terminal patched
+root cause, with a test-filtered F2P→root-cause fallback when no issue symptom
+anchor can be matched. Steps whose agent actions land on this path get a larger
+advantage.
 
 Everything is **self-contained**: data comes from HuggingFace, images from the
 pair-diag mirror of the original R2E images. There is **no dependency on the old
 `src-backup` fork**.
 
-## Bonus-map node roles
+## Bonus-map anchors
 
-Dynamic bonus maps keep all observed call-graph nodes for diagnostics, but only
-`program` nodes are rewardable. `test_harness` nodes are test files, runners,
-fixtures, and framework test utilities matched by path. `symptom_prefix` nodes
-are non-test framework/app frames before the trace enters the modified-code
-prefix for the patched callable. Both non-rewardable roles are excluded from
-`hop_max` and read matching, and their normalized distance is forced to `1.0`.
+Dynamic bonus maps keep observed call-graph nodes for diagnostics, but only the
+bonus path is rewardable. Target semantics are:
+`test_harness -> pre_symptom -> symptom -> intermediate -> root_cause`.
+`test_harness` and `pre_symptom` are excluded from `hop_max` and read matching;
+`symptom`, `intermediate`, and `root_cause` are rewardable. If no high-confidence
+issue symptom anchor matches the trace, the fallback excludes only test harness
+frames and treats all remaining F2P→terminal-root frames as rewardable.
 
 > **ARL is the sandbox, not a "remote".** The `arl-env` SDK connects directly to the
 > ARL Gateway (`ARL_GATEWAY_URL`) to boot a per-instance container sandbox where tests
