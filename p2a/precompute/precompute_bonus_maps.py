@@ -70,7 +70,7 @@ _FIXTURE_NAMES = frozenset(
     }
 )
 
-BONUS_MAP_SCHEMA_VERSION = 4
+BONUS_MAP_SCHEMA_VERSION = 5
 TRACE_SIDECAR_FORMAT = "p2a_trace_sidecar_v1"
 DEFAULT_TRACE_MAX_EVENTS = 10_000
 DEFAULT_TRACE_MAX_FRAMES = 80
@@ -91,10 +91,43 @@ def _empty_graph_metadata() -> dict:
         "excluded_non_rewardable_node_count": 0,
         "excluded_test_harness_node_count": 0,
         "excluded_test_harness_nodes": [],
-        "excluded_symptom_prefix_node_count": 0,
-        "excluded_symptom_prefix_nodes": [],
+        "excluded_pre_symptom_node_count": 0,
+        "excluded_pre_symptom_nodes": [],
         "test_harness_file_patterns": [],
+        "reward_start_source": "test_filtered_fallback",
+        "reward_start_by_trace": [],
+        "selected_issue_anchor_nodes": [],
+        "symptom_nodes": [],
+        "root_cause_nodes": [],
+        "reward_path_edges": [],
+        "direct_symptom_to_root_cause_edges": [],
+        "call_graph_edge_metadata": [],
+        "issue_anchor_candidates": [],
     }
+
+
+def _task_issue_text(task: dict) -> str | None:
+    fields = (
+        "problem_statement",
+        "issue",
+        "issue_text",
+        "description",
+        "problem",
+        "title",
+    )
+    for field in fields:
+        value = task.get(field)
+        if isinstance(value, str) and value.strip():
+            return value
+
+    extra = task.get("extra_info")
+    if isinstance(extra, dict):
+        for field in fields:
+            value = extra.get(field)
+            if isinstance(value, str) and value.strip():
+                return value
+
+    return None
 
 
 def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
@@ -1135,7 +1168,7 @@ def compute_static_bonus_map(task: dict) -> dict:
             "normalized_distance": 0.0,
             "observed_in_trace": False,
             "rewardable": True,
-            "node_role": "program",
+            "node_role": "root_cause",
             "excluded_from_hop_max": False,
         }
         if isinstance(mc.get("source"), str) and mc["source"]:
@@ -1157,9 +1190,18 @@ def compute_static_bonus_map(task: dict) -> dict:
             "excluded_non_rewardable_node_count": 0,
             "excluded_test_harness_node_count": 0,
             "excluded_test_harness_nodes": [],
-            "excluded_symptom_prefix_node_count": 0,
-            "excluded_symptom_prefix_nodes": [],
+            "excluded_pre_symptom_node_count": 0,
+            "excluded_pre_symptom_nodes": [],
             "test_harness_file_patterns": [],
+            "reward_start_source": "test_filtered_fallback",
+            "reward_start_by_trace": [],
+            "selected_issue_anchor_nodes": [],
+            "symptom_nodes": [],
+            "root_cause_nodes": sorted(call_graph_nodes),
+            "reward_path_edges": [],
+            "direct_symptom_to_root_cause_edges": [],
+            "call_graph_edge_metadata": [],
+            "issue_anchor_candidates": [],
         },
         reason_code="static_mode",
     )
@@ -1662,7 +1704,12 @@ def compute_dynamic_bonus_map(
             content, exit_code = _read_sandbox_file(env, f"{env.repo_path}/{rel_path}")
             return content if exit_code == 0 else ""
 
-        result = build_call_graph_from_traces(traces, all_modified, file_reader=_read_file)
+        result = build_call_graph_from_traces(
+            traces,
+            all_modified,
+            file_reader=_read_file,
+            issue_text=_task_issue_text(task),
+        )
 
         # ── Decision node: STANDARD vs DIRECT ────────────────────────
         nodes = result.get("call_graph_nodes", {})
