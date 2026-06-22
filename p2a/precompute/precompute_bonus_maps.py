@@ -33,6 +33,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from datetime import UTC, datetime
 import gzip
 import json
 import os
@@ -72,6 +73,7 @@ _FIXTURE_NAMES = frozenset(
 
 BONUS_MAP_SCHEMA_VERSION = 5
 TRACE_SIDECAR_FORMAT = "p2a_trace_sidecar_v1"
+FAILURE_MANIFEST_NAME = "precompute_failures.jsonl"
 DEFAULT_TRACE_MAX_EVENTS = 10_000
 DEFAULT_TRACE_MAX_FRAMES = 80
 DEFAULT_TRACE_PARSE_CHUNK_LINES = 1_000
@@ -308,6 +310,99 @@ def _tail_text(value: str | None, max_chars: int) -> str | None:
     if max_chars <= 0 or len(value) <= max_chars:
         return value
     return value[-max_chars:]
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _classify_precompute_exception(exc: BaseException) -> str:
+    text = str(exc)
+    if (
+        "gRPC Execute failed" in text
+        or "code = Unavailable" in text
+        or "transport: Error while dialing" in text
+        or "connection refused" in text.lower()
+    ):
+        return "arl_grpc_unavailable"
+    if "sandbox post-setup failed" in text:
+        return "sandbox_post_setup_failed"
+    return "exception"
+
+
+def _is_retryable_precompute_failure(data: dict | None) -> bool:
+    if not isinstance(data, dict):
+        return False
+    return bool(
+        data.get("precompute_failure")
+        or data.get("case_type") == "precompute_failed"
+        or data.get("reason_code") in {"exception", "precompute_exception"}
+    )
+
+
+def _existing_bonus_map_is_complete(path: str | os.PathLike[str]) -> bool:
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return not _is_retryable_precompute_failure(data)
+
+
+def _remove_retryable_bonus_map(path: str | os.PathLike[str]) -> None:
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return
+    if _is_retryable_precompute_failure(data):
+        os.remove(path)
+
+
+def _failure_record(
+    *,
+    idx,
+    instance_id: str,
+    output_path: str | None = None,
+    result: dict | None = None,
+    error: BaseException | str | None = None,
+) -> dict:
+    result = result or {}
+    message = result.get("exception_message")
+    error_type = result.get("exception_type")
+    traceback_tail = result.get("exception_traceback_tail")
+    failure_kind = result.get("failure_kind")
+    if error is not None:
+        message = str(error)
+        error_type = type(error).__name__ if isinstance(error, BaseException) else "Error"
+        if isinstance(error, BaseException):
+            failure_kind = _classify_precompute_exception(error)
+    return {
+        "timestamp": _utc_now_iso(),
+        "idx": str(idx),
+        "instance_id": instance_id,
+        "case_type": result.get("case_type") or "precompute_failed",
+        "reason_code": result.get("reason_code") or "precompute_exception",
+        "failure_kind": failure_kind or "exception",
+        "error_type": error_type,
+        "message": _tail_text(message, 2000),
+        "traceback_tail": _tail_text(traceback_tail, 8000),
+        "output_path": output_path,
+    }
+
+
+def _append_failure_manifest(path: str | os.PathLike[str], records: list[dict]) -> None:
+    if not records:
+        return
+    os.makedirs(os.path.dirname(os.fspath(path)), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, sort_keys=True))
+            f.write("\n")
 
 
 def _slice_traces(traces: list[list[dict]] | None, max_traces: int | None) -> tuple[list[list[dict]], bool]:
@@ -1747,17 +1842,27 @@ def compute_dynamic_bonus_map(
         return _with_metadata(result, reason_code=case_type, diagnostics=f2p_diag)
 
     except Exception as e:
+        exception_traceback = traceback.format_exc()
         print(f"  [WARN] Dynamic tracing failed for {instance_id}: {e}")
-        traceback.print_exc()
+        print(exception_traceback, end="")
         exception_diag = _base_diagnostics()
         exception_diag.update(env_diag)
+        exception_diag.update(
+            {
+                "precompute_failure": True,
+                "failure_kind": _classify_precompute_exception(e),
+                "exception_type": type(e).__name__,
+                "exception_message": str(e),
+                "exception_traceback_tail": _tail_text(exception_traceback, 8000),
+            }
+        )
         return _make_result(
             instance_id,
-            "no_trace",
+            "precompute_failed",
             all_modified,
             newly_created,
             error=True,
-            reason_code="exception",
+            reason_code="precompute_exception",
             diagnostics=exception_diag,
         )
     finally:
@@ -1814,8 +1919,14 @@ def _process_one(args):
         max_sidecar_output_chars,
         sandbox_backend,
     ) = args
+    instance_id = "unknown"
+    output_path = None
     try:
         task = json.loads(task_json) if isinstance(task_json, str) else dict(task_json)
+        try:
+            instance_id = make_instance_id(normalize_task(task))
+        except Exception:
+            instance_id = "unknown"
 
         if mode == "static":
             result = compute_static_bonus_map(task)
@@ -1830,16 +1941,49 @@ def _process_one(args):
 
         instance_id = result["instance_id"]
         output_path = os.path.join(output_dir, f"{instance_id}.json")
+        case_type = result.get("case_type", "unknown")
+
+        if _is_retryable_precompute_failure(result):
+            _remove_retryable_bonus_map(output_path)
+            return {
+                "idx": idx,
+                "instance_id": instance_id,
+                "case_type": case_type,
+                "error": None,
+                "failure": _failure_record(
+                    idx=idx,
+                    instance_id=instance_id,
+                    output_path=output_path,
+                    result=result,
+                ),
+            }
+
         with open(output_path, "w") as f:
             json.dump(result, f, indent=2)
 
-        case_type = result.get("case_type", "unknown")
-        return idx, instance_id, case_type, None
+        return {
+            "idx": idx,
+            "instance_id": instance_id,
+            "case_type": case_type,
+            "error": None,
+            "failure": None,
+        }
     except Exception as e:
-        return idx, "unknown", "error", str(e)
+        return {
+            "idx": idx,
+            "instance_id": instance_id,
+            "case_type": "error",
+            "error": str(e),
+            "failure": _failure_record(
+                idx=idx,
+                instance_id=instance_id,
+                output_path=output_path,
+                error=e,
+            ),
+        }
 
 
-def main():
+def main() -> int:
     from p2a.hf_assets import shared_bonus_maps_dir
 
     parser = argparse.ArgumentParser(description="Precompute P2A bonus maps")
@@ -1934,6 +2078,8 @@ def main():
     n_skipped_bad = 0
 
     work_items = []
+    n_skipped_existing = 0
+    n_retryable_existing = 0
     for idx, row in df.iterrows():
         task_payload = row.to_dict()
         try:
@@ -1944,8 +2090,13 @@ def main():
             n_skipped_bad += 1
             continue
         if skip_existing:
-            if instance_id and os.path.exists(os.path.join(args.output_dir, f"{instance_id}.json")):
-                continue
+            if instance_id:
+                existing_path = os.path.join(args.output_dir, f"{instance_id}.json")
+                if os.path.exists(existing_path):
+                    if _existing_bonus_map_is_complete(existing_path):
+                        n_skipped_existing += 1
+                        continue
+                    n_retryable_existing += 1
         work_items.append(
             (
                 idx,
@@ -1960,24 +2111,35 @@ def main():
         )
 
     print(f"Excluded {n_skipped_bad} bad instances (skip registry); processing {len(work_items)} work items")
+    if skip_existing:
+        print(f"Skipped {n_skipped_existing} complete existing maps; retrying {n_retryable_existing} retryable/incomplete maps")
 
     if not work_items:
         print("No work items to process after applying offset/limit/skip_existing.")
         print(f"Bonus maps saved to: {args.output_dir}")
-        return
+        return 0
 
     from collections import Counter
 
     case_counts = Counter()
     error_count = 0
+    failure_records = []
+    failure_manifest_path = os.path.join(args.output_dir, FAILURE_MANIFEST_NAME)
     total = len(work_items)
 
     if args.n_parallel <= 1:
         for item in work_items:
-            idx, instance_id, case_type, error = _process_one(item)
+            outcome = _process_one(item)
+            idx = outcome["idx"]
+            case_type = outcome["case_type"]
+            error = outcome["error"]
+            failure = outcome["failure"]
             if error:
                 error_count += 1
                 print(f"  [{idx}] ERROR: {error}")
+            if failure:
+                failure_records.append(failure)
+                _append_failure_manifest(failure_manifest_path, [failure])
             case_counts[case_type] += 1
             done = sum(case_counts.values())
             if done % 100 == 0:
@@ -1988,10 +2150,16 @@ def main():
             futures = {executor.submit(_process_one, item): item for item in work_items}
             done_count = 0
             for future in as_completed(futures):
-                idx, instance_id, case_type, error = future.result()
+                outcome = future.result()
+                case_type = outcome["case_type"]
+                error = outcome["error"]
+                failure = outcome["failure"]
                 done_count += 1
                 if error:
                     error_count += 1
+                if failure:
+                    failure_records.append(failure)
+                    _append_failure_manifest(failure_manifest_path, [failure])
                 case_counts[case_type] += 1
                 if done_count % 100 == 0:
                     traceable = case_counts["direct"] + case_counts["standard"]
@@ -2023,12 +2191,28 @@ def main():
     print(f"  no_f2p    (error)  {case_counts['no_f2p']:5d}")
     if case_counts["trace_cap_inconclusive"]:
         print(f"  trace_cap_inconclusive (error) {case_counts['trace_cap_inconclusive']:5d}")
+    if case_counts["precompute_failed"]:
+        print(f"  precompute_failed (retryable) {case_counts['precompute_failed']:5d}")
 
     if error_count:
         print(f"\nprocess errors       {error_count:5d}")
+    if failure_records:
+        print(f"\nretryable precompute failures {len(failure_records):5d}")
+        print(f"  failure manifest: {failure_manifest_path}")
+        for record in failure_records[:20]:
+            message = record.get("message") or ""
+            if len(message) > 160:
+                message = message[-160:]
+            print(f"  - {record['instance_id']}: {record.get('failure_kind')} {message}")
+        if len(failure_records) > 20:
+            print(f"  ... {len(failure_records) - 20} more in manifest")
 
     print(f"\nBonus maps saved to: {args.output_dir}")
+    if failure_records or error_count:
+        print("Bonus map precompute incomplete; rerun after resolving retryable failures.", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
