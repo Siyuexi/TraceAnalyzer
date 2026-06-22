@@ -152,11 +152,12 @@ def test_shallow_src_callers_remain_rewardable():
     assert result["raw_hop_max"] == 2
     assert result["hop_max"] == 1
     assert helper["rewardable"] is True
-    assert helper["node_role"] == "program"
+    assert helper["node_role"] == "intermediate"
     assert helper["hop_distance"] == 1
     assert helper["normalized_distance"] == 1.0
     assert test_node["rewardable"] is False
     assert test_node["node_role"] == "test_harness"
+    assert result["reward_start_source"] == "test_filtered_fallback"
 
 
 def test_tests_py_modules_are_test_harnesses_even_inside_reward_prefix():
@@ -190,7 +191,7 @@ def test_tests_py_modules_are_test_harnesses_even_inside_reward_prefix():
     assert test_node["node_role"] == "test_harness"
     assert test_node["normalized_distance"] == 1.0
     assert helper["rewardable"] is True
-    assert helper["node_role"] == "program"
+    assert helper["node_role"] == "intermediate"
     assert helper["hop_distance"] == 1
 
 
@@ -256,32 +257,145 @@ def test_django_test_client_prefix_does_not_determine_hop_max():
     result = build_call_graph_from_traces(traces, modified)
 
     assert result["raw_hop_max"] == 6
-    assert result["hop_max"] == 2
-    assert result["rewardable_node_count"] == 3
+    assert result["hop_max"] == 4
+    assert result["rewardable_node_count"] == 5
     assert result["excluded_test_harness_node_count"] == 2
-    assert result["excluded_symptom_prefix_node_count"] == 2
+    assert result["excluded_pre_symptom_node_count"] == 0
     assert result["test_harness_file_patterns"] == ["django/test/**", "tests/**"]
+    assert result["reward_start_source"] == "test_filtered_fallback"
 
     test_node = result["call_graph_nodes"]["django/test/client.py::Client.get"]
     assert test_node["rewardable"] is False
     assert test_node["node_role"] == "test_harness"
     assert test_node["normalized_distance"] == 1.0
 
-    symptom_node = result["call_graph_nodes"]["django/core/handlers/base.py::ClientHandler.get_response"]
-    assert symptom_node["rewardable"] is False
-    assert symptom_node["node_role"] == "symptom_prefix"
-    assert symptom_node["exclusion_reason"] == "symptom_prefix"
-    assert symptom_node["normalized_distance"] == 1.0
+    framework_node = result["call_graph_nodes"]["django/core/handlers/base.py::ClientHandler.get_response"]
+    assert framework_node["rewardable"] is True
+    assert framework_node["node_role"] == "intermediate"
+    assert framework_node["hop_distance"] == 4
+    assert framework_node["normalized_distance"] == 1.0
 
     wrapper = result["call_graph_nodes"]["django/contrib/admin/options.py::AuthorAdmin.wrapper"]
     assert wrapper["rewardable"] is True
     assert wrapper["hop_distance"] == 2
-    assert wrapper["normalized_distance"] == 1.0
+    assert wrapper["normalized_distance"] == 0.5
 
     patched = result["call_graph_nodes"]["django/contrib/admin/options.py::BookInline.has_change_permission"]
     assert patched["rewardable"] is True
+    assert patched["node_role"] == "root_cause"
     assert patched["hop_distance"] == 0
     assert patched["normalized_distance"] == 0.0
+
+
+def test_issue_anchor_marks_pre_symptom_frames_non_rewardable():
+    traces = [
+        [
+            _frame("tests/test_issue.py", "test_issue", 1),
+            _frame("framework/request.py", "dispatch", 10),
+            _frame("app/views.py", "symptom", 20),
+            _frame("app/service.py", "intermediate", 30),
+            _frame("app/root.py", "patched_root", 40, patched=True),
+        ]
+    ]
+    modified = [_modified("app/root.py", "patched_root", 40, 42)]
+
+    result = build_call_graph_from_traces(
+        traces,
+        modified,
+        issue_text="The user-visible failure starts in `symptom`.",
+    )
+
+    framework = result["call_graph_nodes"]["framework/request.py::dispatch"]
+    symptom = result["call_graph_nodes"]["app/views.py::symptom"]
+    intermediate = result["call_graph_nodes"]["app/service.py::intermediate"]
+    root = result["call_graph_nodes"]["app/root.py::patched_root"]
+
+    assert result["reward_start_source"] == "issue_anchor"
+    assert result["selected_issue_anchor_nodes"] == ["app/views.py::symptom"]
+    assert result["excluded_pre_symptom_nodes"] == ["framework/request.py::dispatch"]
+    assert framework["rewardable"] is False
+    assert framework["node_role"] == "pre_symptom"
+    assert framework["excluded_from_hop_max"] is True
+    assert symptom["rewardable"] is True
+    assert symptom["node_role"] == "symptom"
+    assert intermediate["node_role"] == "intermediate"
+    assert root["node_role"] == "root_cause"
+    assert result["hop_max"] == 2
+
+
+def test_issue_anchor_uses_deepest_matching_symptom_candidate():
+    traces = [
+        [
+            _frame("tests/test_nested.py", "test_nested", 1),
+            _frame("pkg/outer.py", "outer", 10),
+            _frame("pkg/inner.py", "inner_symptom", 20),
+            _frame("pkg/root.py", "patched_root", 30, patched=True),
+        ]
+    ]
+    modified = [_modified("pkg/root.py", "patched_root", 30, 32)]
+
+    result = build_call_graph_from_traces(
+        traces,
+        modified,
+        issue_text="Both `outer` and `inner_symptom` appear in the report.",
+    )
+
+    outer = result["call_graph_nodes"]["pkg/outer.py::outer"]
+    inner = result["call_graph_nodes"]["pkg/inner.py::inner_symptom"]
+    assert result["selected_issue_anchor_nodes"] == ["pkg/inner.py::inner_symptom"]
+    assert outer["rewardable"] is False
+    assert outer["node_role"] == "pre_symptom"
+    assert inner["rewardable"] is True
+    assert inner["node_role"] == "symptom"
+
+
+def test_generic_issue_anchor_names_do_not_anchor_without_context():
+    traces = [
+        [
+            _frame("tests/test_generic.py", "test_generic", 1),
+            _frame("pkg/helpers.py", "inner", 10),
+            _frame("pkg/wrappers.py", "wrapper", 20),
+            _frame("pkg/views.py", "View.get", 30),
+            _frame("pkg/root.py", "patched_root", 40, patched=True),
+        ]
+    ]
+    modified = [_modified("pkg/root.py", "patched_root", 40, 42)]
+
+    result = build_call_graph_from_traces(
+        traces,
+        modified,
+        issue_text="The issue mentions `inner`, `wrapper`, get(), and `__call__` generically.",
+    )
+
+    assert result["reward_start_source"] == "test_filtered_fallback"
+    assert result["selected_issue_anchor_nodes"] == []
+    assert result["excluded_pre_symptom_nodes"] == []
+    for key, node in result["call_graph_nodes"].items():
+        if key.startswith("pkg/"):
+            assert node["rewardable"] is True
+
+
+def test_disambiguated_generic_issue_anchor_can_match():
+    traces = [
+        [
+            _frame("tests/test_context.py", "test_context", 1),
+            _frame("framework/router.py", "dispatch", 10),
+            _frame("pkg/views.py", "View.get", 20),
+            _frame("pkg/root.py", "patched_root", 30, patched=True),
+        ]
+    ]
+    modified = [_modified("pkg/root.py", "patched_root", 30, 32)]
+
+    result = build_call_graph_from_traces(
+        traces,
+        modified,
+        issue_text="Traceback points at `View.get`.",
+    )
+
+    assert result["reward_start_source"] == "issue_anchor"
+    assert result["selected_issue_anchor_nodes"] == ["pkg/views.py::View.get"]
+    assert result["call_graph_nodes"]["framework/router.py::dispatch"]["node_role"] == "pre_symptom"
+    assert result["call_graph_nodes"]["pkg/views.py::View.get"]["node_role"] == "symptom"
 
 
 def test_upstream_patched_callable_gets_positive_distance_from_deeper_root():
