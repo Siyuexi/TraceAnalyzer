@@ -2052,7 +2052,6 @@ def build_call_graph_from_traces(
             "legacy_distance_zero_node_count": legacy_zero_node_count,
             "distance_zero_node_count": 0,
             "legacy_hop_max": legacy_hop_max,
-            "hop_max": 0,
         }
         return {
             "call_graph_nodes": {},
@@ -2069,6 +2068,11 @@ def build_call_graph_from_traces(
             "reward_start_source": reward_start_source,
             "reward_start_by_trace": reward_start_records,
             "selected_issue_anchor_nodes": [],
+            "symptom_nodes": [],
+            "root_cause_nodes": [],
+            "reward_path_edges": [],
+            "direct_symptom_to_root_cause_edges": [],
+            "call_graph_edge_metadata": [],
             "issue_anchor_candidates": issue_anchor_candidate_dicts,
             "patched_root_selection": patched_root_selection,
             "patched_callables": clean_callables,
@@ -2171,6 +2175,41 @@ def build_call_graph_from_traces(
                 ):
                     edge_set.add((caller_key, callee_key))
     call_graph_edges = [[caller, callee] for caller, callee in sorted(edge_set)]
+    symptom_nodes = sorted(
+        key
+        for key, node in call_graph_nodes.items()
+        if node.get("node_role") == "symptom"
+    )
+    root_cause_nodes = sorted(
+        key
+        for key, node in call_graph_nodes.items()
+        if node.get("node_role") == "root_cause"
+    )
+    reward_path_roles = {"symptom", "intermediate", "root_cause"}
+    call_graph_edge_metadata: list[dict[str, Any]] = []
+    reward_path_edges: list[list[str]] = []
+    direct_symptom_to_root_cause_edges: list[list[str]] = []
+    for caller, callee in call_graph_edges:
+        caller_role = call_graph_nodes[caller].get("node_role")
+        callee_role = call_graph_nodes[callee].get("node_role")
+        edge = [caller, callee]
+        reward_path_edge = caller_role in reward_path_roles and callee_role in reward_path_roles
+        direct_symptom_to_root_cause = caller_role == "symptom" and callee_role == "root_cause"
+        if reward_path_edge:
+            reward_path_edges.append(edge)
+        if direct_symptom_to_root_cause:
+            direct_symptom_to_root_cause_edges.append(edge)
+        call_graph_edge_metadata.append(
+            {
+                "caller": caller,
+                "callee": callee,
+                "caller_role": caller_role,
+                "callee_role": callee_role,
+                "role_transition": f"{caller_role}->{callee_role}",
+                "reward_path_edge": reward_path_edge,
+                "direct_symptom_to_root_cause": direct_symptom_to_root_cause,
+            }
+        )
 
     traceable = any(node["rewardable"] and node["hop_distance"] == 0 for node in call_graph_nodes.values())
     distance_zero_node_count = sum(
@@ -2187,7 +2226,6 @@ def build_call_graph_from_traces(
         "legacy_distance_zero_node_count": legacy_zero_node_count,
         "distance_zero_node_count": distance_zero_node_count,
         "legacy_hop_max": legacy_hop_max,
-        "hop_max": hop_max,
     }
     excluded_nodes = sorted(key for key, node in call_graph_nodes.items() if not node.get("rewardable"))
     excluded_test_nodes = sorted(
@@ -2223,6 +2261,11 @@ def build_call_graph_from_traces(
         "reward_start_source": reward_start_source,
         "reward_start_by_trace": reward_start_records,
         "selected_issue_anchor_nodes": sorted(selected_anchor_keys),
+        "symptom_nodes": symptom_nodes,
+        "root_cause_nodes": root_cause_nodes,
+        "reward_path_edges": reward_path_edges,
+        "direct_symptom_to_root_cause_edges": direct_symptom_to_root_cause_edges,
+        "call_graph_edge_metadata": call_graph_edge_metadata,
         "issue_anchor_candidates": issue_anchor_candidate_dicts,
         "patched_root_selection": patched_root_selection,
         "patched_callables": clean_callables,

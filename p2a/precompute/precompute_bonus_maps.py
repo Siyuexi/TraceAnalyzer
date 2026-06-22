@@ -97,6 +97,11 @@ def _empty_graph_metadata() -> dict:
         "reward_start_source": "test_filtered_fallback",
         "reward_start_by_trace": [],
         "selected_issue_anchor_nodes": [],
+        "symptom_nodes": [],
+        "root_cause_nodes": [],
+        "reward_path_edges": [],
+        "direct_symptom_to_root_cause_edges": [],
+        "call_graph_edge_metadata": [],
         "issue_anchor_candidates": [],
     }
 
@@ -1191,6 +1196,11 @@ def compute_static_bonus_map(task: dict) -> dict:
             "reward_start_source": "test_filtered_fallback",
             "reward_start_by_trace": [],
             "selected_issue_anchor_nodes": [],
+            "symptom_nodes": [],
+            "root_cause_nodes": sorted(call_graph_nodes),
+            "reward_path_edges": [],
+            "direct_symptom_to_root_cause_edges": [],
+            "call_graph_edge_metadata": [],
             "issue_anchor_candidates": [],
         },
         reason_code="static_mode",

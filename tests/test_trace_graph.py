@@ -178,6 +178,11 @@ def test_shallow_src_callers_remain_rewardable():
     assert test_node["rewardable"] is False
     assert test_node["node_role"] == "test_harness"
     assert result["reward_start_source"] == "test_filtered_fallback"
+    assert result["selected_issue_anchor_nodes"] == []
+    assert result["symptom_nodes"] == []
+    assert result["root_cause_nodes"] == ["src/target.py::target"]
+    assert result["reward_path_edges"] == [["src/helper.py::helper", "src/target.py::target"]]
+    assert result["direct_symptom_to_root_cause_edges"] == []
 
 
 def test_tests_py_modules_are_test_harnesses_even_inside_reward_prefix():
@@ -332,6 +337,51 @@ def test_issue_anchor_marks_pre_symptom_frames_non_rewardable():
 
     assert result["reward_start_source"] == "issue_anchor"
     assert result["selected_issue_anchor_nodes"] == ["app/views.py::symptom"]
+    assert result["symptom_nodes"] == ["app/views.py::symptom"]
+    assert result["root_cause_nodes"] == ["app/root.py::patched_root"]
+    assert result["direct_symptom_to_root_cause_edges"] == []
+    assert result["reward_path_edges"] == [
+        ["app/service.py::intermediate", "app/root.py::patched_root"],
+        ["app/views.py::symptom", "app/service.py::intermediate"],
+    ]
+    assert result["call_graph_edge_metadata"] == [
+        {
+            "caller": "app/service.py::intermediate",
+            "callee": "app/root.py::patched_root",
+            "caller_role": "intermediate",
+            "callee_role": "root_cause",
+            "role_transition": "intermediate->root_cause",
+            "reward_path_edge": True,
+            "direct_symptom_to_root_cause": False,
+        },
+        {
+            "caller": "app/views.py::symptom",
+            "callee": "app/service.py::intermediate",
+            "caller_role": "symptom",
+            "callee_role": "intermediate",
+            "role_transition": "symptom->intermediate",
+            "reward_path_edge": True,
+            "direct_symptom_to_root_cause": False,
+        },
+        {
+            "caller": "framework/request.py::dispatch",
+            "callee": "app/views.py::symptom",
+            "caller_role": "pre_symptom",
+            "callee_role": "symptom",
+            "role_transition": "pre_symptom->symptom",
+            "reward_path_edge": False,
+            "direct_symptom_to_root_cause": False,
+        },
+        {
+            "caller": "tests/test_issue.py::test_issue",
+            "callee": "framework/request.py::dispatch",
+            "caller_role": "test_harness",
+            "callee_role": "pre_symptom",
+            "role_transition": "test_harness->pre_symptom",
+            "reward_path_edge": False,
+            "direct_symptom_to_root_cause": False,
+        },
+    ]
     assert result["excluded_pre_symptom_nodes"] == ["framework/request.py::dispatch"]
     assert framework["rewardable"] is False
     assert framework["node_role"] == "pre_symptom"
@@ -414,6 +464,11 @@ def test_disambiguated_generic_issue_anchor_can_match():
 
     assert result["reward_start_source"] == "issue_anchor"
     assert result["selected_issue_anchor_nodes"] == ["pkg/views.py::View.get"]
+    assert result["symptom_nodes"] == ["pkg/views.py::View.get"]
+    assert result["root_cause_nodes"] == ["pkg/root.py::patched_root"]
+    assert result["direct_symptom_to_root_cause_edges"] == [
+        ["pkg/views.py::View.get", "pkg/root.py::patched_root"]
+    ]
     assert result["call_graph_nodes"]["framework/router.py::dispatch"]["node_role"] == "pre_symptom"
     assert result["call_graph_nodes"]["pkg/views.py::View.get"]["node_role"] == "symptom"
 
