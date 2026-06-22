@@ -155,6 +155,8 @@ def _is_test_file(path: str) -> bool:
     # basename is not test_*.py.  Keeping these out of the bonus path prevents
     # agents from receiving process reward for reading the harness itself.
     if normalized.startswith("r2e_tests/"):
+        if filename in {"test.py", "tests.py"}:
+            return True
         if filename.startswith("test_") or filename.endswith("_test.py"):
             return True
         if filename in {"helper.py", "conftest.py", "pytest_plugin.py", "pytest_plugins.py"}:
@@ -162,7 +164,7 @@ def _is_test_file(path: str) -> bool:
         if filename.endswith("_runner.py"):
             return True
 
-    if filename in {"conftest.py", "pytest_plugin.py", "pytest_plugins.py"}:
+    if filename in {"test.py", "tests.py", "conftest.py", "pytest_plugin.py", "pytest_plugins.py"}:
         return True
     if filename.endswith("_runner.py"):
         return True
@@ -173,6 +175,32 @@ def _is_test_file(path: str) -> bool:
         if p.startswith("test_") or p.endswith("_test.py"):
             return True
     return False
+
+
+def _test_file_reason(path: str) -> str | None:
+    """Return the test-suite/harness pattern matched by *path*."""
+    normalized = path.replace("\\", "/").lstrip("./")
+    parts = normalized.split("/")
+    filename = parts[-1] if parts else normalized
+
+    if normalized.startswith("r2e_tests/"):
+        return "r2e_tests/**"
+    if normalized.startswith("django/test/"):
+        return "django/test/**"
+
+    for idx, part in enumerate(parts):
+        if part in ("tests", "test", "testing"):
+            return "/".join(parts[: idx + 1]) + "/**"
+        if part.startswith("test_"):
+            return "/".join(parts[:idx] + ["test_*.py"]) if idx else "test_*.py"
+        if part.endswith("_test.py"):
+            return "/".join(parts[:idx] + ["*_test.py"]) if idx else "*_test.py"
+
+    if filename in {"test.py", "tests.py", "conftest.py", "pytest_plugin.py", "pytest_plugins.py"}:
+        return filename
+    if filename.endswith("_runner.py"):
+        return "*_runner.py"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1482,6 +1510,49 @@ def _select_enclosing_callable(
     return min(candidates, key=lambda ci: (ci.end_line - ci.start_line, -ci.start_line))
 
 
+_GENERIC_SOURCE_ROOTS = {"lib", "src"}
+
+
+def _reward_prefix(path: str) -> tuple[str, ...]:
+    parts = tuple(part for part in path.replace("\\", "/").lstrip("./").split("/") if part)
+    if parts and parts[0] in _GENERIC_SOURCE_ROOTS:
+        parts = parts[1:]
+    if len(parts) <= 1:
+        return ()
+    return parts[: min(len(parts) - 1, 2)]
+
+
+def _reward_prefixes(modified_callables: list[dict]) -> set[tuple[str, ...]]:
+    prefixes = {_reward_prefix(str(item.get("file_path") or "")) for item in modified_callables}
+    return {prefix for prefix in prefixes if prefix}
+
+
+def _matches_reward_prefix(path: str, prefixes: set[tuple[str, ...]]) -> bool:
+    parts = tuple(part for part in path.replace("\\", "/").lstrip("./").split("/") if part)
+    if parts and parts[0] in _GENERIC_SOURCE_ROOTS:
+        parts = parts[1:]
+    return any(parts[: len(prefix)] == prefix for prefix in prefixes)
+
+
+def _trace_reward_start_index(
+    trace: list[dict],
+    patched_idx: int,
+    prefixes: set[tuple[str, ...]],
+) -> int:
+    fallback: int | None = None
+    for idx, frame in enumerate(trace[: patched_idx + 1]):
+        file_path = str(frame.get("file_path") or "")
+        if _is_test_file(file_path):
+            continue
+        if fallback is None:
+            fallback = idx
+        if not prefixes:
+            continue
+        if frame.get("is_patched") or _matches_reward_prefix(file_path, prefixes):
+            return idx
+    return fallback if fallback is not None else patched_idx
+
+
 def build_call_graph_from_traces(
     traces: list[list[dict]],
     modified_callables: list[dict],
@@ -1531,6 +1602,15 @@ def build_call_graph_from_traces(
                 observed_patched_keys.add((frame["file_path"], qn))
 
     unobserved_patched_callables: list[dict] = []
+    reward_prefixes = _reward_prefixes(modified_callables)
+    rewardable_seen: set[str] = set()
+    excluded_reasons: dict[str, set[str]] = {}
+
+    def mark_excluded(node_key: str, reason: str) -> None:
+        excluded_reasons.setdefault(node_key, set()).add(reason)
+
+    def mark_rewardable(node_key: str) -> None:
+        rewardable_seen.add(node_key)
 
     # 4a. Seed only observed patched callables at d=0
     for mc in modified_callables:
@@ -1543,6 +1623,7 @@ def build_call_graph_from_traces(
                 "hop_distance": 0,
                 "observed_in_trace": True,
             }
+            mark_rewardable(seed_key)
         else:
             unobserved_patched_callables.append({k: v for k, v in mc.items() if not k.startswith("instr_") and k != "source"})
 
@@ -1554,9 +1635,17 @@ def build_call_graph_from_traces(
 
         # For each patched frame, walk backward assigning hop distances
         for patched_idx in patched_indices:
+            reward_start_idx = _trace_reward_start_index(trace, patched_idx, reward_prefixes)
             for hop, j in enumerate(range(patched_idx, -1, -1)):
                 frame = trace[j]
                 node_key = f"{frame['file_path']}::{frame.get('qualified_name', frame['func_name'])}"
+                test_reason = _test_file_reason(str(frame.get("file_path") or ""))
+                if test_reason:
+                    mark_excluded(node_key, f"test_suite_or_harness:{test_reason}")
+                elif j < reward_start_idx:
+                    mark_excluded(node_key, "symptom_prefix")
+                else:
+                    mark_rewardable(node_key)
 
                 if node_key not in node_info:
                     node_info[node_key] = {
@@ -1576,30 +1665,55 @@ def build_call_graph_from_traces(
             "call_graph_nodes": {},
             "call_graph_edges": [],
             "hop_max": 0,
+            "raw_hop_max": 0,
+            "rewardable_node_count": 0,
+            "excluded_non_rewardable_node_count": 0,
+            "excluded_test_harness_node_count": 0,
+            "excluded_test_harness_nodes": [],
+            "excluded_symptom_prefix_node_count": 0,
+            "excluded_symptom_prefix_nodes": [],
+            "test_harness_file_patterns": [],
             "patched_callables": clean_callables,
             "unobserved_patched_callables": unobserved_patched_callables,
             "traceable": False,
         }
 
-    hop_max = max(n["hop_distance"] for n in node_info.values())
-    hop_max = max(hop_max, 1)  # avoid division by zero
-
-    # 4b. Anchor test entry frames at hop_max (→ normalized d=1)
-    for node_key, info in node_info.items():
-        if _is_test_file(info["file_path"]):
-            info["hop_distance"] = hop_max
+    raw_hop_max = max(n["hop_distance"] for n in node_info.values())
+    rewardable_keys = {
+        key
+        for key in node_info
+        if key in rewardable_seen and not any(reason.startswith("test_suite_or_harness:") for reason in excluded_reasons.get(key, ()))
+    }
+    rewardable_hops = [node_info[key]["hop_distance"] for key in rewardable_keys]
+    hop_max = max(max(rewardable_hops, default=0), 1)  # avoid division by zero
 
     # Build final nodes with normalized distance
     call_graph_nodes = {}
     for node_key, info in node_info.items():
+        rewardable = node_key in rewardable_keys
+        raw_hop = info["hop_distance"]
+        effective_hop = min(raw_hop, hop_max) if rewardable else hop_max
+        reasons = sorted(excluded_reasons.get(node_key, ()))
+        if rewardable:
+            node_role = "program"
+        elif any(reason.startswith("test_suite_or_harness:") for reason in reasons):
+            node_role = "test_harness"
+        else:
+            node_role = "symptom_prefix"
         call_graph_nodes[node_key] = {
             "file_path": info["file_path"],
             "start_line": info["line_no"],
             "end_line": info["line_no"],  # will be enriched below
-            "hop_distance": info["hop_distance"],
-            "normalized_distance": info["hop_distance"] / hop_max,
+            "hop_distance": effective_hop,
+            "raw_hop_distance": raw_hop,
+            "normalized_distance": effective_hop / hop_max,
             "observed_in_trace": info["observed_in_trace"],
+            "rewardable": rewardable,
+            "node_role": node_role,
+            "excluded_from_hop_max": not rewardable,
         }
+        if reasons:
+            call_graph_nodes[node_key]["exclusion_reason"] = ";".join(reasons)
 
     # Enrich patched callable nodes with full line ranges from static AST analysis
     patched_keys: set[str] = set()
@@ -1655,12 +1769,38 @@ def build_call_graph_from_traces(
                     edge_set.add((caller_key, callee_key))
     call_graph_edges = [[caller, callee] for caller, callee in sorted(edge_set)]
 
-    traceable = any(node["hop_distance"] == 0 for node in call_graph_nodes.values())
+    traceable = any(node["rewardable"] and node["hop_distance"] == 0 for node in call_graph_nodes.values())
+    excluded_nodes = sorted(key for key, node in call_graph_nodes.items() if not node.get("rewardable"))
+    excluded_test_nodes = sorted(
+        key
+        for key, node in call_graph_nodes.items()
+        if node.get("node_role") == "test_harness"
+    )
+    excluded_symptom_nodes = sorted(
+        key
+        for key, node in call_graph_nodes.items()
+        if node.get("node_role") == "symptom_prefix"
+    )
 
     return {
         "call_graph_nodes": call_graph_nodes,
         "call_graph_edges": call_graph_edges,
         "hop_max": hop_max,
+        "raw_hop_max": raw_hop_max,
+        "rewardable_node_count": sum(1 for node in call_graph_nodes.values() if node.get("rewardable")),
+        "excluded_non_rewardable_node_count": len(excluded_nodes),
+        "excluded_test_harness_node_count": len(excluded_test_nodes),
+        "excluded_test_harness_nodes": excluded_test_nodes,
+        "excluded_symptom_prefix_node_count": len(excluded_symptom_nodes),
+        "excluded_symptom_prefix_nodes": excluded_symptom_nodes,
+        "test_harness_file_patterns": sorted(
+            {
+                reason.split(":", 1)[1]
+                for reasons in excluded_reasons.values()
+                for reason in reasons
+                if reason.startswith("test_suite_or_harness:")
+            }
+        ),
         "patched_callables": clean_callables,
         "unobserved_patched_callables": unobserved_patched_callables,
         "traceable": traceable,

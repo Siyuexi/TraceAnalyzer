@@ -46,6 +46,9 @@ def _graph_topology(item: dict[str, Any]) -> str:
             f"<td>{_fmt(node.get('key'))}</td>"
             f"<td>{_fmt(node.get('file_path'))}:{_fmt(line_range)}</td>"
             f"<td>{_fmt(node.get('normalized_distance'))}</td>"
+            f"<td>{_fmt(node.get('node_role'))}</td>"
+            f"<td>{_badge('reward', bool(node.get('rewardable', True)))}</td>"
+            f"<td>{_fmt(node.get('exclusion_reason'))}</td>"
             f"<td>{_badge('hit', bool(node.get('hit')))}</td>"
             f"<td>{_fmt(node.get('first_step'))}</td>"
             "</tr>"
@@ -53,7 +56,7 @@ def _graph_topology(item: dict[str, Any]) -> str:
         if node.get("source_preview"):
             node_rows.append(
                 '<tr class="source-row">'
-                f'<td colspan="5"><pre>{html.escape(str(node["source_preview"]))}</pre></td>'
+                f'<td colspan="8"><pre>{html.escape(str(node["source_preview"]))}</pre></td>'
                 "</tr>"
             )
     edge_rows = "\n".join(
@@ -66,7 +69,7 @@ def _graph_topology(item: dict[str, Any]) -> str:
     return (
         f'<details class="graph"><summary>{len(nodes)} nodes / {len(edges)} edges</summary>'
         '<div class="graph-grid">'
-        '<table class="graph-table"><thead><tr><th>Node</th><th>Range</th><th>d</th><th>Read</th><th>First step</th></tr></thead>'
+        '<table class="graph-table"><thead><tr><th>Node</th><th>Range</th><th>d</th><th>Role</th><th>Reward</th><th>Reason</th><th>Read</th><th>First step</th></tr></thead>'
         f"<tbody>{''.join(node_rows)}</tbody></table>"
         f"{extra_nodes}"
         f"<ul>{edge_rows}</ul>"

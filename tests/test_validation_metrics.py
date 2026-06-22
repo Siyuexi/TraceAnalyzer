@@ -270,6 +270,80 @@ def test_validation_metrics_preserve_trace_step_indexes(tmp_path):
     assert details[0]["graph_topology"]["nodes"][0]["first_step"] == 2
 
 
+def test_validation_metrics_ignore_non_rewardable_nodes(tmp_path):
+    bonus_dir = tmp_path / "bonus_maps"
+    bonus_dir.mkdir()
+    (bonus_dir / "demo__nonrewardable.json").write_text(
+        json.dumps(
+            {
+                "instance_id": "demo__nonrewardable",
+                "case_type": "standard",
+                "traceable": True,
+                "call_graph_nodes": {
+                    "tests/test_demo.py::test_demo": {
+                        "file_path": "tests/test_demo.py",
+                        "start_line": 1,
+                        "end_line": 20,
+                        "normalized_distance": 1.0,
+                        "rewardable": False,
+                        "node_role": "test_harness",
+                        "excluded_from_hop_max": True,
+                        "exclusion_reason": "test_suite_or_harness:tests/**",
+                    },
+                    "pkg/demo.py::target": {
+                        "file_path": "pkg/demo.py",
+                        "start_line": 1,
+                        "end_line": 5,
+                        "normalized_distance": 0.0,
+                        "rewardable": True,
+                        "node_role": "program",
+                        "excluded_from_hop_max": False,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    records = [
+        {
+            "instance_id": "demo__nonrewardable",
+            "data_source": "unit",
+            "p2a_step_traces": [
+                {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "str_replace_editor",
+                                "arguments": {
+                                    "command": "view",
+                                    "path": "/testbed/tests/test_demo.py",
+                                    "view_range": [1, 20],
+                                },
+                            }
+                        }
+                    ]
+                }
+            ],
+        }
+    ]
+
+    metrics, details = compute_validation_p2a_metrics(
+        records,
+        bonus_map_dir=str(bonus_dir),
+        tracking_mode="view_and_bash",
+        near_threshold=0.5,
+        m_max=3.0,
+    )
+
+    assert details[0]["hit_call_graph"] is False
+    assert details[0]["n_call_graph_nodes"] == 2
+    assert details[0]["n_rewardable_call_graph_nodes"] == 1
+    topology_nodes = {node["key"]: node for node in details[0]["graph_topology"]["nodes"]}
+    assert topology_nodes["tests/test_demo.py::test_demo"]["rewardable"] is False
+    assert topology_nodes["tests/test_demo.py::test_demo"]["hit"] is False
+    assert metrics["val-p2a/unit/graph_hit_rate_over_call_graphs"] == 0.0
+
+
 def test_dashboard_builds_static_artifacts(tmp_path):
     bonus_dir = tmp_path / "bonus_maps"
     bonus_dir.mkdir()
