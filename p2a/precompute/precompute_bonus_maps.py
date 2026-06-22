@@ -1090,7 +1090,11 @@ def _clean_callables(callables: list[dict]) -> list[dict]:
 
 
 def compute_static_bonus_map(task: dict) -> dict:
-    """Compute a static bonus map (patched callables only, all d=0)."""
+    """Compute a static bonus map.
+
+    Without runtime traces there is no patched-to-patched reachability signal,
+    so static mode keeps every patched callable as a root.
+    """
     task = normalize_task(task)
     instance_id = make_instance_id(task)
     all_modified = find_modified_callables_from_task(task)
@@ -1118,7 +1122,7 @@ def compute_static_bonus_map(task: dict) -> dict:
             reason_code=case_type,
         )
 
-    # Static mode: every patched callable is at d=0, no test info
+    # Static mode has no trace signal for terminal-root inference.
     call_graph_nodes = {}
     for mc in all_modified:
         node_key = f"{mc['file_path']}::{mc['qualified_name']}"
