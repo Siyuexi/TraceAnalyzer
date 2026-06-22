@@ -31,6 +31,8 @@ if [[ $# -lt 1 ]]; then
 fi
 
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${SCRIPT_SRC_ROOT}/scripts/load_local_env.sh"
+p2a_source_local_env "${SCRIPT_SRC_ROOT}"
 SHARED_SRC_ROOT="$(cd "${P2A_SHARED_SRC_ROOT:-${SCRIPT_SRC_ROOT}}" && pwd)"
 SRC_ROOT="${SHARED_SRC_ROOT}"
 cd "${SHARED_SRC_ROOT}"
@@ -67,7 +69,7 @@ if [[ -z "${NUM_CPUS:-}" ]]; then
     NUM_CPUS=64
   fi
 fi
-RAY_DASHBOARD_HOST="${RAY_DASHBOARD_HOST:-0.0.0.0}"
+RAY_DASHBOARD_HOST="${RAY_DASHBOARD_HOST:-}"
 RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
 P2A_VENV_DIR="$(p2a_runtime_venv_rel "${SHARED_SRC_ROOT}")"
 export P2A_VENV_DIR
@@ -86,7 +88,7 @@ export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
 export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
 p2a_source_runtime_profile "${UV_PROJECT_ENVIRONMENT}"
 
-NO_PROXY_APPEND="localhost,127.0.0.1,::1,${MASTER_IP}"
+NO_PROXY_APPEND="localhost,::1,${MASTER_IP}"
 export NO_PROXY="${NO_PROXY:+${NO_PROXY},}${NO_PROXY_APPEND}"
 export no_proxy="${no_proxy:+${no_proxy},}${NO_PROXY_APPEND}"
 
@@ -124,7 +126,7 @@ fi
 
 dashboard_url() {
   if [[ "${IS_MASTER}" == "1" ]]; then
-    printf 'http://127.0.0.1:%s\n' "${RAY_DASHBOARD_PORT}"
+    printf 'http://%s:%s\n' "${RAY_LOCAL_DASHBOARD_HOST:-localhost}" "${RAY_DASHBOARD_PORT}"
   else
     printf 'http://%s:%s\n' "${MASTER_IP}" "${RAY_DASHBOARD_PORT}"
   fi
@@ -177,14 +179,19 @@ start_local() {
 
     stop_local
 
+    local dashboard_args=()
+    if [[ -n "${RAY_DASHBOARD_HOST}" ]]; then
+      dashboard_args+=(--dashboard-host="$RAY_DASHBOARD_HOST")
+    fi
+
     "${RAY_BIN}" start \
       --head \
       --port="$RAY_GCS_PORT" \
-      --dashboard-host="$RAY_DASHBOARD_HOST" \
       --dashboard-port="$RAY_DASHBOARD_PORT" \
       --node-ip-address="$MASTER_IP" \
       --num-cpus="$NUM_CPUS" \
-      --num-gpus="$NUM_GPUS"
+      --num-gpus="$NUM_GPUS" \
+      "${dashboard_args[@]}"
 
     wait_for_dashboard "$(dashboard_url)"
 

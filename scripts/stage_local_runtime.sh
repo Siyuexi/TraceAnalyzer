@@ -201,6 +201,8 @@ p2a_stage_local_runtime() {
       --exclude='.uv-python' \
       --exclude='.uv-python/' \
       --exclude='.p2a-stage/' \
+      --exclude='.secrete/' \
+      --exclude='.secrets/' \
       --exclude='__pycache__/' \
       --exclude='*.pyc' \
       --exclude='.pytest_cache/' \

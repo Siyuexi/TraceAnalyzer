@@ -59,7 +59,7 @@ async def run_smoke(args: argparse.Namespace) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True, help="Container image to boot in ARL")
-    parser.add_argument("--gateway-url", default=os.getenv("ARL_GATEWAY_URL", "http://118.145.201.106:80"))
+    parser.add_argument("--gateway-url", default=os.getenv("ARL_GATEWAY_URL"))
     parser.add_argument("--namespace", default=os.getenv("ARL_NAMESPACE", "default"))
     parser.add_argument("--experiment-id", default=os.getenv("ARL_EXPERIMENT_ID", "p2a-uniagent-arl-smoke"))
     parser.add_argument("--timeout", type=float, default=float(os.getenv("ARL_TIMEOUT", "600")))

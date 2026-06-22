@@ -4,6 +4,8 @@ set -euo pipefail
 
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_ROOT="${SCRIPT_SRC_ROOT}"
+source "${SRC_ROOT}/scripts/load_local_env.sh"
+p2a_source_local_env "${SRC_ROOT}"
 source "${SRC_ROOT}/scripts/setup.sh"
 cd "${SRC_ROOT}"
 
@@ -53,7 +55,9 @@ export PYTHONPATH="${PYTHONPATH:-.:uni-agent:uni-agent/verl:uni-agent/examples/d
 export UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/uv-cache}"
 export P2A_DEPLOYMENT="${P2A_DEPLOYMENT:-arl}"
 export UNI_AGENT_P2A_TRACE="${UNI_AGENT_P2A_TRACE:-1}"
-export ARL_GATEWAY_URL="${ARL_GATEWAY_URL:-http://118.145.201.106:80}"
+if [[ "${P2A_DEPLOYMENT,,}" == "arl" ]]; then
+  p2a_require_env ARL_GATEWAY_URL
+fi
 
 if [[ "${1:-}" == "--batch" ]]; then
   if [[ -z "${2:-}" ]]; then

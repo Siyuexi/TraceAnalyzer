@@ -78,7 +78,7 @@ proving P2A works on the Uni-Agent tool set and actually captures actions
 ## Reminders
 
 - **ARL is the sandbox backend, not a VRC remote.** The `arl-env` SDK connects
-  directly to the ARL Gateway (`ARL_GATEWAY_URL`, e.g. `http://118.145.201.106:80`)
+  directly to the ARL Gateway (`ARL_GATEWAY_URL`)
   to boot a per-instance container sandbox where tests + P2A instrumentation run
   (bonus-map precompute, training rollouts); it is reachable directly from CPU hosts.
   This is unrelated to VRC's `remote` facility — `vrc remote` targets the **GPU

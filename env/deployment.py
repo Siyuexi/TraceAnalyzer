@@ -17,7 +17,12 @@ from swerex.runtime.abstract import AbstractRuntime, CreateBashSessionRequest, I
 
 from uni_agent.async_logging import get_logger
 
-DEFAULT_GATEWAY_URL = "http://118.145.201.106:80"
+
+def require_arl_gateway_url(explicit: str | None = None) -> str:
+    gateway_url = explicit or os.getenv("ARL_GATEWAY_URL")
+    if not gateway_url:
+        raise RuntimeError("ARL_GATEWAY_URL is required; set it or source .secrete/ips.sh.")
+    return gateway_url
 
 
 @dataclass
@@ -107,7 +112,7 @@ class ArlDeployment(AbstractDeployment):
                 "and env.runtime.ArlRuntime in this source tree."
             ) from exc
 
-        gateway_url = self._config.gateway_url or os.getenv("ARL_GATEWAY_URL", DEFAULT_GATEWAY_URL)
+        gateway_url = require_arl_gateway_url(self._config.gateway_url)
         experiment_id = self._config.experiment_id or os.getenv("ARL_EXPERIMENT_ID", "p2a-uniagent-arl")
 
         self.logger.info(f"Starting ARL deployment image={self._config.image} gateway={gateway_url}")
