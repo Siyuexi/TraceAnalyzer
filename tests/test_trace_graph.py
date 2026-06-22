@@ -368,6 +368,37 @@ def test_mixed_role_patched_callable_is_not_global_root():
     assert long_foo1["downstream_patched_frame_keys"] == ["pkg/foo.py::foo2"]
 
 
+def test_cyclic_patched_dependency_component_remains_traceable():
+    traces = [
+        [
+            _frame("tests/test_ab.py", "test_ab", 1),
+            _frame("pkg/a.py", "A", 10, patched=True),
+            _frame("pkg/b.py", "B", 20, patched=True),
+        ],
+        [
+            _frame("tests/test_ba.py", "test_ba", 1),
+            _frame("pkg/b.py", "B", 20, patched=True),
+            _frame("pkg/a.py", "A", 10, patched=True),
+        ],
+    ]
+    modified = [
+        _modified("pkg/a.py", "A", 10, 12),
+        _modified("pkg/b.py", "B", 20, 22),
+    ]
+
+    result = build_call_graph_from_traces(traces, modified)
+
+    assert result["traceable"] is True
+    assert result["call_graph_nodes"]["pkg/a.py::A"]["normalized_distance"] == 0.0
+    assert result["call_graph_nodes"]["pkg/b.py::B"]["normalized_distance"] == 0.0
+    assert result["patched_root_selection"]["terminal_root_seeds"] == ["pkg/a.py::A", "pkg/b.py::B"]
+    assert result["patched_root_selection"]["terminal_root_components"] == [["pkg/a.py::A", "pkg/b.py::B"]]
+    assert result["patched_root_selection"]["patched_dependency_edges"] == [
+        ["pkg/a.py::A", "pkg/b.py::B"],
+        ["pkg/b.py::B", "pkg/a.py::A"],
+    ]
+
+
 def test_overlapping_traces_use_deepest_terminal_patched_root():
     traces = [
         [

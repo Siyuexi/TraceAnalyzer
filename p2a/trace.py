@@ -1561,6 +1561,73 @@ def _callable_node_key(callable_info: dict) -> str:
     return f"{callable_info['file_path']}::{callable_info['qualified_name']}"
 
 
+def _terminal_patched_root_keys(
+    observed_keys: set[str],
+    dependency_edges: set[tuple[str, str]],
+) -> tuple[set[str], list[list[str]]]:
+    index = 0
+    stack: list[str] = []
+    indices: dict[str, int] = {}
+    lowlinks: dict[str, int] = {}
+    on_stack: set[str] = set()
+    outgoing: dict[str, set[str]] = {key: set() for key in observed_keys}
+    for upstream, downstream in dependency_edges:
+        if upstream in observed_keys and downstream in observed_keys:
+            outgoing.setdefault(upstream, set()).add(downstream)
+            outgoing.setdefault(downstream, set())
+
+    components: list[list[str]] = []
+
+    def strongconnect(node_key: str) -> None:
+        nonlocal index
+        indices[node_key] = index
+        lowlinks[node_key] = index
+        index += 1
+        stack.append(node_key)
+        on_stack.add(node_key)
+
+        for downstream_key in outgoing.get(node_key, ()):
+            if downstream_key not in indices:
+                strongconnect(downstream_key)
+                lowlinks[node_key] = min(lowlinks[node_key], lowlinks[downstream_key])
+            elif downstream_key in on_stack:
+                lowlinks[node_key] = min(lowlinks[node_key], indices[downstream_key])
+
+        if lowlinks[node_key] != indices[node_key]:
+            return
+
+        component: list[str] = []
+        while True:
+            member = stack.pop()
+            on_stack.remove(member)
+            component.append(member)
+            if member == node_key:
+                break
+        components.append(sorted(component))
+
+    for node_key in sorted(observed_keys):
+        if node_key not in indices:
+            strongconnect(node_key)
+
+    component_index = {
+        node_key: component_id
+        for component_id, component in enumerate(components)
+        for node_key in component
+    }
+    terminal_components: list[list[str]] = []
+    for component_id, component in enumerate(components):
+        has_external_downstream = any(
+            component_index[downstream_key] != component_id
+            for node_key in component
+            for downstream_key in outgoing.get(node_key, ())
+        )
+        if not has_external_downstream:
+            terminal_components.append(component)
+
+    terminal_roots = {node_key for component in terminal_components for node_key in component}
+    return terminal_roots, sorted(terminal_components, key=lambda component: (component[0], len(component)))
+
+
 def build_call_graph_from_traces(
     traces: list[list[dict]],
     modified_callables: list[dict],
@@ -1633,8 +1700,10 @@ def build_call_graph_from_traces(
             }
         )
 
-    upstream_patched_keys = {upstream for upstream, _ in patched_dependency_edges}
-    terminal_root_keys = observed_patched_keys - upstream_patched_keys
+    terminal_root_keys, terminal_root_components = _terminal_patched_root_keys(
+        observed_patched_keys,
+        patched_dependency_edges,
+    )
     upstream_adapter_patched_keys = observed_patched_keys - terminal_root_keys
     for trace_item in patched_frames_by_trace:
         for frame_item in trace_item["patched_frames"]:
@@ -1726,6 +1795,7 @@ def build_call_graph_from_traces(
         patched_root_selection = {
             "observed_patched_frames_by_trace": patched_frames_by_trace,
             "terminal_root_seeds": sorted(terminal_root_keys),
+            "terminal_root_components": terminal_root_components,
             "upstream_adapter_patched_callables": sorted(upstream_adapter_patched_keys),
             "patched_dependency_edges": [[upstream, downstream] for upstream, downstream in sorted(patched_dependency_edges)],
             "legacy_distance_zero_node_count": legacy_zero_node_count,
@@ -1847,6 +1917,7 @@ def build_call_graph_from_traces(
     patched_root_selection = {
         "observed_patched_frames_by_trace": patched_frames_by_trace,
         "terminal_root_seeds": sorted(terminal_root_keys),
+        "terminal_root_components": terminal_root_components,
         "upstream_adapter_patched_callables": sorted(upstream_adapter_patched_keys),
         "patched_dependency_edges": [[upstream, downstream] for upstream, downstream in sorted(patched_dependency_edges)],
         "legacy_distance_zero_node_count": legacy_zero_node_count,
