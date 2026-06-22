@@ -1150,8 +1150,11 @@ def score_record(
     result["has_call_graph"] = bool(nodes)
     result["n_call_graph_nodes"] = len(nodes)
     result["n_rewardable_call_graph_nodes"] = len(rewardable_nodes)
+    scoring_step_reads = step_reads if any(reads_for_step for reads_for_step in step_reads) else ([reads] if reads else [])
     step_first_hits = _step_node_first_hits(step_reads, bonus_map) if step_reads else {}
-    step_first_hits_all = _step_node_first_hits(step_reads, bonus_map, rewardable_only=False) if step_reads else {}
+    scoring_first_hits_all = (
+        _step_node_first_hits(scoring_step_reads, bonus_map, rewardable_only=False) if scoring_step_reads else {}
+    )
     result["graph_topology"] = _graph_topology(bonus_map, set(), step_first_hits)
     chain_evaluable, not_chain_reason = _chain_evaluability(bonus_map)
     result["chain_evaluable"] = chain_evaluable
@@ -1159,7 +1162,7 @@ def score_record(
     result["chain_case_kind"] = result["bonus_case_type"] if result["bonus_case_type"] in CHAIN_CASE_TYPES else None
 
     all_hit_nodes = _all_read_hit_nodes(reads, bonus_map, rewardable_only=False)
-    chain_projection = _chain_projection(bonus_map, all_hit_nodes, step_first_hits_all)
+    chain_projection = _chain_projection(bonus_map, all_hit_nodes, scoring_first_hits_all)
     result["chain_projection"] = chain_projection
     chain_node_keys = {node["key"] for node in chain_projection.get("chain_nodes", [])}
     context_node_keys = {node["key"] for node in chain_projection.get("context_nodes", [])}
@@ -1169,8 +1172,7 @@ def score_record(
     result["n_context_nodes"] = len(context_node_keys)
     result["chain_graph_covered"] = chain_evaluable and bool(chain_node_keys) and bool(anchor_nodes) and bool(root_nodes)
     if chain_evaluable and chain_node_keys:
-        chain_step_reads = step_reads or ([reads] if reads else [])
-        chain_stats = _chain_step_hits(chain_step_reads, bonus_map, chain_node_keys, anchor_nodes, root_nodes)
+        chain_stats = _chain_step_hits(scoring_step_reads, bonus_map, chain_node_keys, anchor_nodes, root_nodes)
         hit_chain_nodes = chain_stats["hit_chain_nodes"]
         first_anchor = min(chain_stats["anchor_hit_steps"]) if chain_stats["anchor_hit_steps"] else None
         first_root = min(chain_stats["root_hit_steps"]) if chain_stats["root_hit_steps"] else None

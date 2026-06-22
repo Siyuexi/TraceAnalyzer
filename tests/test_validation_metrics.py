@@ -211,6 +211,42 @@ def test_validation_metrics_use_schema_v5_chain_projection(tmp_path):
     assert metrics["val-p2a/unit/steps_anchor_to_root"] == 1.0
 
 
+def test_chain_metrics_fall_back_to_top_level_reads_when_step_traces_are_empty(tmp_path):
+    bonus_dir = tmp_path / "bonus_maps"
+    bonus_dir.mkdir()
+    (bonus_dir / "demo__chain.json").write_text(json.dumps(_schema_v5_bonus_map()), encoding="utf-8")
+    records = [
+        {
+            "instance_id": "demo__chain",
+            "data_source": "unit",
+            "p2a_step_traces": [{"step_idx": 0, "tool_calls": [], "response_text": "planning only"}],
+            "response_text": "cat /testbed/app/views.py\ncat /testbed/app/root.py",
+        }
+    ]
+
+    metrics, details = compute_validation_p2a_metrics(
+        records,
+        bonus_map_dir=str(bonus_dir),
+        tracking_mode="view_and_bash",
+        near_threshold=0.5,
+        m_max=3.0,
+    )
+
+    detail = details[0]
+    assert detail["hit_call_graph"] is True
+    assert detail["chain_evaluable"] is True
+    assert detail["anchor_hit"] is True
+    assert detail["root_hit"] is True
+    assert detail["chain_hit"] is True
+    assert detail["chain_node_recall"] == 2 / 3
+    assert detail["chain_read_precision"] == 1.0
+    assert detail["first_anchor_step"] == 0
+    assert detail["first_root_step"] == 0
+    assert detail["steps_anchor_to_root"] == 0
+    assert metrics["val-p2a/unit/chain_hit_rate"] == 1.0
+    assert metrics["val-p2a/unit/chain_node_recall"] == 2 / 3
+
+
 def test_validation_records_from_extra_fields_and_metric_flattening(tmp_path):
     bonus_dir = tmp_path / "bonus_maps"
     bonus_dir.mkdir()
