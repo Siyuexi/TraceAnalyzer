@@ -12,6 +12,7 @@ from p2a.third_party_eval import (
     build_dump_record,
     build_step_traces,
     cache_rollouts,
+    classify_error,
     format_report,
     load_config,
     parse_limit_arg,
@@ -171,6 +172,10 @@ def test_build_step_traces_preserves_structured_tool_calls():
             "exit_reason": "completed",
         }
     ]
+
+
+def test_classify_error_marks_arl_websocket_forbidden_as_system_error():
+    assert classify_error("InvalidStatus: server rejected WebSocket connection: HTTP 403") == "arl_shell_forbidden"
 
 
 def test_dump_record_is_readable_by_fault_localization_scorer(tmp_path):

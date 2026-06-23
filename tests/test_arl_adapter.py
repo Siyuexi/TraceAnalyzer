@@ -98,6 +98,18 @@ class ArlAdapterTests(unittest.TestCase):
         runtime = ArlRuntime(FakeSession(), run_id="run-1")
         self.assertEqual(runtime._arl_session_id, "arl-session-1")
 
+    def test_deployment_config_accepts_required_interactive_shell(self) -> None:
+        config = ArlDeploymentConfig.from_mapping(
+            {
+                "type": "arl",
+                "image": "registry.local/r2e:latest",
+                "gateway_url": "http://gateway",
+                "require_interactive_shell": True,
+            }
+        )
+
+        self.assertTrue(config.require_interactive_shell)
+
     def test_uni_agent_sandbox_adapter_runs_post_setup_via_execute(self) -> None:
         from p2a.precompute.uni_agent_sandbox import UniAgentSandboxAdapter
 

@@ -23,6 +23,7 @@ async def run_smoke(args: argparse.Namespace) -> int:
         "startup_timeout": args.startup_timeout,
         "delete_on_stop": not args.keep_sandbox,
         "max_replicas": args.max_replicas,
+        "require_interactive_shell": True,
     }
     config = ArlDeploymentConfig(**config_kwargs)
     deployment = config.get_deployment(run_id="arl-smoke")

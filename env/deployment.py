@@ -46,6 +46,7 @@ class ArlDeploymentConfig:
     delete_on_stop: bool = True
     max_replicas: int | None = None
     resources: dict[str, Any] | None = field(default=None)
+    require_interactive_shell: bool = False
     # Accepted for compatibility with older generated configs. Direct ARL mode
     # does not use a SWE-ReX bootstrap command or endpoint template.
     command: str | None = None
@@ -155,17 +156,18 @@ class ArlDeployment(AbstractDeployment):
 
         self._hooks.on_custom_step("Attaching ARL runtime adapter")
         self._runtime = ArlRuntime(self._session, run_id=self.run_id, logger=self.logger)
-        # The interactive PTY is an optimization for agent rollouts. Precompute uses
-        # one-shot execute calls, and interactive shell startup can lag behind sandbox
-        # readiness, so keep this bounded and let callers open it lazily if needed.
+        # Precompute can use one-shot execute calls only. Uni-Agent rollouts need
+        # the persistent shell because AgentEnv.communicate() carries cwd/env state.
         eager_shell_timeout = float(os.getenv("ARL_EAGER_SHELL_TIMEOUT", "10"))
         try:
-            if eager_shell_timeout > 0:
+            if self._config.require_interactive_shell or eager_shell_timeout > 0:
                 await asyncio.wait_for(
                     self._runtime.create_session(CreateBashSessionRequest()),
-                    timeout=eager_shell_timeout,
+                    timeout=eager_shell_timeout if eager_shell_timeout > 0 else self._config.startup_timeout,
                 )
         except Exception as exc:  # noqa: BLE001 - shell is reopened lazily by run_in_session
+            if self._config.require_interactive_shell:
+                raise RuntimeError(f"ARL interactive shell preflight failed: {exc}") from exc
             self.logger.warning(
                 f"Eager ARL shell open failed ({exc!r}); will open lazily on first interactive use"
             )

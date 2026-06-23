@@ -25,12 +25,14 @@ from p2a.eval_cache import (
     upsert_planned_cells,
     utc_now,
 )
+from p2a.eval_fault_localization import iter_records
 from p2a.hf_assets import shared_p2a_data_dir
-from p2a.third_party_eval import _instance_id, _load_rows, _select_rows, parse_limit_arg
+from p2a.third_party_eval import _instance_id, _load_rows, _select_rows, is_system_error_kind, parse_limit_arg
 
 
 SUPPORTED_DATASETS = {"swebench-hard", "swebench-verified", "r2e-gym-subset"}
 REDACT_KEYS = ("api_key", "apikey", "token", "secret", "password", "authorization")
+SYSTEM_ERROR_STATUS = "system_error"
 
 
 @dataclass(frozen=True)
@@ -343,6 +345,38 @@ async def _run_subprocess(command: list[str], *, env: dict[str, str], timeout_s:
     return proc.returncode or 0, stdout.decode("utf-8", errors="replace")
 
 
+def _system_error_summary(rollouts_path: Path) -> dict[str, Any] | None:
+    if not rollouts_path.exists():
+        return None
+    records = list(iter_records(rollouts_path))
+    if not records:
+        return None
+    error_records = [record for record in records if record.get("error")]
+    if len(error_records) != len(records):
+        return None
+    system_records = [
+        record
+        for record in error_records
+        if bool(record.get("system_error")) or is_system_error_kind(str(record.get("error_kind") or ""))
+    ]
+    if len(system_records) != len(records):
+        return None
+    kinds: dict[str, int] = {}
+    stages: dict[str, int] = {}
+    for record in system_records:
+        kind = str(record.get("error_kind") or "unknown")
+        stage = str(record.get("error_stage") or "unknown")
+        kinds[kind] = kinds.get(kind, 0) + 1
+        stages[stage] = stages.get(stage, 0) + 1
+    example = str(system_records[0].get("error") or "")
+    return {
+        "n_records": len(records),
+        "error_kinds": kinds,
+        "error_stages": stages,
+        "example_error": example[:500],
+    }
+
+
 def _mark_missing_error(
     db_path: Path,
     *,
@@ -445,6 +479,8 @@ async def run_model_phase(
     model_env = dict(env)
     model_env["P2A_THIRD_PARTY_MODEL"] = model.api_name
 
+    rollouts_path = run_dir / "rollouts.jsonl"
+    details_path = run_dir / "details.jsonl"
     returncode, output = await _run_subprocess(command, env=model_env, timeout_s=_duration_seconds(config.run_timeout))
     log_path = run_dir / "run.log"
     log_path.write_text(output, encoding="utf-8")
@@ -473,10 +509,21 @@ async def run_model_phase(
             model_api_name=model.api_name,
             model_label=model.label,
             dataset=config.dataset_name,
-            rollouts_path=run_dir / "rollouts.jsonl",
-            details_path=run_dir / "details.jsonl",
+            rollouts_path=rollouts_path,
+            details_path=details_path,
         )
         conn.commit()
+    system_error = _system_error_summary(rollouts_path)
+    if system_error is not None:
+        return {
+            "model": model.label,
+            "phase": phase,
+            "status": SYSTEM_ERROR_STATUS,
+            "n_missing": len(missing_ids),
+            "n_ingested": n_ingested,
+            "run_dir": str(run_dir),
+            **system_error,
+        }
     return {
         "model": model.label,
         "phase": phase,
@@ -513,6 +560,9 @@ async def run_batch(config: BatchConfig, *, env: dict[str, str] | None = None) -
     for phase, limit in _phase_specs(config):
         phase_results = await asyncio.gather(*(guarded(model, phase, limit) for model in config.models))
         results.extend(phase_results)
+        if phase == "smoke" and any(result.get("status") == SYSTEM_ERROR_STATUS for result in phase_results):
+            print("[batch] smoke phase hit a system error; skipping later phases", flush=True)
+            break
     return results
 
 

@@ -404,13 +404,18 @@ tokens, and model lists stay ignored under `.secrets/internal_api_eval.py` (or
 the path set by `provider.api_module` / `P2A_INTERNAL_API_MODULE`). If that
 private module is missing, batch mode fails before launching cells.
 Batch results are upserted into the unified SQLite cache configured by
-`storage.db` (default `data/evals/traces.sqlite`) and can be watched live:
+`storage.db` (default `data/evals/traces.sqlite`, resolved under the shared
+`$DATA` root) and can be watched live:
 
 ```bash
 uv run python scripts/watch_third_party_batch.py \
-  --db data/evals/traces.sqlite \
+  --db $DATA/evals/traces.sqlite \
   --experiment-id public-swebench-hard-demo
 ```
+
+If the smoke phase records only system errors such as ARL gateway or interactive
+shell failures, batch mode stops before the full phase and reports the structured
+error kind in the rollout artifacts.
 
 Switch datasets with `THIRD_PARTY_DATASET=swebench-verified` or
 `THIRD_PARTY_DATASET=r2e-gym-subset`. Keep `P2A_THIRD_PARTY_LIMIT` small for
