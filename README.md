@@ -29,17 +29,19 @@ frames and treats all remaining F2P→terminal-root frames as rewardable.
 > the **GPU server** for command debugging — ARL gateway reachability is independent of
 > `vrc remote`.
 
-Default HuggingFace assets are shared across sibling projects:
+Default HuggingFace datasets and models are shared across sibling projects.
+TraceAnalyzer-generated artifacts stay inside this checkout under `data/`.
 
 | Asset | Default location from `src/` | Override |
 |---|---|---|
 | Models | `../../models/<repo-name>` | `MODEL_PATH` / `P2A_MODELS_DIR` / `P2A_MODEL_REPO` |
-| Datasets | `../../datasets/<repo-name>/<split>` | `P2A_DATASETS_DIR` |
-| Generated P2A data | `../../datasets/p2a` | `DATA` / `P2A_SHARED_ROOT` |
+| Datasets and generated parquets | `../../datasets`, with P2A parquets in `../../datasets/p2a` | `P2A_DATASETS_DIR` / `DATA` / `P2A_SHARED_ROOT` |
+| Project artifacts | `data/` | `P2A_ARTIFACTS_DIR` |
 
-If a dataset/model is already present there, scripts read it directly. If it is
-missing, the script downloads it from HuggingFace and saves it under that shared
-location.
+If a dataset/model is already present in the shared location, scripts read it
+directly. If it is missing, the script downloads it from HuggingFace and saves
+it there. Bonus maps, SQLite caches, rollout dumps, analysis reports, eval
+details, and dashboard snapshots are project artifacts and default to `data/`.
 
 ## Current capabilities
 
@@ -188,11 +190,18 @@ R2E-Gym eval rows, while `SWE-bench_Verified/` carries Princeton difficulty labe
 ```bash
 PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl \
   uv run python p2a/precompute/precompute_bonus_maps.py \
-    $DATA/r2e_gym_subset_p2a.parquet --mode dynamic --n_parallel 64
+    $DATA/r2e_gym_subset_p2a.parquet \
+    --output_dir data/bonus_maps/r2e-gym-subset \
+    --mode dynamic --n_parallel 64
 ```
 
-Training maps default to `../../p2a/bonus_maps`; set `P2A_BONUS_MAP_DIR` to use a
-different read/write directory.
+The setup wrapper also writes maps to `data/bonus_maps/<dataset>` by default:
+
+```bash
+bash scripts/setup.sh maps r2e-gym-subset
+```
+
+Set `P2A_BONUS_MAP_DIR` to the matching directory when enabling P2A training.
 
 Each generated map includes `call_graph_nodes`, `call_graph_edges`, and a
 per-node `source` snippet when the sandbox file can be read. The edge list is
@@ -205,12 +214,12 @@ Skip this step for a pure baseline run. P2A training reads these maps through
 ### Step 4. Precompute eval maps for validation graph metrics
 
 ```bash
-TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
-  P2A_EVAL_BONUS_MAP_DIR=$DATA/eval_bonus_maps bash scripts/precompute_eval_bonus_maps.sh
+TEST_FILE=$DATA/swe_bench_verified_hard.parquet bash scripts/precompute_eval_bonus_maps.sh
 ```
 
-Eval maps are diagnostic only. They are read during validation logging but never
-used by the P2A training reshape.
+Eval maps default to `data/bonus_maps/swebench-hard`. They are diagnostic only:
+validation logging reads them, but the training reshape should use the training
+split's `data/bonus_maps/r2e-gym-subset` directory.
 
 ### Step 5. Configure logging and GPU layout
 
@@ -324,8 +333,8 @@ Baseline:
 TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet \
   TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
   MODEL_PATH=$MODEL \
-  P2A_EVAL_BONUS_MAP_DIR=$DATA/eval_bonus_maps \
-  P2A_EVAL_DETAILS_DIR=$DATA/eval_details \
+  P2A_EVAL_BONUS_MAP_DIR=data/bonus_maps/swebench-hard \
+  P2A_EVAL_DETAILS_DIR=data/eval_details \
   bash scripts/train_p2a.sh
 ```
 
@@ -335,9 +344,9 @@ P2A:
 TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet \
   TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
   MODEL_PATH=$MODEL \
-  P2A_EVAL_BONUS_MAP_DIR=$DATA/eval_bonus_maps \
-  P2A_EVAL_DETAILS_DIR=$DATA/eval_details \
-  P2A_BONUS_MAP_DIR=../../p2a/bonus_maps \
+  P2A_EVAL_BONUS_MAP_DIR=data/bonus_maps/swebench-hard \
+  P2A_EVAL_DETAILS_DIR=data/eval_details \
+  P2A_BONUS_MAP_DIR=data/bonus_maps/r2e-gym-subset \
   P2A_M_MAX=3.0 \
   P2A_CREDIT_GRANULARITY=step \
   bash scripts/train_p2a.sh
@@ -353,9 +362,9 @@ For an already-dumped rollout file or dump directory:
 
 ```bash
 uv run python -m p2a.eval_fault_localization $ROLLOUT_JSONL \
-  --bonus-map-dir $DATA/eval_bonus_maps \
-  --summary-out $DATA/eval_faultloc_summary.json \
-  --details-out $DATA/eval_faultloc_details.jsonl
+  --bonus-map-dir data/bonus_maps/swebench-hard \
+  --summary-out data/eval_faultloc_summary.json \
+  --details-out data/eval_faultloc_details.jsonl
 ```
 
 To open the unified HTML dashboard over an already-dumped rollout file or dump
@@ -363,7 +372,7 @@ directory:
 
 ```bash
 uv run python scripts/p2a_dashboard.py $ROLLOUT_JSONL \
-  --bonus-map-dir $DATA/eval_bonus_maps \
+  --bonus-map-dir data/bonus_maps/swebench-hard \
   --port 8766
 ```
 
@@ -371,8 +380,8 @@ To write a portable static snapshot of the same HTML dashboard:
 
 ```bash
 uv run python scripts/p2a_dashboard.py $ROLLOUT_JSONL \
-  --bonus-map-dir $DATA/eval_bonus_maps \
-  --out-dir $DATA/p2a_dashboard
+  --bonus-map-dir data/bonus_maps/swebench-hard \
+  --out-dir data/p2a_dashboard
 ```
 
 The dashboard can also read scored validation details, Uni-Agent run directories,
@@ -380,18 +389,18 @@ and the third-party eval SQLite cache:
 
 ```bash
 uv run python scripts/p2a_dashboard.py \
-  --details $DATA/eval_details \
-  --bonus-map-dir $DATA/eval_bonus_maps/swebench-hard
+  --details data/eval_details \
+  --bonus-map-dir data/bonus_maps/swebench-hard
 
 uv run python scripts/p2a_dashboard.py \
   --log-dir /tmp/swebench_qwen3_coder \
-  --bonus-map-dir $DATA/eval_bonus_maps/swebench-hard
+  --bonus-map-dir data/bonus_maps/swebench-hard
 
 uv run python scripts/p2a_dashboard.py \
-  --db $DATA/evals/traces.sqlite \
+  --db data/evals/traces.sqlite \
   --experiment-id public-swebench-hard-demo \
   --dataset swebench-hard \
-  --bonus-map-dir $DATA/eval_bonus_maps/swebench-hard
+  --bonus-map-dir data/bonus_maps/swebench-hard
 ```
 
 The offline `summary-out` and `details-out` files are post-hoc artifacts for
@@ -404,7 +413,7 @@ validation scoring uses `P2A_EVAL_BONUS_MAP_DIR`, and the HTML dashboard reads
 For a main-style smoke/default run, set the API key and run the wrapper. It
 defaults to `swebench-hard`, builds the parquet if missing, precomputes matching
 dependency/call-graph maps, and writes rollout + fault-localization artifacts
-under `$DATA/third_party/<dataset>/<model>/`:
+under `data/third_party/<dataset>/<model>/`:
 
 ```bash
 export P2A_THIRD_PARTY_API_KEY=...
@@ -429,15 +438,16 @@ tokens, and model lists stay ignored under `.secrets/internal_api_eval.py` (or
 the path set by `provider.api_module` / `P2A_INTERNAL_API_MODULE`). If that
 private module is missing, batch mode fails before launching cells.
 Batch results are upserted into the unified SQLite cache configured by
-`storage.db` (default `data/evals/traces.sqlite`, resolved under the shared
-`$DATA` root) and can be watched live in the unified HTML dashboard:
+`storage.db` (default `data/evals/traces.sqlite`, resolved under
+`P2A_ARTIFACTS_DIR`, which defaults to this checkout's `data/`) and can be
+watched live in the unified HTML dashboard:
 
 ```bash
 uv run python scripts/p2a_dashboard.py \
-  --db $DATA/evals/traces.sqlite \
+  --db data/evals/traces.sqlite \
   --experiment-id public-swebench-hard-demo \
   --dataset swebench-hard \
-  --bonus-map-dir $DATA/eval_bonus_maps/swebench-hard
+  --bonus-map-dir data/bonus_maps/swebench-hard
 ```
 
 The old terminal/TUI batch watcher has been folded into this HTML dashboard:
@@ -467,13 +477,13 @@ export P2A_THIRD_PARTY_MODEL=deepseek-v4-flash
 timeout 15m bash scripts/third_party_eval.sh \
   --config config/third_party_eval.deepseek.example.yaml \
   --data $DATA/swe_bench_verified_hard.parquet \
-  --out $DATA/third_party/deepseek_v4_flash_rollouts.jsonl \
+  --out data/third_party/deepseek_v4_flash_rollouts.jsonl \
   --limit 1 \
   --max-turns 3 \
   --max-tokens 1024 \
   --tool-install-timeout 300 \
   --skip-tool-install str_replace_editor \
-  --bonus-map-dir $DATA/eval_bonus_maps
+  --bonus-map-dir data/bonus_maps/swebench-hard
 ```
 
 The harness uses Uni-Agent's `OpenAICompatibleChatModel`, the local ARL
@@ -493,12 +503,13 @@ These are knobs you set; the repo does not pin them:
 | What | Where |
 |---|---|
 | Model | `MODEL_PATH` env var; default is `../../models/Qwen3-Coder-30B-A3B-Instruct` from `Qwen/Qwen3-Coder-30B-A3B-Instruct` |
-| Shared generated data root | `DATA`, conventionally `../../datasets/p2a` |
+| Shared dataset/parquet root | `DATA`, conventionally `../../datasets/p2a` |
+| Project artifact root | `P2A_ARTIFACTS_DIR`, default `data/`; compatibility alias `P2A_PROJECT_DATA_DIR` |
 | Train / val data | `TRAIN_FILE` / `TEST_FILE` env vars (point at the parquets built above) |
 | Ray job target | `RAY_API_SERVER_ADDRESS` (Ray Jobs endpoint, usually `http://<ray-head-ip>:8265`) |
 | GPU / CPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (32-GPU 4×8 starter: `2 / 2 / 8`); `NUM_CPUS` is the Ray CPU resource advertised per node, default 64 |
-| Bonus maps (read + write) | `P2A_BONUS_MAP_DIR` — one dir for both precompute output and training input; default `../../p2a/bonus_maps`. Training treats it as the P2A on/off switch (unset = baseline). `P2A_M_MAX` sets strength. `P2A_CREDIT_GRANULARITY=step|block` selects per-step or purpose-block credit. |
-| Eval fault-localization diagnostics | `P2A_EVAL_BONUS_MAP_DIR`, `P2A_EVAL_NEAR_THRESHOLD`, `P2A_EVAL_DETAILS_DIR`, `P2A_EVAL_BONUS_N_PARALLEL`, `P2A_EVAL_BONUS_LIMIT`, `P2A_EVAL_BONUS_OFFSET` |
+| Bonus maps (read + write) | `P2A_BONUS_MAP_DIR`; setup/eval/third-party helpers default to `data/bonus_maps/<dataset>`. Training treats it as the P2A on/off switch (unset = baseline). `P2A_M_MAX` sets strength. `P2A_CREDIT_GRANULARITY=step|block` selects per-step or purpose-block credit. |
+| Eval fault-localization diagnostics | `P2A_EVAL_BONUS_MAP_DIR`, `P2A_EVAL_NEAR_THRESHOLD`, `P2A_EVAL_DETAILS_DIR`, `P2A_EVAL_BONUS_N_PARALLEL`, `P2A_EVAL_BONUS_LIMIT`, `P2A_EVAL_BONUS_OFFSET`; defaults belong under `data/` |
 | Third-party provider baseline | `config/third_party_eval.deepseek.example.yaml` plus `P2A_THIRD_PARTY_BASE_URL`, `P2A_THIRD_PARTY_API_KEY`, `P2A_THIRD_PARTY_MODEL`; API keys stay in env vars, not git |
 | Third-party run scope | `THIRD_PARTY_DATASET`, `THIRD_PARTY_DATA_FILE`, `P2A_THIRD_PARTY_LIMIT`, `P2A_THIRD_PARTY_N_PARALLEL`, `P2A_THIRD_PARTY_RUN_TIMEOUT`, `P2A_THIRD_PARTY_BONUS_*` |
 | ARL gateway | `ARL_GATEWAY_URL` |
@@ -511,9 +522,10 @@ config, put it under `config/`.
 ## Eval Fault-Localization Metrics
 
 `scripts/precompute_eval_bonus_maps.sh` reuses the same dynamic precompute path as
-training bonus maps, but points it at `TEST_FILE` / `EVAL_FILE`.  The resulting
-eval maps should stay out of `P2A_BONUS_MAP_DIR`; they are only a diagnostic
-reference for validation rollouts.
+training bonus maps, but points it at `TEST_FILE` / `EVAL_FILE`. The resulting
+maps live under the same artifact family (`data/bonus_maps/<dataset>`), but use
+a split-specific directory. During training, `P2A_BONUS_MAP_DIR` should point at
+the training split and `P2A_EVAL_BONUS_MAP_DIR` at the validation split.
 
 `p2a.eval_fault_localization` accepts rollout dumps in `.jsonl`, `.json`, or
 `.parquet` format.  It first reads `p2a_step_traces`, then structured
@@ -550,8 +562,8 @@ running:
 
 ```bash
 uv run python scripts/p2a_dashboard.py \
-  --details $DATA/eval_details \
-  --bonus-map-dir $DATA/eval_bonus_maps/swebench-hard \
+  --details data/eval_details \
+  --bonus-map-dir data/bonus_maps/swebench-hard \
   --port 8766
 ```
 

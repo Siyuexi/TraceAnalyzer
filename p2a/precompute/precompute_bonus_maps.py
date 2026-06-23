@@ -1991,7 +1991,7 @@ def main() -> int:
     parser.add_argument(
         "--output_dir",
         default=str(shared_bonus_maps_dir()),
-        help="Output directory for bonus map JSONs (default: ../../p2a/bonus_maps)",
+        help="Output directory for bonus map JSONs (default: data/bonus_maps)",
     )
     parser.add_argument("--mode", choices=["static", "dynamic"], default="static", help="static: AST diff only. dynamic: full trace pipeline")
     parser.add_argument(

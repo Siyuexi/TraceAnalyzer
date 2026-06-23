@@ -52,6 +52,24 @@ shared_models_dir() {
   fi
 }
 
+project_artifacts_dir() {
+  if [[ -n "${P2A_ARTIFACTS_DIR:-}" || -n "${P2A_PROJECT_DATA_DIR:-}" ]]; then
+    local project_data
+    project_data="$(resolve_shared_path "${P2A_ARTIFACTS_DIR:-${P2A_PROJECT_DATA_DIR}}")"
+    mkdir -p "${project_data}"
+    cd "${project_data}" && pwd
+  else
+    local src
+    src="$(shared_src_root)"
+    mkdir -p "${src}/data"
+    cd "${src}/data" && pwd
+  fi
+}
+
+project_data_dir() {
+  project_artifacts_dir
+}
+
 default_model_repo() {
   printf '%s\n' "${P2A_MODEL_REPO:-Qwen/Qwen3-Coder-30B-A3B-Instruct}"
 }

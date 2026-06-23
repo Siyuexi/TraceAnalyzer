@@ -120,8 +120,7 @@ MODEL_PATH="${MODEL}" \
 bash scripts/train_p2a.sh
 
 # Later, for validation graph metrics:
-# TEST_FILE="${DATA}/swe_bench_verified_hard.parquet" \
-#   P2A_EVAL_BONUS_MAP_DIR="${DATA}/eval_bonus_maps" bash scripts/precompute_eval_bonus_maps.sh
+# TEST_FILE="${DATA}/swe_bench_verified_hard.parquet" bash scripts/precompute_eval_bonus_maps.sh
 #
 # Later, for P2A training, add:
-# P2A_BONUS_MAP_DIR=../../p2a/bonus_maps P2A_M_MAX=3.0 P2A_CREDIT_GRANULARITY=step
+# P2A_BONUS_MAP_DIR=data/bonus_maps/r2e-gym-subset P2A_M_MAX=3.0 P2A_CREDIT_GRANULARITY=step

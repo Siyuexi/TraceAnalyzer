@@ -9,7 +9,9 @@ from p2a.third_party_batch import SYSTEM_ERROR_STATUS, _system_error_summary, lo
 
 def test_load_batch_config_defaults_and_dummy_models(monkeypatch, tmp_path):
     shared_root = tmp_path / "shared"
+    artifacts_root = tmp_path / "artifacts"
     monkeypatch.setenv("P2A_SHARED_ROOT", str(shared_root))
+    monkeypatch.setenv("P2A_ARTIFACTS_DIR", str(artifacts_root))
     config = load_batch_config(Path("config/third_party_batch.example.yaml"))
 
     assert config.provider["source"] == "openai_compatible"
@@ -21,8 +23,8 @@ def test_load_batch_config_defaults_and_dummy_models(monkeypatch, tmp_path):
         "dummy-model-a",
         "dummy-model-b",
     ]
-    assert config.db_path == shared_root / "datasets" / "p2a" / "evals" / "traces.sqlite"
-    assert config.artifacts_dir == shared_root / "datasets" / "p2a" / "third_party"
+    assert config.db_path == artifacts_root / "evals" / "traces.sqlite"
+    assert config.artifacts_dir == artifacts_root / "third_party"
 
 
 def test_sanitized_config_snapshot_redacts_secret_like_keys(monkeypatch, tmp_path):
@@ -53,7 +55,9 @@ storage:
 
 def test_existing_bonus_map_dir_can_be_used_without_precompute(monkeypatch, tmp_path):
     shared_root = tmp_path / "shared"
+    artifacts_root = tmp_path / "artifacts"
     monkeypatch.setenv("P2A_SHARED_ROOT", str(shared_root))
+    monkeypatch.setenv("P2A_ARTIFACTS_DIR", str(artifacts_root))
     path = tmp_path / "batch.yaml"
     path.write_text(
         """
@@ -65,7 +69,7 @@ models:
   - api_name: dummy-model
 storage:
   precompute_maps: false
-  bonus_map_dir: data/eval_bonus_maps/swebench-hard
+  bonus_map_dir: data/bonus_maps/swebench-hard
 """,
         encoding="utf-8",
     )
@@ -73,7 +77,7 @@ storage:
     config = load_batch_config(path)
 
     assert config.precompute_maps is False
-    assert config.bonus_map_dir == shared_root / "datasets" / "p2a" / "eval_bonus_maps" / "swebench-hard"
+    assert config.bonus_map_dir == artifacts_root / "bonus_maps" / "swebench-hard"
 
 
 def test_batch_config_requires_explicit_models(tmp_path):

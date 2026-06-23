@@ -12,6 +12,20 @@ is on `main`.
 - `scripts/` - local launch helpers for preparing data/config and running Uni-Agent baseline checks.
 - `UNI_AGENT_MIGRATION.md` - current migration notes and tomorrow's baseline commands.
 
+## Asset and artifact paths
+
+- Shared datasets live outside this checkout under `../../datasets` by default.
+  Generated P2A parquets use `DATA`, conventionally `../../datasets/p2a`.
+- Shared model checkpoints live outside this checkout under `../../models` by
+  default. Use `MODEL_PATH`, `MODEL`, or `P2A_MODELS_DIR` to override.
+- Project artifacts live inside this checkout under `data/` by default. This
+  includes bonus maps, validation details, SQLite eval caches, rollout dumps,
+  analysis reports, and dashboard snapshots. Use `P2A_ARTIFACTS_DIR` only when
+  the whole artifact root must move.
+- Do not put public/reusable datasets or model checkpoints under `src/data`.
+  Do not put TraceAnalyzer-specific run artifacts under `../../datasets` or
+  `../../models` by default.
+
 ## Research concept docs
 
 - The root `proposal.md` is the proposal source of truth, root

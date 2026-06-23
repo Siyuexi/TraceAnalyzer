@@ -39,6 +39,18 @@ touching this tree. The research-level `CLAUDE.md` is at the repo root.
    to `/usr/local/cuda-13.0` and the locked cu130 stack; do not add a parallel
    pip-managed runtime path.
 
+## Asset and artifact paths
+
+- `../../datasets` and `../../models` are the shared roots for reusable datasets
+  and model checkpoints. Generated P2A parquets use `DATA`, conventionally
+  `../../datasets/p2a`.
+- `src/data` is the default artifact root for TraceAnalyzer-generated outputs:
+  bonus maps, validation details, SQLite eval caches, rollout dumps, analysis
+  reports, and dashboard snapshots. Override the root with `P2A_ARTIFACTS_DIR`
+  only when needed.
+- Keep public datasets and reusable checkpoints out of `src/data`; keep
+  project-specific artifacts out of the shared datasets/models roots by default.
+
 ## Fixups & skip-list
 
 - `config/startup_fixups.json` = the faithful, behavior-equivalent port of the old

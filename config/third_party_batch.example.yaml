@@ -35,7 +35,7 @@ models:
     label: dummy-model-b
 
 storage:
-  # Relative storage paths are resolved under the shared P2A data directory
-  # (${DATA:-<src>/../../datasets/p2a}), not under this source checkout.
+  # Relative storage paths are project artifacts, resolved under:
+  # ${P2A_ARTIFACTS_DIR:-<src>/data}.
   db: data/evals/traces.sqlite
   artifacts_dir: data/third_party

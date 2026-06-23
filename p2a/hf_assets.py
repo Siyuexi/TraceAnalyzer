@@ -46,6 +46,19 @@ def shared_p2a_data_dir() -> Path:
     return shared_datasets_dir() / "p2a"
 
 
+def project_artifacts_dir() -> Path:
+    """Return the TraceAnalyzer-local artifact directory."""
+    override = os.environ.get("P2A_ARTIFACTS_DIR") or os.environ.get("P2A_PROJECT_DATA_DIR")
+    if override:
+        return _resolve_shared_relative(override)
+    return _shared_src_root() / "data"
+
+
+def project_data_dir() -> Path:
+    """Compatibility alias for the TraceAnalyzer-local artifact directory."""
+    return project_artifacts_dir()
+
+
 def shared_models_dir() -> Path:
     override = os.environ.get("P2A_MODELS_DIR")
     if override:
@@ -56,12 +69,12 @@ def shared_models_dir() -> Path:
 def shared_bonus_maps_dir() -> Path:
     """The training bonus-map directory (read by training, written by precompute).
 
-    Single source of truth: ``P2A_BONUS_MAP_DIR`` if set, else ../../p2a/bonus_maps.
+    Single source of truth: ``P2A_BONUS_MAP_DIR`` if set, else data/bonus_maps.
     """
     override = os.environ.get("P2A_BONUS_MAP_DIR")
     if override:
         return _resolve_shared_relative(override)
-    return shared_root() / "p2a" / "bonus_maps"
+    return project_artifacts_dir() / "bonus_maps"
 
 
 def hf_repo_basename(repo_id: str) -> str:
