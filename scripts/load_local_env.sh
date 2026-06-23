@@ -6,7 +6,7 @@ p2a_local_env_file() {
   if [[ -z "${root}" ]]; then
     root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   fi
-  printf '%s\n' "${P2A_LOCAL_ENV_FILE:-${root}/.secrete/ips.sh}"
+  printf '%s\n' "${P2A_LOCAL_ENV_FILE:-${root}/.secrets/ips.sh}"
 }
 
 p2a_source_local_env() {
@@ -22,7 +22,7 @@ p2a_source_local_env() {
 p2a_require_env() {
   local key="$1"
   if [[ -z "${!key:-}" ]]; then
-    echo "[local-env] ${key} is required; set it or source .secrete/ips.sh." >&2
+    echo "[local-env] ${key} is required; set it or source .secrets/ips.sh." >&2
     return 2
   fi
 }

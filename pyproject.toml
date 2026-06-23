@@ -15,7 +15,7 @@ requires-python = ">=3.11,<3.12"
 # These are plain PyPI deps PLUS the uni-agent submodule (declares no deps of its own).
 dependencies = [
     # ARL sandbox backend (env/: a swe-rex AbstractRuntime backed by the arl-env SDK)
-    "arl-env==0.3.1",
+    "arl-env==0.4.1",
     "swe-rex>=1.4.0",
     "websockets",
     "loguru",

@@ -152,8 +152,8 @@ export RAY_DATA_HOME="${RAY_DATA_HOME:-$HOME/verl}"
 export DATA="${DATA:-../../datasets/p2a}"
 export MODEL="${MODEL:-../../models/Qwen3-Coder-30B-A3B-Instruct}"
 # Private endpoints stay outside git.
-source .secrete/ips.sh
-: "${ARL_GATEWAY_URL:?set ARL_GATEWAY_URL or create .secrete/ips.sh}"
+source .secrets/ips.sh
+: "${ARL_GATEWAY_URL:?set ARL_GATEWAY_URL or create .secrets/ips.sh}"
 # If submitting from the Ray head node, the local dashboard endpoint is enough.
 export RAY_API_SERVER_ADDRESS="${RAY_API_SERVER_ADDRESS:-http://localhost:8265}"
 # Ray cluster ports. 6379 is Ray GCS; 8265 is Ray dashboard / Jobs.
@@ -312,7 +312,7 @@ bash scripts/main.sh
 `scripts/setup.sh` for idempotent dependency and data setup, restarts Ray through
 `scripts/ray_setup.sh`, and keeps default `DATA` / `MODEL` paths anchored at the
 shared checkout (`../../datasets/p2a` and `../../models/...`) instead of under
-`/tmp`. It reads cluster-local endpoints from `.secrete/ips.sh` or existing
+`/tmp`. It reads cluster-local endpoints from `.secrets/ips.sh` or existing
 environment variables (`HEAD_IP`/`RAY_HEAD_IP`, `RAY_WORKER_HOSTS`,
 `RAY_GCS_PORT`, `RAY_SSH_OPTS`). Override those env vars if the allocation
 changes. To submit to an already-running Ray cluster without a restart, set

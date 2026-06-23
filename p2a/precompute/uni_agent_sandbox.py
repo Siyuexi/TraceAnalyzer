@@ -213,7 +213,7 @@ def _default_env_variables() -> dict[str, str]:
 def _required_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
-        raise ValueError(f"{name} is required; set it or source .secrete/ips.sh.")
+        raise ValueError(f"{name} is required; set it or source .secrets/ips.sh.")
     return value
 
 

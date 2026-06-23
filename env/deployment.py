@@ -21,7 +21,7 @@ from uni_agent.async_logging import get_logger
 def require_arl_gateway_url(explicit: str | None = None) -> str:
     gateway_url = explicit or os.getenv("ARL_GATEWAY_URL")
     if not gateway_url:
-        raise RuntimeError("ARL_GATEWAY_URL is required; set it or source .secrete/ips.sh.")
+        raise RuntimeError("ARL_GATEWAY_URL is required; set it or source .secrets/ips.sh.")
     return gateway_url
 
 
@@ -108,7 +108,7 @@ class ArlDeployment(AbstractDeployment):
             from .runtime import ArlRuntime
         except ImportError as exc:
             raise RuntimeError(
-                "ARL direct deployment requires arl-env==0.3.1 in the Uni-Agent execution environment "
+                "ARL direct deployment requires arl-env==0.4.1 in the Uni-Agent execution environment "
                 "and env.runtime.ArlRuntime in this source tree."
             ) from exc
 

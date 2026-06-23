@@ -46,6 +46,12 @@ pick a different environment than the lock — `uv run python ...`, `uv run pyte
 `uv run ruff ...` are the only correct forms.
 
 - Keep local P2A imports available with `PYTHONPATH=uni-agent/verl:uni-agent:.` when running from this `src/` directory.
+- `UV_CACHE_DIR=/tmp/uv-cache` is a Codex sandbox workaround only: use it when
+  Codex cannot write to `~/.cache/uv`, and run through this repo's `uv run` /
+  `src/.venv` interpreter rather than another Python. It is not a project
+  requirement. Commands written for the user should stay in the normal form
+  they can run from `src/`, such as `bash scripts/...` or `uv run ...`, without
+  Codex-only cache prefixes.
 - For ARL runs, use `scripts/uni_agent_arl.sh`; it keeps `uni-agent/` unmodified and routes runtime startup through `env.agent_loop.ArlUniAgentLoop`.
 
 ## Comment Hygiene
