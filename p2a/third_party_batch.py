@@ -25,6 +25,7 @@ from p2a.eval_cache import (
     upsert_planned_cells,
     utc_now,
 )
+from p2a.hf_assets import shared_p2a_data_dir
 from p2a.third_party_eval import _instance_id, _load_rows, _select_rows, parse_limit_arg
 
 
@@ -151,7 +152,7 @@ def load_batch_config(path: Path) -> BatchConfig:
         overrides = {k: copy.deepcopy(v) for k, v in item.items() if k not in {"api_name", "model", "label"}}
         models.append(BatchModel(api_name=api_name, label=label, overrides=overrides))
 
-    artifacts_dir = Path(storage_cfg.get("artifacts_dir") or "data/third_party").expanduser()
+    artifacts_dir = _resolve_storage_path(storage_cfg.get("artifacts_dir"), default_relative="third_party")
     return BatchConfig(
         path=path,
         raw=payload,
@@ -166,10 +167,17 @@ def load_batch_config(path: Path) -> BatchConfig:
         run_timeout=str(experiment_cfg["run_timeout"]) if experiment_cfg.get("run_timeout") else None,
         per_model_concurrency=max(1, int(experiment_cfg.get("per_model_concurrency") or 1)),
         model_parallelism=max(1, int(experiment_cfg.get("model_parallelism") or len(models))),
-        db_path=Path(storage_cfg.get("db") or "data/evals/traces.sqlite").expanduser(),
+        db_path=_resolve_storage_path(storage_cfg.get("db"), default_relative="evals/traces.sqlite"),
         artifacts_dir=artifacts_dir,
         precompute_maps=bool(storage_cfg.get("precompute_maps", True)),
-        bonus_map_dir=Path(storage_cfg["bonus_map_dir"]).expanduser() if storage_cfg.get("bonus_map_dir") else None,
+        bonus_map_dir=(
+            _resolve_storage_path(
+                storage_cfg["bonus_map_dir"],
+                default_relative=f"eval_bonus_maps/{dataset_name}",
+            )
+            if storage_cfg.get("bonus_map_dir")
+            else None
+        ),
         models=models,
     )
 
@@ -198,6 +206,17 @@ def _safe_slug(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in slug)
 
 
+def _resolve_storage_path(value: Any, *, default_relative: str) -> Path:
+    raw = default_relative if value is None else str(value)
+    path = Path(raw).expanduser()
+    if path.is_absolute():
+        return path
+    parts = path.parts
+    if parts and parts[0] == "data":
+        path = Path(*parts[1:]) if len(parts) > 1 else Path(".")
+    return shared_p2a_data_dir() / path
+
+
 def _run_setup(args: list[str], *, env: dict[str, str]) -> str:
     import subprocess
 
@@ -223,11 +242,11 @@ def resolve_data_file(config: BatchConfig, *, env: dict[str, str]) -> Path:
 
 def resolve_bonus_map_dir(config: BatchConfig, data_file: Path, *, env: dict[str, str]) -> Path | None:
     if not config.precompute_maps:
-        return None
+        return config.bonus_map_dir
     if config.bonus_map_dir is not None:
         output_dir = config.bonus_map_dir
     else:
-        output_dir = config.artifacts_dir / config.experiment_id / "bonus_maps" / config.dataset_name
+        output_dir = shared_p2a_data_dir() / "eval_bonus_maps" / config.dataset_name
     setup_env = dict(env)
     if config.limit is not None:
         setup_env.setdefault("P2A_SETUP_BONUS_LIMIT", str(config.limit))
