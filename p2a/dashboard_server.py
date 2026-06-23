@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import mimetypes
+import os
 import shutil
+import socket
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -102,9 +104,55 @@ def make_handler(request: DashboardRequest) -> type[BaseHTTPRequestHandler]:
     return P2ADashboardHandler
 
 
+def _server_ip_candidates() -> list[str]:
+    candidates: list[str] = []
+
+    def add(value: str | None) -> None:
+        if not value:
+            return
+        host = value.strip()
+        if not host or host.startswith("127.") or host in {"localhost", "0.0.0.0", "::1"}:
+            return
+        if host not in candidates:
+            candidates.append(host)
+
+    for key in ("P2A_DASHBOARD_PUBLIC_HOST", "HOST_IP", "HEAD_IP", "RAY_HEAD_IP", "MASTER_IP"):
+        add(os.environ.get(key))
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            add(sock.getsockname()[0])
+    except OSError:
+        pass
+
+    try:
+        for item in socket.getaddrinfo(socket.gethostname(), None, family=socket.AF_INET):
+            add(item[4][0])
+    except OSError:
+        pass
+
+    return candidates
+
+
+def _dashboard_urls(host: str, port: int) -> list[tuple[str, str]]:
+    if host in {"0.0.0.0", "::", ""}:
+        urls = [("Local", f"http://127.0.0.1:{port}")]
+        urls.extend(("Network", f"http://{candidate}:{port}") for candidate in _server_ip_candidates())
+        return urls
+    return [("URL", f"http://{host}:{port}")]
+
+
 def serve_dashboard(request: DashboardRequest, *, host: str, port: int) -> None:
     server = ThreadingHTTPServer((host, port), make_handler(request))
-    print(f"Serving unified P2A dashboard on http://{host}:{port}")
+    print("Serving unified P2A dashboard")
+    print(f"  Bind: http://{host}:{port}")
+    urls = _dashboard_urls(host, port)
+    for label, url in urls:
+        print(f"  {label}: {url}")
+    if host in {"0.0.0.0", "::", ""} and not any(label == "Network" for label, _url in urls):
+        print("  Network: unavailable; set P2A_DASHBOARD_PUBLIC_HOST or pass --host <server-ip>")
+    print(flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
