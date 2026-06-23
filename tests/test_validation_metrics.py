@@ -640,13 +640,9 @@ def test_dashboard_builds_static_artifacts(tmp_path):
     assert paths["details"].exists()
     assert paths["summary"].exists()
     html = paths["html"].read_text(encoding="utf-8")
-    assert "P2A trajectory dashboard" in html
+    assert "P2A unified dashboard" in html
+    assert "window.__P2A_DASHBOARD_SNAPSHOT__" in html
     assert "demo__abc123" in html
-    assert "Dependency graph projection" in html
-    assert "issue anchor" in html
     assert "root_cause" in html
-    assert "Graph topology" in html
-    assert "Trend panel" in html
-    assert "Purpose blocks" in html
     assert "pkg.demo:demo" in html
     assert "def demo()" in html

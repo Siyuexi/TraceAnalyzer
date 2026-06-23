@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>P2A unified dashboard</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <h1>P2A unified dashboard</h1>
+    <div id="source-line" class="source-line"></div>
+  </div>
+  <div class="top-actions">
+    <button id="refresh-button" type="button">Refresh</button>
+    <label class="toggle"><input id="auto-refresh" type="checkbox" checked> Live</label>
+  </div>
+</header>
+<nav class="tabs" aria-label="Dashboard views">
+  <button class="tab is-active" data-tab="overview" type="button">Overview</button>
+  <button class="tab" data-tab="models" type="button">Models</button>
+  <button class="tab" data-tab="runs" type="button">Runs</button>
+  <button class="tab" data-tab="traces" type="button">Trajectories</button>
+</nav>
+<main>
+  <section id="overview" class="tab-panel is-active">
+    <div id="summary-grid" class="metric-grid"></div>
+    <section class="section">
+      <h2>Trend</h2>
+      <div id="trend-table" class="table-wrap"></div>
+    </section>
+    <section class="section">
+      <h2>Distributions</h2>
+      <div id="distribution-grid" class="split-grid"></div>
+    </section>
+  </section>
+  <section id="models" class="tab-panel">
+    <section class="section">
+      <h2>Batch model KPIs</h2>
+      <div id="model-table" class="table-wrap"></div>
+    </section>
+  </section>
+  <section id="runs" class="tab-panel">
+    <section class="section">
+      <h2>Run monitor</h2>
+      <div id="run-list" class="run-grid"></div>
+    </section>
+  </section>
+  <section id="traces" class="tab-panel">
+    <section class="section trace-toolbar">
+      <h2>Trajectory drill-down</h2>
+      <input id="trace-search" type="search" placeholder="Filter by instance, file, or pattern">
+    </section>
+    <div id="trace-list" class="trace-list"></div>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

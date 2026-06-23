@@ -358,8 +358,16 @@ uv run python -m p2a.eval_fault_localization $ROLLOUT_JSONL \
   --details-out $DATA/eval_faultloc_details.jsonl
 ```
 
-To build the static trace dashboard with summary cards, per-record drill-down,
-purpose-block/order/miracle diagnostics, and an expandable graph topology panel:
+To open the unified HTML dashboard over an already-dumped rollout file or dump
+directory:
+
+```bash
+uv run python scripts/p2a_dashboard.py $ROLLOUT_JSONL \
+  --bonus-map-dir $DATA/eval_bonus_maps \
+  --port 8766
+```
+
+To write a portable static snapshot of the same HTML dashboard:
 
 ```bash
 uv run python scripts/p2a_dashboard.py $ROLLOUT_JSONL \
@@ -367,12 +375,29 @@ uv run python scripts/p2a_dashboard.py $ROLLOUT_JSONL \
   --out-dir $DATA/p2a_dashboard
 ```
 
-Add `--watch --interval 30` when `$ROLLOUT_JSONL` is a live run directory and
-you want the same artifacts rebuilt while training writes new dumps.
+The dashboard can also read scored validation details, Uni-Agent run directories,
+and the third-party eval SQLite cache:
+
+```bash
+uv run python scripts/p2a_dashboard.py \
+  --details $DATA/eval_details \
+  --bonus-map-dir $DATA/eval_bonus_maps/swebench-hard
+
+uv run python scripts/p2a_dashboard.py \
+  --log-dir /tmp/swebench_qwen3_coder \
+  --bonus-map-dir $DATA/eval_bonus_maps/swebench-hard
+
+uv run python scripts/p2a_dashboard.py \
+  --db $DATA/evals/traces.sqlite \
+  --experiment-id public-swebench-hard-demo \
+  --dataset swebench-hard \
+  --bonus-map-dir $DATA/eval_bonus_maps/swebench-hard
+```
 
 The offline `summary-out` and `details-out` files are post-hoc artifacts for
 inspecting dumped rollouts. Training and validation do not read them; live
-validation dashboards use `P2A_EVAL_BONUS_MAP_DIR`.
+validation scoring uses `P2A_EVAL_BONUS_MAP_DIR`, and the HTML dashboard reads
+`P2A_EVAL_DETAILS_DIR` when per-case validation details are enabled.
 
 ### Step 9. Optional third-party model rollout baseline
 
@@ -405,13 +430,20 @@ the path set by `provider.api_module` / `P2A_INTERNAL_API_MODULE`). If that
 private module is missing, batch mode fails before launching cells.
 Batch results are upserted into the unified SQLite cache configured by
 `storage.db` (default `data/evals/traces.sqlite`, resolved under the shared
-`$DATA` root) and can be watched live:
+`$DATA` root) and can be watched live in the unified HTML dashboard:
 
 ```bash
-uv run python scripts/watch_third_party_batch.py \
+uv run python scripts/p2a_dashboard.py \
   --db $DATA/evals/traces.sqlite \
-  --experiment-id public-swebench-hard-demo
+  --experiment-id public-swebench-hard-demo \
+  --dataset swebench-hard \
+  --bonus-map-dir $DATA/eval_bonus_maps/swebench-hard
 ```
+
+The old terminal/TUI batch watcher has been folded into this HTML dashboard:
+the Models tab contains the former per-model progress, resolved/reward, P2A
+read, graph/root/near hit, distance, turn/tool/wall-time, token, cache, and
+error flag columns.
 
 If the smoke phase records only system errors such as ARL gateway or interactive
 shell failures, batch mode stops before the full phase and reports the structured
@@ -506,12 +538,24 @@ reference for validation rollouts.
 | `avg_min_distance_on_hits` | Lower is better; `0` means the model read the edited callable. |
 | `avg_best_positive_multiplier_on_hits` | The diagnostic P2A multiplier implied by the best read distance. |
 
-For live training dashboards, set `P2A_EVAL_BONUS_MAP_DIR` when launching
-`scripts/train_p2a.sh`. The local `P2AFullyAsyncRollouter` is the dashboard
-wrapper: it keeps the validation path otherwise unchanged, scores validation
-rollouts against those eval maps, and returns the same aggregate signals to the
-trainer logger at each validation step. For the hard split built by this repo,
-the W&B/console keys are:
+For live training analysis, set `P2A_EVAL_BONUS_MAP_DIR` and
+`P2A_EVAL_DETAILS_DIR` when launching `scripts/train_p2a.sh`. The local
+`P2AFullyAsyncRollouter` keeps the validation path otherwise unchanged, scores
+validation rollouts against those eval maps, writes per-case details when
+`P2A_EVAL_DETAILS_DIR` is set, and returns the same aggregate signals to the
+trainer logger at each validation step.
+
+Run the unified HTML dashboard against the details directory while training is
+running:
+
+```bash
+uv run python scripts/p2a_dashboard.py \
+  --details $DATA/eval_details \
+  --bonus-map-dir $DATA/eval_bonus_maps/swebench-hard \
+  --port 8766
+```
+
+For the hard split built by this repo, the W&B/console keys are:
 
 ```
 val-p2a/swebench-hard/bonus_map_coverage
@@ -545,10 +589,10 @@ val-p2a/swebench-hard/avg_block_order_score
 val-p2a/swebench-hard/avg_block_efficiency_steps
 ```
 
-`P2A_EVAL_DETAILS_DIR` optionally writes per-case JSONL files named by validation
-step for debugging individual instances. Those files are an auxiliary dump; the
-dashboard metrics above are returned directly from validation and do not depend
-on `summary-out` / `details-out` from the offline CLI.
+`P2A_EVAL_DETAILS_DIR` writes per-case JSONL files named by validation step for
+debugging individual instances and for the unified HTML dashboard. The logger
+metrics above are still returned directly from validation and do not depend on
+`summary-out` / `details-out` from the offline CLI.
 
 Current SWE-bench Verified eval-map sanity check, after the targeted F2P,
 trace-capture, unittest-description F2P, zero-test runner, and F2P collection
