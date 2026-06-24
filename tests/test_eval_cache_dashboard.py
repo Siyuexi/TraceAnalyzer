@@ -370,6 +370,55 @@ def test_dashboard_dataset_distributions_deduplicate_instances_across_models(tmp
     assert dist["distributions"]["case_types"] == {"missing_bonus_map": 45}
 
 
+def test_dashboard_db_runs_carry_explicit_eval_cell_links(tmp_path):
+    db = tmp_path / "traces.sqlite"
+    with ensure_db(db) as conn:
+        for model in ("model-a", "model-b"):
+            run_dir = tmp_path / "runs" / model
+            run_dir.mkdir(parents=True)
+            rollouts_path = run_dir / "rollouts.jsonl"
+            rollouts_path.write_text("{}\n", encoding="utf-8")
+            (run_dir / "run.log").write_text(f"run for {model}\n", encoding="utf-8")
+            upsert_experiment(
+                conn,
+                experiment_id="exp",
+                provider_source="internal_api",
+                dataset="swebench-hard",
+                config_snapshot={"experiment": "exp"},
+            )
+            upsert_planned_cells(
+                conn,
+                experiment_id="exp",
+                provider_source="internal_api",
+                model_api_name=model,
+                model_label=model,
+                dataset="swebench-hard",
+                instance_ids=[f"case-{model[-1]}"],
+            )
+            record = _rollout(f"case-{model[-1]}")
+            record["model"] = model
+            upsert_rollout_record(
+                conn,
+                experiment_id="exp",
+                provider_source="internal_api",
+                model_api_name=model,
+                model_label=model,
+                dataset="swebench-hard",
+                record=record,
+                detail=_detail(record["instance_id"]),
+                artifact_rollouts=rollouts_path,
+            )
+        conn.commit()
+
+    snapshot = build_dashboard_snapshot(DashboardRequest(db_path=db))
+    runs_by_model = {run["model_labels"][0]: run for run in snapshot["runs"]}
+
+    assert set(runs_by_model) == {"model-a", "model-b"}
+    assert len(runs_by_model["model-a"]["eval_cell_keys"]) == 1
+    assert runs_by_model["model-a"]["eval_cell_keys"][0].endswith("model-a::model-a")
+    assert runs_by_model["model-b"]["eval_cell_keys"][0].endswith("model-b::model-b")
+
+
 def test_unified_dashboard_handles_empty_db(tmp_path):
     snapshot = build_dashboard_snapshot(DashboardRequest(db_path=tmp_path / "empty.sqlite"))
 
