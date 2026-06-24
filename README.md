@@ -403,19 +403,25 @@ uv run python scripts/p2a_dashboard.py \
   --bonus-map-dir data/bonus_maps/swebench-hard
 ```
 
-The Overview tab is the experiment registry. It lists saved experiment/model
-cells by source kind (`local_training`, `local_inference`, or `third_party_api`),
-dataset, provider, model, status, and aggregate quality. Select one experiment
-before inspecting model KPIs, runs/logs, or trajectories; trajectory details are
-scoped to that selected experiment so local checkpoints and API-model batches do
-not get mixed.
+The Overview tab is the dataset and eval-cell registry. Dataset-level
+distributions count unique instances in a dataset/split, so five model runs over
+the 45-instance `swebench-hard` split still show a distribution population of 45,
+not 225 trajectories. Eval cells are the model/checkpoint/API-run comparison
+unit: source kind (`local_training`, `local_inference`, or `third_party_api`),
+experiment id, provider, dataset, and model label. Select a dataset first, then
+select an eval cell/model before inspecting trajectories.
 
-After selection, the Models tab separates task outcome, Linker quality,
-topology/order diagnostics, purpose-block diagnostics, and efficiency/cost/cache
-signals. The Trajectories tab uses a three-pane inspector: instance list on the
-left, bonus-map graph plus purpose-block/step timeline in the middle, and the
-selected step's think text, tool call, tool return, recovered reads, and matched
-bonus-map nodes on the right.
+The Macro KPI tab is the model-level analysis surface for the selected dataset.
+It renders one comparison table with effect/rigor metrics first (task success,
+read precision, node recall, F1, anchor/root hits, order, miracle, purpose-block
+rates, bad patterns) and efficiency/cost metrics after them (turns, tools, wall
+time, tokens, cost, cache hit). Cache-write metrics are hidden until populated.
+The Run Provenance tab explains artifact/log-producing executions and only
+mixes runs into a selected eval cell when they carry explicit eval-cell links;
+unlinked logs are shown separately. The Trajectories tab is the micro-analysis
+surface: narrow instance list on the left, graph plus purpose-block/step
+timeline in the middle, and a wide right panel with parsed tool/action details,
+observations, recovered reads, inline edit diffs, and matched bonus-map nodes.
 
 The offline `summary-out` and `details-out` files are post-hoc artifacts for
 inspecting dumped rollouts. Training and validation do not read them; live
@@ -465,7 +471,7 @@ uv run python scripts/p2a_dashboard.py \
 ```
 
 The old terminal/TUI batch watcher has been folded into this HTML dashboard.
-The Models tab keeps per-model progress and efficiency/cost/cache visibility,
+The Macro KPI tab keeps per-model progress and efficiency/cost/cache visibility,
 but the primary diagnostic metrics are the shared Python scorer outputs:
 read precision, node recall, F1, anchor/root hit rates, order/reverse-order,
 miracle, purpose-block achieved/wasted/loop rates, and chain bad-pattern flags.

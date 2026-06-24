@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from p2a.core import BonusMapStore
+from p2a.core import BonusMapStore, normalize_action, reads_from_step_trace
 from p2a.eval_cache import aggregate_model_metrics, ensure_db, json_loads
 from p2a.eval_fault_localization import (
     _json_default,
@@ -129,6 +129,14 @@ def _experiment_key(parts: dict[str, Any]) -> str:
     return "::".join(str(field) for field in fields)
 
 
+def _dataset_name(item: dict[str, Any]) -> str:
+    return str(item.get("dataset") or item.get("data_source") or "unknown-dataset")
+
+
+def _eval_cell_key(parts: dict[str, Any]) -> str:
+    return str(parts.get("eval_cell_key") or parts.get("experiment_key") or _experiment_key(parts))
+
+
 def _record_metadata(record: dict[str, Any], request: DashboardRequest, *, log_dir: bool = False) -> dict[str, Any]:
     extra = _as_mapping(record.get("extra_fields")) or _as_mapping(record.get("extra_info")) or _as_mapping(record.get("metadata"))
     provider_source = (
@@ -170,6 +178,7 @@ def _record_metadata(record: dict[str, Any], request: DashboardRequest, *, log_d
         "schema_version": schema_version or None,
     }
     metadata["experiment_key"] = _experiment_key(metadata)
+    metadata["eval_cell_key"] = metadata["experiment_key"]
     return metadata
 
 
@@ -186,23 +195,60 @@ def _step_inspection(record: dict[str, Any], step_details: list[dict[str, Any]])
         tool_calls = _as_sequence(trace.get("tool_calls"))
         tool_names = [_tool_name(call) for call in tool_calls] or ["no-tool"]
         tool_args = [_tool_args(call) for call in tool_calls]
+        primary_args = _as_mapping(tool_args[0]) if tool_args else {}
+        tool_results = _as_sequence(trace.get("tool_results"))
+        observation = _tool_observation(tool_results)
         scored = by_trace_index.get(index, {})
+        action = normalize_action(trace, tracking_mode="view_and_bash")
+        recovered_reads = scored.get("reads") or reads_from_step_trace(trace, tracking_mode="view_and_bash")
         out.append(
             {
                 "trace_index": index,
                 "step_index": trace.get("step_idx", scored.get("step_index", index)),
                 "tool_names": tool_names,
+                "tool_name": tool_names[0] if tool_names else "no-tool",
                 "tool_args": _jsonable(tool_args),
+                "action_family": action.get("family"),
+                "target_path": action.get("target_path"),
+                "command": primary_args.get("command"),
+                "path": primary_args.get("path") or primary_args.get("file"),
+                "view_range": primary_args.get("view_range"),
+                "old_str": primary_args.get("old_str"),
+                "new_str": primary_args.get("new_str"),
                 "thought": trace.get("thought") or "",
+                "think": trace.get("thought") or "",
                 "response_text": trace.get("response_text") or trace.get("response") or trace.get("assistant_response") or "",
                 "tool_calls": _jsonable(tool_calls),
-                "tool_results": _jsonable(trace.get("tool_results") or []),
+                "tool_results": _jsonable(tool_results),
+                "observation": observation,
+                "raw_action": _jsonable(tool_calls[0]) if tool_calls else "",
+                "status": "error" if _looks_like_error(observation) else "ok",
+                "recovered_reads": _jsonable(recovered_reads),
                 "exit_reason": trace.get("exit_reason"),
                 "parse_error": trace.get("parse_error"),
                 "scored": scored,
             }
         )
     return out
+
+
+def _tool_observation(tool_results: list[Any]) -> str:
+    chunks = []
+    for result_value in tool_results:
+        result = _as_mapping(result_value)
+        for key in ("observation", "content", "result", "output", "stderr", "stdout", "error"):
+            value = result.get(key)
+            if value not in (None, ""):
+                chunks.append(value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=_json_default))
+                break
+        if not result and isinstance(result_value, str):
+            chunks.append(result_value)
+    return "\n\n".join(chunks)
+
+
+def _looks_like_error(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in ("traceback", "error:", "exception", "command failed", "no such file"))
 
 
 def _enrich_detail_from_record(
@@ -217,6 +263,7 @@ def _enrich_detail_from_record(
     if metadata.get("dataset") and enriched.get("data_source") in {None, "unknown"}:
         enriched["data_source"] = metadata["dataset"]
     enriched["experiment_key"] = metadata["experiment_key"]
+    enriched["eval_cell_key"] = metadata["eval_cell_key"]
     enriched["model_label"] = metadata.get("model_label") or enriched.get("model_label")
     enriched["model_api_name"] = metadata.get("model_api_name") or enriched.get("model_api_name")
     enriched["run_id"] = metadata.get("run_id") or enriched.get("run_id")
@@ -321,6 +368,7 @@ def _normalize_details(details: Iterable[dict[str, Any]]) -> list[dict[str, Any]
             run_step=item.get("run_step"),
         ))
         item.setdefault("experiment_key", _experiment_key(item))
+        item.setdefault("eval_cell_key", item.get("experiment_key"))
         normalized.append(item)
     return normalized
 
@@ -610,20 +658,65 @@ def _scan_db_artifact_runs(conn: sqlite3.Connection, request: DashboardRequest) 
     )
     rows = conn.execute(
         f"""
-        SELECT DISTINCT artifact_rollouts
+        SELECT DISTINCT
+          experiment_id,
+          provider_source,
+          dataset,
+          model_api_name,
+          model_label,
+          artifact_rollouts
         FROM run_cells c
         {where_sql}
         """,
         params,
     ).fetchall()
-    run_dirs: dict[str, Path] = {}
+    run_meta: dict[str, dict[str, Any]] = {}
     for row in rows:
         if not row["artifact_rollouts"]:
             continue
         path = Path(str(row["artifact_rollouts"])).expanduser()
         if path.name == "rollouts.jsonl":
-            run_dirs[str(path.parent)] = path.parent
-    return [_run_snapshot(path) for path in sorted(run_dirs.values()) if path.exists()]
+            path = path.parent
+        metadata = {
+            "source_kind": _source_kind(
+                provider_source=row["provider_source"],
+                schema_version=None,
+                run_step=None,
+            ),
+            "experiment_id": row["experiment_id"],
+            "provider_source": row["provider_source"],
+            "dataset": row["dataset"],
+            "model_api_name": row["model_api_name"],
+            "model_label": row["model_label"],
+        }
+        metadata["experiment_key"] = _experiment_key(metadata)
+        metadata["eval_cell_key"] = metadata["experiment_key"]
+        item = run_meta.setdefault(
+            str(path),
+            {
+                "path": path,
+                "eval_cell_keys": set(),
+                "datasets": set(),
+                "model_labels": set(),
+                "experiment_ids": set(),
+            },
+        )
+        item["eval_cell_keys"].add(metadata["eval_cell_key"])
+        item["datasets"].add(str(row["dataset"]))
+        item["model_labels"].add(str(row["model_label"]))
+        item["experiment_ids"].add(str(row["experiment_id"]))
+    runs = []
+    for item in sorted(run_meta.values(), key=lambda value: str(value["path"])):
+        path = item["path"]
+        if not path.exists():
+            continue
+        run = _run_snapshot(path)
+        run["eval_cell_keys"] = sorted(item["eval_cell_keys"])
+        run["datasets"] = sorted(item["datasets"])
+        run["model_labels"] = sorted(item["model_labels"])
+        run["experiment_ids"] = sorted(item["experiment_ids"])
+        runs.append(run)
+    return runs
 
 
 def _read_log_from_runs(runs: Iterable[dict[str, Any]], run_id: str, source: str) -> dict[str, Any]:
@@ -696,6 +789,60 @@ def _distribution(items: Iterable[dict[str, Any]], key: str) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def _instance_key(detail: dict[str, Any]) -> str:
+    return str(detail.get("instance_id") or f"record-{detail.get('record_index', 0)}")
+
+
+def _unique_dataset_details(details: Iterable[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    by_dataset: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for detail in details:
+        dataset = _dataset_name(detail)
+        instance = _instance_key(detail)
+        current = by_dataset[dataset].get(instance)
+        if current is None:
+            by_dataset[dataset][instance] = detail
+            continue
+        current_score = int(bool(current.get("has_bonus_map"))) + int(bool(current.get("chain_evaluable")))
+        new_score = int(bool(detail.get("has_bonus_map"))) + int(bool(detail.get("chain_evaluable")))
+        if new_score > current_score:
+            by_dataset[dataset][instance] = detail
+    return {dataset: list(items.values()) for dataset, items in sorted(by_dataset.items())}
+
+
+def _dataset_distributions(details: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for dataset, items in _unique_dataset_details(details).items():
+        case_types: dict[str, int] = defaultdict(int)
+        not_chain: dict[str, int] = defaultdict(int)
+        availability = {
+            "with_bonus_map": 0,
+            "with_call_graph": 0,
+            "chain_evaluable": 0,
+            "not_chain_evaluable": 0,
+        }
+        for item in items:
+            case_types[str(item.get("bonus_case_type") or "missing_bonus_map")] += 1
+            if item.get("has_bonus_map"):
+                availability["with_bonus_map"] += 1
+            if item.get("has_call_graph"):
+                availability["with_call_graph"] += 1
+            if item.get("chain_evaluable"):
+                availability["chain_evaluable"] += 1
+            else:
+                availability["not_chain_evaluable"] += 1
+                not_chain[str(item.get("not_chain_evaluable_reason") or "unknown")] += 1
+        out[dataset] = {
+            "dataset": dataset,
+            "n_instances": len(items),
+            "distributions": {
+                "case_types": dict(sorted(case_types.items())),
+                "not_chain_evaluable_reasons": dict(sorted(not_chain.items())),
+                "availability": availability,
+            },
+        }
+    return out
+
+
 def _chain_bad_distribution(details: Iterable[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = defaultdict(int)
     for detail in details:
@@ -732,6 +879,7 @@ def _detail_model_metrics(details: list[dict[str, Any]]) -> list[dict[str, Any]]
         block_steps = _sum_int(items, "n_block_steps")
         row = {
             "experiment_key": experiment_key,
+            "eval_cell_key": experiment_key,
             "source_kind": source_kind,
             "experiment_id": experiment_id,
             "provider_source": provider_source,
@@ -817,34 +965,36 @@ def _normalize_model_row(row: dict[str, Any]) -> dict[str, Any]:
     )
     normalized = {**row, "source_kind": row.get("source_kind") or source_kind}
     normalized["experiment_key"] = row.get("experiment_key") or _experiment_key(normalized)
+    normalized["eval_cell_key"] = row.get("eval_cell_key") or normalized["experiment_key"]
     return normalized
 
 
 def _merge_model_metrics(base_rows: list[dict[str, Any]], detail_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged = {_normalize_model_row(row)["experiment_key"]: _normalize_model_row(row) for row in base_rows}
+    merged = {_normalize_model_row(row)["eval_cell_key"]: _normalize_model_row(row) for row in base_rows}
     for row in detail_rows:
-        current = merged.get(row["experiment_key"], {})
-        merged[row["experiment_key"]] = {**row, **current, **{key: value for key, value in row.items() if value is not None}}
+        current = merged.get(row["eval_cell_key"], {})
+        merged[row["eval_cell_key"]] = {**row, **current, **{key: value for key, value in row.items() if value is not None}}
         for key in ("target", "done", "errors", "pending"):
             if current.get(key) is not None:
-                merged[row["experiment_key"]][key] = current[key]
+                merged[row["eval_cell_key"]][key] = current[key]
     return sorted(merged.values(), key=lambda item: (str(item.get("experiment_id")), str(item.get("model_label"))))
 
 
-def _experiment_registry(model_metrics: list[dict[str, Any]], details: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _eval_cell_registry(model_metrics: list[dict[str, Any]], details: list[dict[str, Any]]) -> list[dict[str, Any]]:
     detail_counts: dict[str, int] = defaultdict(int)
     trace_counts: dict[str, int] = defaultdict(int)
     for detail in details:
-        key = str(detail.get("experiment_key") or _experiment_key(detail))
+        key = _eval_cell_key(detail)
         detail_counts[key] += 1
         if detail.get("raw_available") or detail.get("step_details"):
             trace_counts[key] += 1
 
-    experiments = []
+    eval_cells = []
     for row in model_metrics:
-        key = str(row.get("experiment_key") or _experiment_key(row))
-        experiments.append(
+        key = _eval_cell_key(row)
+        eval_cells.append(
             {
+                "eval_cell_key": key,
                 "experiment_key": key,
                 "source_kind": row.get("source_kind"),
                 "experiment_id": row.get("experiment_id"),
@@ -864,7 +1014,45 @@ def _experiment_registry(model_metrics: list[dict[str, Any]], details: list[dict
                 "read_precision": row.get("avg_chain_read_precision") or row.get("avg_read_precision"),
             }
         )
-    return experiments
+    return eval_cells
+
+
+def _dataset_registry(
+    details: list[dict[str, Any]],
+    eval_cells: list[dict[str, Any]],
+    distributions_by_dataset: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    trajectories: dict[str, int] = defaultdict(int)
+    cells: dict[str, set[str]] = defaultdict(set)
+    models: dict[str, set[str]] = defaultdict(set)
+    source_kinds: dict[str, set[str]] = defaultdict(set)
+    for detail in details:
+        dataset = _dataset_name(detail)
+        trajectories[dataset] += 1
+        cells[dataset].add(_eval_cell_key(detail))
+        if detail.get("model_label"):
+            models[dataset].add(str(detail.get("model_label")))
+        if detail.get("source_kind"):
+            source_kinds[dataset].add(str(detail.get("source_kind")))
+    for cell in eval_cells:
+        dataset = _dataset_name(cell)
+        cells[dataset].add(_eval_cell_key(cell))
+        if cell.get("model_label"):
+            models[dataset].add(str(cell.get("model_label")))
+        if cell.get("source_kind"):
+            source_kinds[dataset].add(str(cell.get("source_kind")))
+    dataset_names = sorted(set(distributions_by_dataset) | set(cells) | set(trajectories))
+    return [
+        {
+            "dataset": dataset,
+            "n_instances": (distributions_by_dataset.get(dataset) or {}).get("n_instances", 0),
+            "n_eval_cells": len(cells.get(dataset, set())),
+            "n_trajectories": trajectories.get(dataset, 0),
+            "models": sorted(models.get(dataset, set())),
+            "source_kinds": sorted(source_kinds.get(dataset, set())),
+        }
+        for dataset in dataset_names
+    ]
 
 
 def build_dashboard_snapshot(request: DashboardRequest) -> dict[str, Any]:
@@ -913,7 +1101,17 @@ def build_dashboard_snapshot(request: DashboardRequest) -> dict[str, Any]:
 
     detail_model_metrics = _detail_model_metrics(details)
     model_metrics = _merge_model_metrics(base_model_metrics, detail_model_metrics)
-    experiments = _experiment_registry(model_metrics, details)
+    eval_cells = _eval_cell_registry(model_metrics, details)
+    distributions_by_dataset = _dataset_distributions(details)
+    datasets = _dataset_registry(details, eval_cells, distributions_by_dataset)
+    summary["by_dataset"] = {
+        dataset: {
+            "counts": {"n_instances": payload["n_instances"]},
+            "distributions": payload["distributions"],
+        }
+        for dataset, payload in distributions_by_dataset.items()
+    }
+    summary["distributions_by_dataset"] = distributions_by_dataset
 
     deduped_runs = {str(run.get("path") or run.get("run_id")): run for run in runs}
     return {
@@ -925,7 +1123,9 @@ def build_dashboard_snapshot(request: DashboardRequest) -> dict[str, Any]:
             "dataset": request.dataset,
         },
         "sources": _source_list(request),
-        "experiments": experiments,
+        "datasets": datasets,
+        "eval_cells": eval_cells,
+        "experiments": eval_cells,
         "summary": summary,
         "model_metrics": model_metrics,
         "runs": sorted(deduped_runs.values(), key=lambda run: (str(run.get("status")), str(run.get("run_id")))),

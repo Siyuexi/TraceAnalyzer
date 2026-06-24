@@ -108,6 +108,11 @@ main { padding: 22px 28px 40px; }
   border-radius: 6px;
   background: var(--panel);
 }
+.subsection {
+  padding: 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.subsection:last-child { border-bottom: 0; }
 table {
   width: 100%;
   border-collapse: collapse;
@@ -164,6 +169,23 @@ tr.is-selected td {
 .kpi-stack section {
   min-width: 0;
 }
+.panel-note {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f8fafc;
+  color: var(--muted);
+}
+.kpi-table table {
+  min-width: 2100px;
+}
+.kpi-table th:nth-child(6),
+.kpi-table td:nth-child(6),
+.kpi-table th:nth-child(25),
+.kpi-table td:nth-child(25) {
+  border-left: 2px solid var(--line);
+}
 .run-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
@@ -211,7 +233,7 @@ pre.log {
 }
 .trace-inspector {
   display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(380px, 1fr) minmax(300px, 420px);
+  grid-template-columns: minmax(180px, 230px) minmax(300px, 380px) minmax(560px, 1fr);
   gap: 14px;
   align-items: start;
 }
@@ -265,10 +287,11 @@ pre.log {
   border-radius: 6px;
   background: var(--panel);
   overflow: auto;
+  max-height: 460px;
 }
 .graph-wrap svg {
   display: block;
-  width: 100%;
+  width: auto;
   min-width: 720px;
 }
 .graph-edge {
@@ -401,6 +424,33 @@ pre.log {
   white-space: pre-wrap;
   font-size: 12px;
 }
+.diff-view {
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #101827;
+  color: #e5e7eb;
+  font-size: 12px;
+}
+.diff-line {
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  min-width: 0;
+}
+.diff-line span {
+  text-align: center;
+  color: #cbd5e1;
+  border-right: 1px solid rgba(255,255,255,.12);
+}
+.diff-line code {
+  padding: 1px 8px;
+  white-space: pre;
+  overflow-x: auto;
+}
+.diff-del { background: rgba(220, 38, 38, .22); }
+.diff-add { background: rgba(22, 163, 74, .22); }
+.diff-ctx { color: #cbd5e1; }
 .edge-list {
   margin: 6px 0 0;
   padding-left: 18px;

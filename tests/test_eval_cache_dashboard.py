@@ -257,6 +257,8 @@ def test_unified_dashboard_snapshot_includes_db_model_metrics(tmp_path):
 
     snapshot = build_dashboard_snapshot(DashboardRequest(db_path=db, experiment_id="exp"))
     assert snapshot["schema_version"] == "p2a_unified_dashboard_v1"
+    assert snapshot["datasets"][0]["dataset"] == "swebench-hard"
+    assert snapshot["eval_cells"][0]["experiment_id"] == "exp"
     assert snapshot["experiments"][0]["experiment_id"] == "exp"
     assert snapshot["experiments"][0]["source_kind"] == "third_party_api"
     assert snapshot["model_metrics"][0]["model_label"] == "dummy"
@@ -266,6 +268,8 @@ def test_unified_dashboard_snapshot_includes_db_model_metrics(tmp_path):
     assert snapshot["details"][0]["instance_id"] == "case-1"
     assert snapshot["details"][0]["experiment_key"] == snapshot["experiments"][0]["experiment_key"]
     assert snapshot["details"][0]["step_inspection"][0]["tool_names"] == ["execute_bash"]
+    assert snapshot["details"][0]["step_inspection"][0]["action_family"] == "read"
+    assert snapshot["details"][0]["step_inspection"][0]["recovered_reads"][0]["file_path"] == "a.py"
 
 
 def test_unified_dashboard_keeps_experiments_separate_in_overview(tmp_path):
@@ -310,6 +314,60 @@ def test_unified_dashboard_keeps_experiments_separate_in_overview(tmp_path):
     assert len(experiment_keys) == 2
     assert detail_keys == experiment_keys
     assert {row["experiment_id"] for row in snapshot["model_metrics"]} == {"exp-a", "exp-b"}
+
+
+def test_dashboard_dataset_distributions_deduplicate_instances_across_models(tmp_path):
+    db = tmp_path / "traces.sqlite"
+    instance_ids = [f"case-{index:02d}" for index in range(45)]
+    with ensure_db(db) as conn:
+        for model_index in range(5):
+            model = f"model-{model_index}"
+            upsert_experiment(
+                conn,
+                experiment_id="exp",
+                provider_source="internal_api",
+                dataset="swebench-hard",
+                config_snapshot={"experiment": "exp"},
+            )
+            upsert_planned_cells(
+                conn,
+                experiment_id="exp",
+                provider_source="internal_api",
+                model_api_name=model,
+                model_label=model,
+                dataset="swebench-hard",
+                instance_ids=instance_ids,
+            )
+            for case_id in instance_ids:
+                record = _rollout(case_id)
+                record["model"] = model
+                upsert_rollout_record(
+                    conn,
+                    experiment_id="exp",
+                    provider_source="internal_api",
+                    model_api_name=model,
+                    model_label=model,
+                    dataset="swebench-hard",
+                    record=record,
+                    detail=_detail(case_id),
+                )
+        conn.commit()
+
+    snapshot = build_dashboard_snapshot(DashboardRequest(db_path=db))
+
+    assert snapshot["datasets"] == [
+        {
+            "dataset": "swebench-hard",
+            "n_instances": 45,
+            "n_eval_cells": 5,
+            "n_trajectories": 225,
+            "models": [f"model-{index}" for index in range(5)],
+            "source_kinds": ["third_party_api"],
+        }
+    ]
+    dist = snapshot["summary"]["distributions_by_dataset"]["swebench-hard"]
+    assert dist["n_instances"] == 45
+    assert dist["distributions"]["case_types"] == {"missing_bonus_map": 45}
 
 
 def test_unified_dashboard_handles_empty_db(tmp_path):
@@ -395,10 +453,11 @@ def test_unified_static_dashboard_writes_html_snapshot_and_assets(tmp_path):
     html = paths["html"].read_text(encoding="utf-8")
     app = paths["app"].read_text(encoding="utf-8")
     assert "P2A unified dashboard" in html
-    assert "Experiments" in html
+    assert "Datasets and eval cells" in html
     assert "trace-inspector" in html
     assert "window.__P2A_DASHBOARD_SNAPSHOT__" in html
     assert "selectedExperimentKey" in app
+    assert "selectedEvalCellKey" in app
     assert "renderGraph" in app
     assert "step_inspection" in app
     assert "<details class" not in app

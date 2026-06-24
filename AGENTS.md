@@ -52,6 +52,16 @@ facility: `vrc remote` is the debug proxy that targets the **GPU server** when t
 host has no GPU. An ARL gateway being reachable or not is independent of `vrc remote
 health` — do not infer one from the other.
 
+## Dashboard service deployment
+
+- This environment is a server. Do not present dashboard preview URLs bound to
+  `127.0.0.1` or `localhost` as user-accessible links.
+- For user-accessible dashboard services, bind the server to `0.0.0.0` and give
+  the user the server public IP plus port, for example
+  `http://<server-public-ip>:8770`.
+- When the user says they will manage the service themselves, provide the exact
+  start/stop commands only; do not start or keep the service running for them.
+
 ## Python Rules
 
 Every Python invocation inside `src/` MUST be prefixed with `uv run` (the repo pins
@@ -88,3 +98,7 @@ https://uni-agent.readthedocs.io/en/latest/index.html
 - `src/` is a git repo with a GitHub remote (`origin` = `git@github.com:Siyuexi/TraceAnalyzer.git`). Open PRs against `main`; the controller merges. Never self-merge.
 - `uni-agent/` is a nested submodule pointing at the pristine fork mirror `git@github.com:Siyuexi/uni-agent.git`.
 - Do not modify `uni-agent/`; put P2A behavior in `p2a/`, `env/`, `scripts/`, or `config/`.
+- Treat GitHub read access, git-over-SSH push access, and authenticated
+  issue/PR comment writes as separate capabilities. Do not infer a valid `gh`
+  token from successful GitHub reads or `git push`; before claiming GitHub
+  synchronization is blocked, identify the exact operation and access path.

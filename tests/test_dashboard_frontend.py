@@ -14,11 +14,33 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             "rates": {"anchor_hit_rate": 1.0, "root_hit_rate": 1.0, "chain_node_recall": 1.0},
             "averages": {},
             "distributions": {},
+            "distributions_by_dataset": {
+                "swebench-hard": {
+                    "dataset": "swebench-hard",
+                    "n_instances": 2,
+                    "distributions": {
+                        "case_types": {"direct": 2},
+                        "not_chain_evaluable_reasons": {},
+                        "availability": {"with_bonus_map": 2, "with_call_graph": 2, "chain_evaluable": 2, "not_chain_evaluable": 0},
+                    },
+                }
+            },
             "by_case_type": {},
             "trends": [],
         },
-        "experiments": [
+        "datasets": [
             {
+                "dataset": "swebench-hard",
+                "n_instances": 2,
+                "n_eval_cells": 2,
+                "n_trajectories": 2,
+                "models": ["model-a", "model-b"],
+                "source_kinds": ["third_party_api"],
+            }
+        ],
+        "eval_cells": [
+            {
+                "eval_cell_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
                 "experiment_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
                 "source_kind": "third_party_api",
                 "experiment_id": "exp-a",
@@ -35,6 +57,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 "read_precision": 1.0,
             },
             {
+                "eval_cell_key": "third_party_api::exp-b::internal_api::swebench-hard::model-b::model-b",
                 "experiment_key": "third_party_api::exp-b::internal_api::swebench-hard::model-b::model-b",
                 "source_kind": "third_party_api",
                 "experiment_id": "exp-b",
@@ -47,11 +70,13 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 "trajectory_count": 1,
             },
         ],
+        "experiments": [],
         "model_metrics": [],
         "runs": [],
         "details": [
             {
                 "experiment_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
+                "eval_cell_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
                 "experiment_id": "exp-a",
                 "source_kind": "third_party_api",
                 "provider_source": "internal_api",
@@ -116,10 +141,18 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                         "trace_index": 0,
                         "step_index": 0,
                         "tool_names": ["str_replace_editor"],
+                        "tool_name": "str_replace_editor",
+                        "action_family": "read",
+                        "command": "view",
+                        "path": "/testbed/pkg/symptom.py",
+                        "view_range": [1, 10],
                         "thought": "inspect symptom",
                         "response_text": "view symptom",
-                        "tool_calls": [{"function": {"name": "str_replace_editor"}}],
+                        "tool_args": [{"command": "view", "path": "/testbed/pkg/symptom.py", "view_range": [1, 10]}],
+                        "tool_calls": [{"function": {"name": "str_replace_editor", "arguments": {"command": "view", "path": "/testbed/pkg/symptom.py", "view_range": [1, 10]}}}],
                         "tool_results": [{"observation": "symptom body"}],
+                        "observation": "symptom body",
+                        "recovered_reads": [{"file_path": "pkg/symptom.py", "start_line": 1, "end_line": 10}],
                         "scored": {
                             "trace_index": 0,
                             "step_index": 0,
@@ -133,10 +166,19 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                         "trace_index": 1,
                         "step_index": 1,
                         "tool_names": ["str_replace_editor"],
+                        "tool_name": "str_replace_editor",
+                        "action_family": "edit",
+                        "command": "str_replace",
+                        "path": "/testbed/pkg/root.py",
+                        "old_str": "return bad",
+                        "new_str": "return good",
                         "thought": "inspect root",
                         "response_text": "view root",
-                        "tool_calls": [{"function": {"name": "str_replace_editor"}}],
+                        "tool_args": [{"command": "str_replace", "path": "/testbed/pkg/root.py", "old_str": "return bad", "new_str": "return good"}],
+                        "tool_calls": [{"function": {"name": "str_replace_editor", "arguments": {"command": "str_replace", "path": "/testbed/pkg/root.py"}}}],
                         "tool_results": [{"observation": "root body"}],
+                        "observation": "root body",
+                        "recovered_reads": [{"file_path": "pkg/root.py", "start_line": 1, "end_line": 10}],
                         "scored": {
                             "trace_index": 1,
                             "step_index": 1,
@@ -150,6 +192,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             },
             {
                 "experiment_key": "third_party_api::exp-b::internal_api::swebench-hard::model-b::model-b",
+                "eval_cell_key": "third_party_api::exp-b::internal_api::swebench-hard::model-b::model-b",
                 "experiment_id": "exp-b",
                 "source_kind": "third_party_api",
                 "provider_source": "internal_api",
@@ -200,19 +243,24 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             vm.createContext(context);
             vm.runInContext(fs.readFileSync(appPath, "utf8"), context);
             function run(expr) { return vm.runInContext(expr, context); }
-            if (run("state.selectedExperimentKey") !== null) {
-              throw new Error("multi-experiment overview must require explicit selection");
+            if (run("state.selectedDataset") !== "swebench-hard") {
+              throw new Error("single dataset should be auto-selected");
+            }
+            if (run("state.selectedEvalCellKey") !== null || run("state.selectedExperimentKey") !== null) {
+              throw new Error("multi-cell dataset must require explicit model/cell selection");
             }
             const expHtml = elements.get("experiment-table").innerHTML;
-            if (!expHtml.includes("Inspect") || !expHtml.includes("exp-a") || !expHtml.includes("exp-b")) {
-              throw new Error("experiment registry did not render both experiments");
+            if (!expHtml.includes("Datasets") || !expHtml.includes("Eval cells") || !expHtml.includes("exp-a") || !expHtml.includes("exp-b")) {
+              throw new Error("dataset/eval-cell registry did not render");
             }
-            run(`state.selectedExperimentKey = ${JSON.stringify(snapshot.experiments[0].experiment_key)};
-                 state.selectedTraceKey = null;
+            const firstCell = snapshot.eval_cells[0].eval_cell_key;
+            run(`state.selectedEvalCellKey = ${JSON.stringify("PLACEHOLDER")};
+                 state.selectedExperimentKey = ${JSON.stringify("PLACEHOLDER")};
+                 state.selectedTraceKey = ${JSON.stringify("TRACEKEY")};
                  state.selectedStepIndex = 1;
-                 render();`);
+                 render();`.replaceAll("PLACEHOLDER", firstCell).replaceAll("TRACEKEY", `${firstCell}::case-a`));
             const traceHtml = elements.get("trace-inspector").innerHTML;
-            for (const needle of ["trace-left", "trace-middle", "trace-right", "<svg", "Purpose blocks", "Tool calls", "Matched bonus-map nodes"]) {
+            for (const needle of ["trace-left", "trace-middle", "trace-right", "<svg", "Purpose blocks", "Tool summary", "Observation", "Inline diff", "Matched bonus-map nodes"]) {
               if (!traceHtml.includes(needle)) throw new Error(`missing inspector fragment: ${needle}`);
             }
             const stepThumbs = (traceHtml.match(/step-thumb/g) || []).length;

@@ -1,6 +1,8 @@
 const state = {
   snapshot: window.__P2A_DASHBOARD_SNAPSHOT__ || null,
   activeTab: "overview",
+  selectedDataset: null,
+  selectedEvalCellKey: null,
   selectedExperimentKey: null,
   selectedTraceKey: null,
   selectedStepIndex: 0,
@@ -48,28 +50,58 @@ function table(headers, rows) {
 }
 
 function rowKey(detail) {
-  return `${detail.experiment_key || "experiment"}::${detail.instance_id || detail.record_index}`;
+  return `${detail.eval_cell_key || detail.experiment_key || "cell"}::${detail.instance_id || detail.record_index}`;
+}
+
+function datasetRows(snapshot) {
+  if (snapshot?.datasets?.length) return snapshot.datasets;
+  const names = new Set();
+  (snapshot?.eval_cells || snapshot?.experiments || []).forEach((row) => names.add(row.dataset || "unknown-dataset"));
+  (snapshot?.details || []).forEach((row) => names.add(row.dataset || row.data_source || "unknown-dataset"));
+  return [...names].sort().map((dataset) => ({ dataset }));
 }
 
 function experimentRows(snapshot) {
-  return snapshot?.experiments || [];
+  return snapshot?.eval_cells || snapshot?.experiments || [];
+}
+
+function cellKey(row) {
+  return row?.eval_cell_key || row?.experiment_key || "";
+}
+
+function detailCellKey(detail) {
+  return detail?.eval_cell_key || detail?.experiment_key || "";
+}
+
+function selectedDatasetRow(snapshot) {
+  return datasetRows(snapshot).find((row) => row.dataset === state.selectedDataset) || null;
 }
 
 function selectedExperiment(snapshot) {
-  return experimentRows(snapshot).find((row) => row.experiment_key === state.selectedExperimentKey) || null;
+  return experimentRows(snapshot).find((row) => cellKey(row) === state.selectedEvalCellKey) || null;
 }
 
 function ensureSelection(snapshot) {
-  const experiments = experimentRows(snapshot);
-  if (!experiments.length) {
+  const datasets = datasetRows(snapshot);
+  if (!datasets.length) {
+    state.selectedDataset = null;
+    state.selectedEvalCellKey = null;
     state.selectedExperimentKey = null;
     state.selectedTraceKey = null;
     return;
   }
-  if (!state.selectedExperimentKey || !experiments.some((row) => row.experiment_key === state.selectedExperimentKey)) {
-    state.selectedExperimentKey = experiments.length === 1 ? experiments[0].experiment_key : null;
+  if (!state.selectedDataset || !datasets.some((row) => row.dataset === state.selectedDataset)) {
+    state.selectedDataset = datasets.length === 1 ? datasets[0].dataset : null;
   }
-  if (!state.selectedExperimentKey) {
+  const cells = experimentRows(snapshot).filter((row) => !state.selectedDataset || row.dataset === state.selectedDataset);
+  if (!state.selectedEvalCellKey && state.selectedExperimentKey) {
+    state.selectedEvalCellKey = state.selectedExperimentKey;
+  }
+  if (!state.selectedEvalCellKey || !cells.some((row) => cellKey(row) === state.selectedEvalCellKey)) {
+    state.selectedEvalCellKey = cells.length === 1 ? cellKey(cells[0]) : null;
+  }
+  state.selectedExperimentKey = state.selectedEvalCellKey;
+  if (!state.selectedEvalCellKey) {
     state.selectedTraceKey = null;
     state.selectedStepIndex = 0;
     return;
@@ -122,32 +154,26 @@ function metricCard(label, value, formatter = fmt) {
 
 function renderSelectedExperiment(snapshot) {
   const selected = selectedExperiment(snapshot);
-  const label = selected
-    ? `${selected.source_kind || "-"} / ${selected.experiment_id || "-"} / ${selected.model_label || "-"} / ${selected.dataset || "-"}`
+  const dataset = state.selectedDataset || "None";
+  const cell = selected
+    ? `${selected.source_kind || "-"} / ${selected.experiment_id || "-"} / ${selected.model_label || "-"}`
     : "None";
+  const label = `Dataset: ${dataset} | Eval cell: ${cell}`;
   document.getElementById("selected-experiment").textContent = label;
 }
 
 function renderSummary(snapshot) {
-  const summary = snapshot?.summary || {};
-  const rates = summary.rates || {};
-  const avg = summary.averages || {};
-  const counts = summary.counts || {};
+  const counts = snapshot?.summary?.counts || {};
+  const selectedDataset = selectedDatasetRow(snapshot);
   const cards = [
-    ["Experiments", (snapshot.experiments || []).length, fmt],
-    ["Records", counts.n_records, fmt],
+    ["Datasets", datasetRows(snapshot).length, fmt],
+    ["Eval cells", experimentRows(snapshot).length, fmt],
+    ["Dataset instances", selectedDataset?.n_instances ?? "-", fmt],
+    ["Trajectories", selectedDataset?.n_trajectories ?? counts.n_records, fmt],
     ["Models", (snapshot.model_metrics || []).length, fmt],
     ["Runs", (snapshot.runs || []).length, fmt],
-    ["Anchor hit", rates.anchor_hit_rate, pct],
-    ["Root hit", rates.root_hit_rate, pct],
-    ["Node recall", rates.chain_node_recall ?? rates.avg_node_recall, pct],
-    ["Read precision", rates.chain_read_precision ?? rates.avg_read_precision, pct],
-    ["Reverse order", rates.reverse_order_rate, pct],
-    ["Miracle", rates.miracle_rate_over_gt_hits, pct],
-    ["Block achieve", rates.block_achieve_rate, pct],
-    ["Not evaluable", counts.n_not_chain_evaluable, fmt],
-    ["Time to anchor", avg.time_to_anchor, fmt],
-    ["Time to root", avg.time_to_root, fmt],
+    ["Raw records", snapshot.raw_record_count ?? 0, fmt],
+    ["Loaded details", snapshot.detail_count ?? counts.n_records, fmt],
   ];
   document.getElementById("summary-grid").innerHTML = cards.map(([label, value, formatter]) => metricCard(label, value, formatter)).join("");
 }
@@ -159,68 +185,88 @@ function progress(row) {
 }
 
 function renderExperiments(snapshot) {
-  const rows = experimentRows(snapshot).map((row) => {
-    const selected = row.experiment_key === state.selectedExperimentKey;
-    return `<tr class="clickable ${selected ? "is-selected" : ""}" data-experiment-key="${esc(row.experiment_key)}">
-      <td><button class="select-exp" type="button" data-experiment-key="${esc(row.experiment_key)}">${selected ? "Selected" : "Inspect"}</button></td>
+  const datasetRowsHtml = datasetRows(snapshot).map((row) => {
+    const selected = row.dataset === state.selectedDataset;
+    return `<tr class="clickable ${selected ? "is-selected" : ""}" data-dataset="${esc(row.dataset)}">
+      <td><button class="select-dataset" type="button" data-dataset="${esc(row.dataset)}">${selected ? "Selected" : "Select"}</button></td>
+      <td>${esc(row.dataset)}</td>
+      <td>${esc(row.n_instances ?? "-")}</td>
+      <td>${esc(row.n_eval_cells ?? "-")}</td>
+      <td>${esc(row.n_trajectories ?? "-")}</td>
+      <td>${esc((row.models || []).join(", ") || "-")}</td>
+      <td>${esc((row.source_kinds || []).join(", ") || "-")}</td>
+    </tr>`;
+  });
+  const cellRows = experimentRows(snapshot).filter((row) => !state.selectedDataset || row.dataset === state.selectedDataset);
+  const rows = cellRows.map((row) => {
+    const key = cellKey(row);
+    const selected = key === state.selectedEvalCellKey;
+    return `<tr class="clickable ${selected ? "is-selected" : ""}" data-eval-cell-key="${esc(key)}">
+      <td><button class="select-cell" type="button" data-eval-cell-key="${esc(key)}">${selected ? "Selected" : "Inspect"}</button></td>
       <td>${esc(row.source_kind)}</td>
       <td>${esc(row.experiment_id)}</td>
       <td>${esc(row.provider_source)}</td>
       <td>${esc(row.dataset)}</td>
       <td>${esc(row.model_label)}</td>
       <td>${esc(progress(row))}</td>
-      <td>${esc(pct(row.resolved_rate))}</td>
-      <td>${esc(pct(row.root_hit_rate))}</td>
-      <td>${esc(pct(row.chain_node_recall))}</td>
-      <td>${esc(pct(row.read_precision))}</td>
       <td>${esc(row.trajectory_count ?? 0)}</td>
     </tr>`;
   });
-  document.getElementById("experiment-table").innerHTML = table(
-    ["", "Kind", "Experiment", "Provider", "Dataset", "Model", "Done", "Resolved", "Root", "Recall", "Precision", "Traj"],
-    rows
-  );
-  document.querySelectorAll(".select-exp, #experiment-table tr.clickable").forEach((el) => {
+  document.getElementById("experiment-table").innerHTML = `
+    <section class="subsection"><h3>Datasets</h3>${table(["", "Dataset", "Instances", "Eval cells", "Trajectories", "Models", "Sources"], datasetRowsHtml)}</section>
+    <section class="subsection"><h3>Eval cells${state.selectedDataset ? ` in ${esc(state.selectedDataset)}` : ""}</h3>${table(["", "Kind", "Experiment", "Provider", "Dataset", "Model", "Done", "Traj"], rows)}</section>`;
+  document.querySelectorAll(".select-dataset, #experiment-table tr[data-dataset]").forEach((el) => {
     el.addEventListener("click", () => {
-      const key = el.dataset.experimentKey;
-      if (!key) return;
-      state.selectedExperimentKey = key;
+      const dataset = el.dataset.dataset;
+      if (!dataset) return;
+      state.selectedDataset = dataset;
+      state.selectedEvalCellKey = null;
+      state.selectedExperimentKey = null;
       state.selectedTraceKey = null;
       state.selectedStepIndex = 0;
-      setTab(el.classList.contains("select-exp") ? "traces" : state.activeTab);
+      render();
+    });
+  });
+  document.querySelectorAll(".select-cell, #experiment-table tr[data-eval-cell-key]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const key = el.dataset.evalCellKey;
+      if (!key) return;
+      state.selectedEvalCellKey = key;
+      state.selectedExperimentKey = key;
+      const cell = experimentRows(state.snapshot).find((row) => cellKey(row) === key);
+      if (cell?.dataset) state.selectedDataset = cell.dataset;
+      state.selectedTraceKey = null;
+      state.selectedStepIndex = 0;
+      setTab(el.classList.contains("select-cell") ? "traces" : state.activeTab);
       render();
     });
   });
 }
 
 function scopedRows(rows) {
-  if (!state.selectedExperimentKey) return [];
-  return (rows || []).filter((row) => row.experiment_key === state.selectedExperimentKey);
+  if (!state.selectedEvalCellKey) return [];
+  return (rows || []).filter((row) => cellKey(row) === state.selectedEvalCellKey);
 }
 
 function renderTrend(snapshot) {
-  const selected = selectedExperiment(snapshot);
+  const dataset = state.selectedDataset;
   const trends = snapshot?.summary?.trends || [];
   const rows = trends
-    .filter((row) => !selected || row.data_source === selected.dataset)
+    .filter((row) => !dataset || row.data_source === dataset)
     .map((row) => {
       const rates = row.rates || {};
-      const avg = row.averages || {};
       return `<tr>
         <td>${esc(row.data_source)}</td>
         <td>${esc(row.run_step)}</td>
         <td>${esc(row.n_records)}</td>
+        <td>${esc(pct(rates.bonus_map_coverage))}</td>
+        <td>${esc(pct(rates.call_graph_coverage))}</td>
+        <td>${esc(pct(rates.read_rate))}</td>
         <td>${esc(pct(rates.chain_graph_coverage))}</td>
-        <td>${esc(pct(rates.anchor_hit_rate))}</td>
-        <td>${esc(pct(rates.root_hit_rate))}</td>
-        <td>${esc(pct(rates.chain_node_recall))}</td>
-        <td>${esc(pct(rates.chain_read_precision))}</td>
-        <td>${esc(fmt(avg.steps_anchor_to_root))}</td>
-        <td>${esc(pct(rates.anchor_before_root_rate))}</td>
       </tr>`;
     });
   document.getElementById("trend-table").innerHTML = table(
-    ["Data source", "Step", "N", "Coverage", "Anchor", "Root", "Recall", "Precision", "Anchor-to-root", "Ordered"],
+    ["Data source", "Step", "N", "Bonus maps", "Call graphs", "Read rate", "Chain coverage"],
     rows
   );
 }
@@ -234,49 +280,90 @@ function miniTable(title, mapping) {
 }
 
 function renderDistributions(snapshot) {
-  const dist = snapshot?.summary?.distributions || {};
-  const byCase = snapshot?.summary?.by_case_type || {};
+  if (!state.selectedDataset) {
+    document.getElementById("distribution-grid").innerHTML = '<div class="empty">Select a dataset before inspecting distributions.</div>';
+    return;
+  }
+  const payload = snapshot?.summary?.distributions_by_dataset?.[state.selectedDataset] || snapshot?.summary?.by_dataset?.[state.selectedDataset] || {};
+  const dist = payload.distributions || {};
+  const population = payload.n_instances || payload.counts?.n_instances || 0;
   document.getElementById("distribution-grid").innerHTML = [
+    miniTable(`Dataset population (${state.selectedDataset})`, { unique_instances: population }),
+    miniTable("Case types", dist.case_types),
     miniTable("Not chain-evaluable", dist.not_chain_evaluable_reasons),
-    miniTable("Chain bad patterns", dist.chain_bad_patterns),
-    miniTable("Case types", byCase),
+    miniTable("Graph availability", dist.availability),
   ].join("");
 }
 
 function renderModels(snapshot) {
-  if (!state.selectedExperimentKey) {
-    document.getElementById("model-table").innerHTML = '<div class="empty">Select an experiment in Overview before comparing model KPIs.</div>';
+  if (!state.selectedDataset) {
+    document.getElementById("model-table").innerHTML = '<div class="empty">Select a dataset in Overview before comparing Macro KPIs.</div>';
     return;
   }
-  const rows = scopedRows(snapshot?.model_metrics || []);
+  const rows = (snapshot?.model_metrics || []).filter((row) => row.dataset === state.selectedDataset);
   const hasCacheWrite = rows.some((row) => row.cache_write_rate !== null && row.cache_write_rate !== undefined);
-  const outcomeRows = rows.map((row) => `<tr>
-    <td>${esc(row.model_label)}</td><td>${esc(progress(row))}</td>
-    <td>${esc(pct(row.resolved_rate))}</td><td>${esc(pct(row.reward_rate))}</td>
-    <td>${esc(row.errors || 0)}</td><td>${esc(row.pending || 0)}</td>
-  </tr>`);
-  const linkerRows = rows.map((row) => `<tr>
-    <td>${esc(row.model_label)}</td><td>${esc(pct(row.p2a_read_rate))}</td>
-    <td>${esc(pct(row.avg_read_precision))}</td><td>${esc(pct(row.avg_node_recall))}</td><td>${esc(pct(row.avg_hit_f1))}</td>
-    <td>${esc(pct(row.anchor_hit_rate))}</td><td>${esc(pct(row.root_hit_rate))}</td><td>${esc(pct(row.avg_chain_node_recall))}</td>
-    <td>${esc(pct(row.avg_chain_read_precision))}</td><td>${esc(fmt(row.avg_first_anchor_step, 1))}</td><td>${esc(fmt(row.avg_first_root_step, 1))}</td>
-  </tr>`);
-  const orderRows = rows.map((row) => `<tr>
-    <td>${esc(row.model_label)}</td><td>${esc(fmt(row.avg_order_score))}</td><td>${esc(pct(row.reverse_order_rate))}</td>
-    <td>${esc(pct(row.miracle_rate))}</td><td>${esc(fmt(row.avg_miracle_severity))}</td>
-    <td>${esc(fmt(row.avg_block_order_score))}</td><td>${esc(pct(row.block_reverse_order_rate))}</td><td>${esc(pct(row.block_miracle_rate))}</td>
-  </tr>`);
-  const blockRows = rows.map((row) => `<tr>
-    <td>${esc(row.model_label)}</td><td>${esc(fmt(row.avg_blocks_per_trace, 1))}</td><td>${esc(pct(row.block_achieve_rate))}</td>
-    <td>${esc(pct(row.block_waste_rate))}</td><td>${esc(pct(row.block_loop_rate))}</td><td>${esc(pct(row.loop_trace_rate))}</td>
-    <td>${esc(pct(row.error_spiral_rate))}</td><td>${esc(Object.keys(row.chain_bad_patterns || {}).join(", ") || "-")}</td>
-    <td>${esc(Object.keys(row.not_chain_evaluable_reasons || {}).join(", ") || "-")}</td>
-  </tr>`);
-  const efficiencyHeaders = ["Model", "Turns", "Tools", "Wall", "In", "Out", "Reason", "Cost", "Cache hit"];
-  if (hasCacheWrite) efficiencyHeaders.push("Cache write");
-  const efficiencyRows = rows.map((row) => {
+  const headers = [
+    "",
+    "Model",
+    "Kind",
+    "Experiment",
+    "Done",
+    "Task success",
+    "Read precision",
+    "Node recall",
+    "F1",
+    "Anchor",
+    "Root",
+    "Chain recall",
+    "Chain precision",
+    "First anchor",
+    "First root",
+    "Order",
+    "Reverse",
+    "Miracle",
+    "Blocks",
+    "Achieved",
+    "Wasted",
+    "Loop blocks",
+    "Loop trace",
+    "Error spiral",
+    "Turns",
+    "Tools",
+    "Wall",
+    "In",
+    "Out",
+    "Reason",
+    "Cost",
+    "Cache hit",
+  ];
+  if (hasCacheWrite) headers.push("Cache write");
+  const tableRows = rows.map((row) => {
+    const key = cellKey(row);
     const cells = [
+      `<button class="select-kpi-cell" type="button" data-eval-cell-key="${esc(key)}">${key === state.selectedEvalCellKey ? "Selected" : "Select"}</button>`,
       row.model_label,
+      row.source_kind,
+      row.experiment_id,
+      progress(row),
+      pct(row.resolved_rate ?? row.reward_rate),
+      pct(row.avg_chain_read_precision ?? row.avg_read_precision),
+      pct(row.avg_chain_node_recall ?? row.avg_node_recall),
+      pct(row.avg_hit_f1),
+      pct(row.anchor_hit_rate),
+      pct(row.root_hit_rate),
+      pct(row.avg_chain_node_recall),
+      pct(row.avg_chain_read_precision),
+      fmt(row.avg_first_anchor_step, 1),
+      fmt(row.avg_first_root_step, 1),
+      fmt(row.avg_order_score),
+      pct(row.reverse_order_rate),
+      pct(row.miracle_rate),
+      fmt(row.avg_blocks_per_trace, 1),
+      pct(row.block_achieve_rate),
+      pct(row.block_waste_rate),
+      pct(row.block_loop_rate),
+      pct(row.loop_trace_rate),
+      pct(row.error_spiral_rate),
       fmt(row.avg_turns, 1),
       fmt(row.avg_tool_calls, 1),
       fmt(row.avg_wall_time, 1),
@@ -287,45 +374,65 @@ function renderModels(snapshot) {
       pct(row.cache_hit_rate),
     ];
     if (hasCacheWrite) cells.push(pct(row.cache_write_rate));
-    return `<tr>${cells.map((cell) => `<td>${esc(cell)}</td>`).join("")}</tr>`;
+    return `<tr class="${key === state.selectedEvalCellKey ? "is-selected" : ""}" data-eval-cell-key="${esc(key)}">${cells.map((cell, index) => `<td>${index === 0 ? cell : esc(cell)}</td>`).join("")}</tr>`;
   });
   document.getElementById("model-table").innerHTML = `
-    <div class="kpi-stack">
-      <section><h3>Task outcome</h3>${table(["Model", "Done", "Resolved", "Reward", "Errors", "Pending"], outcomeRows)}</section>
-      <section><h3>Linker quality</h3>${table(["Model", "Recovered read", "Read precision", "Node recall", "F1", "Anchor", "Root", "Chain recall", "Chain precision", "First anchor", "First root"], linkerRows)}</section>
-      <section><h3>Topology and order</h3>${table(["Model", "Order", "Reverse order", "Miracle", "Miracle severity", "Block order", "Block reverse", "Block miracle"], orderRows)}</section>
-      <section><h3>Purpose blocks and bad patterns</h3>${table(["Model", "Blocks", "Achieved", "Wasted", "Loop blocks", "Loop trace", "Error spiral", "Chain flags", "Not evaluable"], blockRows)}</section>
-      <section><h3>Efficiency, cost, cache</h3>${table(efficiencyHeaders, efficiencyRows)}</section>
-    </div>`;
+    <div class="panel-note">Macro KPI is scoped to dataset <strong>${esc(state.selectedDataset)}</strong>. Effect and dependency-rigor metrics are placed before efficiency/cost metrics.</div>
+    <div class="table-wrap kpi-table">${table(headers, tableRows)}</div>`;
+  document.querySelectorAll(".select-kpi-cell, #model-table tr[data-eval-cell-key]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const key = el.dataset.evalCellKey;
+      if (!key) return;
+      state.selectedEvalCellKey = key;
+      state.selectedExperimentKey = key;
+      const cell = experimentRows(state.snapshot).find((row) => cellKey(row) === key);
+      if (cell?.dataset) state.selectedDataset = cell.dataset;
+      state.selectedTraceKey = null;
+      state.selectedStepIndex = 0;
+      render();
+    });
+  });
 }
 
 function renderRuns(snapshot) {
   const selected = selectedExperiment(snapshot);
-  if (!selected) {
-    document.getElementById("run-list").innerHTML = '<div class="empty">Select an experiment in Overview before inspecting run logs.</div>';
+  if (!state.selectedDataset) {
+    document.getElementById("run-list").innerHTML = '<div class="empty">Select a dataset before inspecting run provenance.</div>';
     return;
   }
-  const runs = (snapshot?.runs || []).filter((run) => {
-    const path = String(run.path || "");
-    return !selected.experiment_id || path.includes(selected.experiment_id) || path.includes(selected.model_label || "");
+  const allRuns = snapshot?.runs || [];
+  const linked = allRuns.filter((run) => {
+    const keys = run.eval_cell_keys || [];
+    if (selected) return keys.includes(cellKey(selected));
+    return (run.datasets || []).includes(state.selectedDataset);
   });
-  const cards = runs.map((run) => {
+  const unlinked = allRuns.filter((run) => !(run.eval_cell_keys || []).length);
+  const renderCards = (runs) => runs.map((run) => {
     const statusTone = run.status === "completed" ? "ok" : run.status === "running" || run.status === "verify" ? "warn" : "";
     const files = (run.files || []).slice(0, 8).map((name) => `<span class="badge">${esc(name)}</span>`).join("");
+    const links = (run.eval_cell_keys || []).length
+      ? `<div class="run-meta">Linked cells: ${esc((run.model_labels || []).join(", ") || run.eval_cell_keys.length)}</div>`
+      : '<div class="run-meta">Unlinked provenance: no eval-cell metadata in this artifact.</div>';
     const log = run.log_excerpt ? `<pre class="log">${esc(run.log_excerpt.slice(-6000))}</pre>` : '<div class="muted">No run.log tail.</div>';
     return `<article class="run-card">
       <div class="run-head"><div><div class="run-title">${esc(run.run_id)}</div><div class="run-meta">${esc(run.path)}</div></div>${badge(run.status || "unknown", true, statusTone)}</div>
-      <div class="run-meta">Updated ${run.last_update ? new Date(run.last_update * 1000).toLocaleString() : "-"}</div>
+      <div class="run-meta">Updated ${run.last_update ? new Date(run.last_update * 1000).toLocaleString() : "-"}</div>${links}
       <div>${files}</div>${log}
     </article>`;
-  });
-  document.getElementById("run-list").innerHTML = cards.join("") || '<div class="empty">No run directories for the selected experiment.</div>';
+  }).join("");
+  document.getElementById("run-list").innerHTML = `
+    <div class="panel-note">Run Provenance shows artifact-producing executions. Quality metrics live in Macro KPI; trajectories live in Trajectories.</div>
+    <h3>${selected ? "Linked to selected eval cell" : `Linked to dataset ${esc(state.selectedDataset)}`}</h3>
+    <div class="run-grid">${renderCards(linked) || '<div class="empty">No explicitly linked runs for this scope.</div>'}</div>
+    <h3>Unlinked runs</h3>
+    <div class="run-grid">${renderCards(unlinked) || '<div class="empty">No unlinked runs.</div>'}</div>`;
 }
 
 function traceBlob(detail) {
   return JSON.stringify({
     instance_id: detail.instance_id,
     files: detail.read_files,
+    step_reads: (detail.step_inspection || []).map((step) => step.recovered_reads || step.target_path || step.path),
     bad: detail.bad_patterns,
     chain_bad: detail.chain_bad_patterns,
     reason: detail.not_chain_evaluable_reason,
@@ -334,8 +441,9 @@ function traceBlob(detail) {
 
 function filteredDetails(snapshot) {
   const query = state.traceQuery.trim().toLowerCase();
+  if (!state.selectedEvalCellKey) return [];
   return (snapshot?.details || [])
-    .filter((detail) => !state.selectedExperimentKey || detail.experiment_key === state.selectedExperimentKey)
+    .filter((detail) => detailCellKey(detail) === state.selectedEvalCellKey)
     .filter((detail) => !query || traceBlob(detail).includes(query));
 }
 
@@ -358,7 +466,7 @@ function stepTone(step, detail) {
   if (nodes.some((node) => node.node_role === "root_cause")) return "root";
   if (nodes.some((node) => node.node_role === "symptom")) return "symptom";
   if (nodes.length) return "chain";
-  if ((scored.n_reads || 0) > 0) return "offmap";
+  if ((scored.n_reads || 0) > 0 || (step?.recovered_reads || []).length || step?.action_family === "read") return "offmap";
   if ((detail?.bad_patterns || {}).error_spiral) return "bad";
   return "neutral";
 }
@@ -381,8 +489,6 @@ function renderGraph(detail) {
   const nodes = graphNodes(detail);
   if (!nodes.length) return '<div class="empty">No bonus-map graph available for this instance.</div>';
   const edges = graphEdges(detail);
-  const width = 760;
-  const height = Math.max(260, Math.min(680, 110 + nodes.length * 34));
   const layers = new Map();
   nodes.forEach((node) => {
     const raw = node.normalized_distance;
@@ -391,11 +497,17 @@ function renderGraph(detail) {
     if (!layers.has(layer)) layers.set(layer, []);
     layers.get(layer).push(node);
   });
+  const sortedLayers = [...layers.entries()].sort((a, b) => b[0] - a[0]);
+  const maxLayerSize = Math.max(...sortedLayers.map((entry) => entry[1].length), 1);
+  const rowGap = 70;
+  const colGap = 190;
+  const width = Math.max(760, 220 + sortedLayers.length * colGap);
+  const height = Math.max(260, 90 + maxLayerSize * rowGap);
   const positions = new Map();
-  [...layers.entries()].forEach(([layer, layerNodes]) => {
-    const x = 80 + (5 - layer) * 120;
-    const gap = height / (layerNodes.length + 1);
-    layerNodes.forEach((node, index) => positions.set(node.key, { x, y: gap * (index + 1) }));
+  sortedLayers.forEach(([_layer, layerNodes], layerIndex) => {
+    const x = 80 + layerIndex * colGap;
+    const sortedNodes = [...layerNodes].sort((a, b) => String(a.key).localeCompare(String(b.key)));
+    sortedNodes.forEach((node, index) => positions.set(node.key, { x, y: 55 + index * rowGap }));
   });
   const edgeSvg = edges.map(([caller, callee]) => {
     const a = positions.get(caller);
@@ -405,6 +517,7 @@ function renderGraph(detail) {
   }).join("");
   const nodeSvg = nodes.map((node) => {
     const pos = positions.get(node.key);
+    if (!pos) return "";
     const tone = roleTone(node);
     const hit = node.hit || node.first_step !== null && node.first_step !== undefined;
     const label = String(node.key || "").split("::").slice(-1)[0].slice(0, 28);
@@ -488,18 +601,65 @@ function renderStepThumb(step, detail) {
   const traceIndex = Number(step.trace_index ?? step.step_index ?? 0);
   const selected = traceIndex === state.selectedStepIndex;
   const tone = stepTone(step, detail);
-  const tool = (step.tool_names || [step.scored?.family || "step"]).join("+");
-  const target = step.scored?.target_path || "";
+  const tool = step.tool_name || (step.tool_names || [step.scored?.family || "step"]).join("+");
+  const family = step.action_family && step.action_family !== "other" ? `${step.action_family}: ` : "";
+  const target = step.target_path || step.path || step.scored?.target_path || "";
   return `<button type="button" class="step-thumb ${tone} ${selected ? "is-selected" : ""}" data-step-index="${traceIndex}">
     <span class="step-num">${esc(step.step_index ?? traceIndex)}</span>
-    <span class="step-tool">${esc(tool)}</span>
-    <span class="step-target">${esc(target.split("/").slice(-2).join("/") || "no target")}</span>
+    <span class="step-tool">${esc(`${family}${tool}`)}</span>
+    <span class="step-target">${esc(target.split("/").slice(-2).join("/") || step.command || "no target")}</span>
   </button>`;
 }
 
 function jsonBlock(value) {
   const text = typeof value === "string" ? value : JSON.stringify(value ?? "", null, 2);
   return `<pre class="detail-pre">${esc(text || "-")}</pre>`;
+}
+
+function commandLine(step) {
+  const parts = [step.tool_name || (step.tool_names || []).join("+") || "step"];
+  if (step.command) parts.push(step.command);
+  if (step.path) parts.push(step.path);
+  if (step.view_range) parts.push(Array.isArray(step.view_range) ? `[${step.view_range.join(", ")}]` : step.view_range);
+  return parts.filter(Boolean).join(" ");
+}
+
+function renderReadList(reads) {
+  const rows = (reads || []).map((read) => `<tr><td>${esc(read.file_path || read.path)}</td><td>${esc(read.start_line ?? "-")}</td><td>${esc(read.end_line ?? "-")}</td></tr>`);
+  return table(["File", "Start", "End"], rows);
+}
+
+function renderDiff(oldText, newText) {
+  if (oldText === undefined && newText === undefined) return "";
+  const oldLines = String(oldText || "").split("\n");
+  const newLines = String(newText || "").split("\n");
+  const rows = [];
+  const maxLen = Math.max(oldLines.length, newLines.length);
+  for (let i = 0; i < maxLen; i += 1) {
+    if (oldLines[i] !== undefined && oldLines[i] !== newLines[i]) {
+      rows.push(`<div class="diff-line diff-del"><span>-</span><code>${esc(oldLines[i])}</code></div>`);
+    }
+    if (newLines[i] !== undefined && oldLines[i] !== newLines[i]) {
+      rows.push(`<div class="diff-line diff-add"><span>+</span><code>${esc(newLines[i])}</code></div>`);
+    }
+    if (oldLines[i] !== undefined && oldLines[i] === newLines[i]) {
+      rows.push(`<div class="diff-line diff-ctx"><span> </span><code>${esc(oldLines[i])}</code></div>`);
+    }
+  }
+  return `<section><h4>Inline diff</h4><div class="diff-view">${rows.join("") || '<div class="muted">No textual difference.</div>'}</div></section>`;
+}
+
+function renderToolCallSummary(step) {
+  const args = (step.tool_args || [])[0] || {};
+  const fields = {
+    tool: step.tool_name || (step.tool_names || []).join("+") || "-",
+    family: step.action_family || "-",
+    command: step.command || args.command || "-",
+    path: step.path || step.target_path || args.path || args.file || "-",
+    view_range: step.view_range || args.view_range || "-",
+    status: step.status || "-",
+  };
+  return table(["Field", "Value"], Object.entries(fields).map(([key, value]) => `<tr><td>${esc(key)}</td><td>${esc(Array.isArray(value) ? value.join(", ") : value)}</td></tr>`));
 }
 
 function renderStepDetail(detail) {
@@ -510,20 +670,22 @@ function renderStepDetail(detail) {
   }
   const scored = step.scored || {};
   const hitNodes = (scored.hit_nodes || []).map((node) => `${node.node_role || "node"}: ${node.key}`).join("\n");
-  const reads = scored.reads || [];
+  const reads = scored.reads || step.recovered_reads || [];
   return `<section class="step-detail">
     <h3>Step ${esc(step.step_index ?? step.trace_index)}</h3>
     <div class="detail-badges">
-      ${badge((step.tool_names || ["step"]).join("+"))}
+      ${badge(commandLine(step))}
       ${step.parse_error ? badge("parse error", true, "bad") : ""}
       ${step.exit_reason ? badge(step.exit_reason) : ""}
-      ${scored.n_reads ? badge(`${scored.n_reads} recovered reads`, true, "ok") : badge("no recovered read", true, "warn")}
+      ${reads.length ? badge(`${reads.length} recovered reads`, true, "ok") : badge("no recovered read", true, "warn")}
     </div>
     <div class="detail-grid">
+      <section><h4>Tool summary</h4>${renderToolCallSummary(step)}</section>
       <section><h4>Think / assistant text</h4>${jsonBlock(step.thought || step.response_text || "(empty)")}</section>
-      <section><h4>Tool calls</h4>${jsonBlock(step.tool_calls || [])}</section>
-      <section><h4>Tool returns</h4>${jsonBlock(step.tool_results || [])}</section>
-      <section><h4>Recovered reads</h4>${jsonBlock(reads)}</section>
+      <section><h4>Action</h4>${jsonBlock(step.raw_action || step.tool_calls || [])}</section>
+      ${renderDiff(step.old_str, step.new_str)}
+      <section><h4>Observation</h4>${jsonBlock(step.observation || step.tool_results || [])}</section>
+      <section><h4>Recovered reads</h4>${renderReadList(reads)}</section>
       <section><h4>Matched bonus-map nodes</h4>${jsonBlock(hitNodes || "No matched bonus-map node.")}</section>
     </div>
   </section>`;
@@ -531,8 +693,8 @@ function renderStepDetail(detail) {
 
 function renderTraceInspector(snapshot) {
   const detail = selectedDetail(snapshot);
-  if (!state.selectedExperimentKey) {
-    document.getElementById("trace-inspector").innerHTML = '<div class="empty">Select an experiment in Overview before inspecting trajectories.</div>';
+  if (!state.selectedEvalCellKey) {
+    document.getElementById("trace-inspector").innerHTML = '<div class="empty">Select a dataset and eval cell/model before inspecting trajectories.</div>';
     return;
   }
   if (!detail) {
@@ -599,6 +761,8 @@ function configureEvents() {
   document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => setTab(tab.dataset.tab)));
   document.getElementById("refresh-button").addEventListener("click", loadSnapshot);
   document.getElementById("clear-experiment").addEventListener("click", () => {
+    state.selectedDataset = null;
+    state.selectedEvalCellKey = null;
     state.selectedExperimentKey = null;
     state.selectedTraceKey = null;
     state.selectedStepIndex = 0;
