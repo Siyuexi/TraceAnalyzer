@@ -403,6 +403,20 @@ uv run python scripts/p2a_dashboard.py \
   --bonus-map-dir data/bonus_maps/swebench-hard
 ```
 
+The Overview tab is the experiment registry. It lists saved experiment/model
+cells by source kind (`local_training`, `local_inference`, or `third_party_api`),
+dataset, provider, model, status, and aggregate quality. Select one experiment
+before inspecting model KPIs, runs/logs, or trajectories; trajectory details are
+scoped to that selected experiment so local checkpoints and API-model batches do
+not get mixed.
+
+After selection, the Models tab separates task outcome, Linker quality,
+topology/order diagnostics, purpose-block diagnostics, and efficiency/cost/cache
+signals. The Trajectories tab uses a three-pane inspector: instance list on the
+left, bonus-map graph plus purpose-block/step timeline in the middle, and the
+selected step's think text, tool call, tool return, recovered reads, and matched
+bonus-map nodes on the right.
+
 The offline `summary-out` and `details-out` files are post-hoc artifacts for
 inspecting dumped rollouts. Training and validation do not read them; live
 validation scoring uses `P2A_EVAL_BONUS_MAP_DIR`, and the HTML dashboard reads
@@ -450,10 +464,11 @@ uv run python scripts/p2a_dashboard.py \
   --bonus-map-dir data/bonus_maps/swebench-hard
 ```
 
-The old terminal/TUI batch watcher has been folded into this HTML dashboard:
-the Models tab contains the former per-model progress, resolved/reward, P2A
-read, graph/root/near hit, distance, turn/tool/wall-time, token, cache, and
-error flag columns.
+The old terminal/TUI batch watcher has been folded into this HTML dashboard.
+The Models tab keeps per-model progress and efficiency/cost/cache visibility,
+but the primary diagnostic metrics are the shared Python scorer outputs:
+read precision, node recall, F1, anchor/root hit rates, order/reverse-order,
+miracle, purpose-block achieved/wasted/loop rates, and chain bad-pattern flags.
 
 If the smoke phase records only system errors such as ARL gateway or interactive
 shell failures, batch mode stops before the full phase and reports the structured

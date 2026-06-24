@@ -49,15 +49,96 @@ def _detail(instance_id: str):
         "hit_ground_truth": True,
         "hit_near": True,
         "min_distance": 0.0,
-        "chain_evaluable": False,
-        "not_chain_evaluable_reason": "legacy_detail",
-        "chain_hit": False,
-        "anchor_hit": False,
-        "root_hit": False,
-        "bad_patterns": {},
-        "chain_bad_patterns": {},
-        "step_details": [],
-        "purpose_blocks": [],
+        "hit_precision": 1.0,
+        "hit_recall": 1.0,
+        "hit_f1": 1.0,
+        "order_score": 1.0,
+        "order_defined": True,
+        "miracle_step": False,
+        "miracle_severity": 0,
+        "block_order_score": 1.0,
+        "block_order_defined": True,
+        "block_miracle_step": False,
+        "block_miracle_severity": 0,
+        "chain_evaluable": True,
+        "not_chain_evaluable_reason": None,
+        "chain_graph_covered": True,
+        "chain_hit": True,
+        "anchor_hit": True,
+        "root_hit": True,
+        "chain_node_recall": 1.0,
+        "chain_read_precision": 1.0,
+        "first_anchor_step": 0,
+        "first_root_step": 0,
+        "steps_anchor_to_root": 0,
+        "anchor_before_root": True,
+        "bad_patterns": {"has_loop": False, "error_spiral": False},
+        "chain_bad_patterns": {
+            "missed_anchor": False,
+            "missed_root_after_anchor": False,
+            "root_before_anchor": False,
+            "chain_stall": False,
+            "chain_read_loop": False,
+            "off_chain_read_spree": False,
+            "error_spiral_on_chain": False,
+        },
+        "step_details": [
+            {
+                "step_index": 1,
+                "trace_index": 0,
+                "family": "view",
+                "target_path": "a.py",
+                "n_reads": 1,
+                "reads": [{"file_path": "a.py", "start_line": 1, "end_line": 999999}],
+                "hit_nodes": [{"key": "a.py::root", "node_role": "root_cause"}],
+                "min_distance": 0.0,
+            }
+        ],
+        "purpose_blocks": [
+            {
+                "block_index": 0,
+                "family": "view",
+                "target_path": "a.py",
+                "step_indices": [0],
+                "achieved": True,
+                "wasted": False,
+                "loop": False,
+                "n_steps": 1,
+                "outcome_defined": True,
+                "first_hit_step": 0,
+                "min_distance": 0.0,
+            }
+        ],
+        "n_blocks": 1,
+        "n_scored_read_blocks": 1,
+        "n_achieving_blocks": 1,
+        "n_wasted_blocks": 0,
+        "n_loop_blocks": 0,
+        "n_block_steps": 1,
+        "n_scored_read_block_steps": 1,
+        "n_achieving_block_steps": 1,
+        "n_wasted_block_steps": 0,
+        "n_loop_block_steps": 0,
+        "block_efficiency": 1.0,
+        "chain_projection": {
+            "anchors": ["a.py::root"],
+            "roots": ["a.py::root"],
+            "context_nodes": [],
+            "chain_nodes": [
+                {
+                    "key": "a.py::root",
+                    "file_path": "a.py",
+                    "start_line": 1,
+                    "end_line": 20,
+                    "normalized_distance": 0.0,
+                    "node_role": "root_cause",
+                    "hit": True,
+                    "first_step": 0,
+                }
+            ],
+            "chain_edges": [],
+            "context_edges": [],
+        },
     }
 
 
@@ -166,14 +247,69 @@ def test_unified_dashboard_snapshot_includes_db_model_metrics(tmp_path):
     assert rows[0]["done"] == 1
     assert rows[0]["resolved_rate"] == 1.0
     assert rows[0]["p2a_read_rate"] == 1.0
+    assert rows[0]["avg_read_precision"] == 1.0
+    assert rows[0]["avg_node_recall"] == 1.0
+    assert rows[0]["avg_hit_f1"] == 1.0
+    assert rows[0]["anchor_hit_rate"] == 1.0
+    assert rows[0]["root_hit_rate"] == 1.0
+    assert rows[0]["block_achieve_rate"] == 1.0
     assert rows[0]["cache_hit_rate"] == 50 / 150
 
     snapshot = build_dashboard_snapshot(DashboardRequest(db_path=db, experiment_id="exp"))
     assert snapshot["schema_version"] == "p2a_unified_dashboard_v1"
+    assert snapshot["experiments"][0]["experiment_id"] == "exp"
+    assert snapshot["experiments"][0]["source_kind"] == "third_party_api"
     assert snapshot["model_metrics"][0]["model_label"] == "dummy"
     assert snapshot["model_metrics"][0]["target"] == 2
+    assert snapshot["model_metrics"][0]["avg_read_precision"] == 1.0
     assert snapshot["summary"]["counts"]["n_records"] == 1
     assert snapshot["details"][0]["instance_id"] == "case-1"
+    assert snapshot["details"][0]["experiment_key"] == snapshot["experiments"][0]["experiment_key"]
+    assert snapshot["details"][0]["step_inspection"][0]["tool_names"] == ["execute_bash"]
+
+
+def test_unified_dashboard_keeps_experiments_separate_in_overview(tmp_path):
+    db = tmp_path / "traces.sqlite"
+    with ensure_db(db) as conn:
+        for exp_id, model, case_id in (("exp-a", "model-a", "case-a"), ("exp-b", "model-b", "case-b")):
+            upsert_experiment(
+                conn,
+                experiment_id=exp_id,
+                provider_source="internal_api",
+                dataset="swebench-hard",
+                config_snapshot={"experiment": exp_id},
+            )
+            upsert_planned_cells(
+                conn,
+                experiment_id=exp_id,
+                provider_source="internal_api",
+                model_api_name=model,
+                model_label=model,
+                dataset="swebench-hard",
+                instance_ids=[case_id],
+            )
+            record = _rollout(case_id)
+            record["model"] = model
+            upsert_rollout_record(
+                conn,
+                experiment_id=exp_id,
+                provider_source="internal_api",
+                model_api_name=model,
+                model_label=model,
+                dataset="swebench-hard",
+                record=record,
+                detail=_detail(case_id),
+            )
+        conn.commit()
+
+    snapshot = build_dashboard_snapshot(DashboardRequest(db_path=db))
+
+    experiment_keys = {row["experiment_key"] for row in snapshot["experiments"]}
+    detail_keys = {row["experiment_key"] for row in snapshot["details"]}
+    assert len(snapshot["experiments"]) == 2
+    assert len(experiment_keys) == 2
+    assert detail_keys == experiment_keys
+    assert {row["experiment_id"] for row in snapshot["model_metrics"]} == {"exp-a", "exp-b"}
 
 
 def test_unified_dashboard_handles_empty_db(tmp_path):
@@ -223,8 +359,10 @@ def test_unified_dashboard_loads_local_uni_agent_run_dir(tmp_path):
     snapshot = build_dashboard_snapshot(DashboardRequest(log_dir=run_root, bonus_map_dir=bonus_dir))
 
     assert snapshot["runs"][0]["status"] == "completed"
+    assert snapshot["experiments"][0]["source_kind"] == "local_inference"
     assert snapshot["details"][0]["instance_id"] == "case-1"
     assert snapshot["details"][0]["root_hit"] is True
+    assert snapshot["details"][0]["step_inspection"][0]["tool_names"] == ["execute_bash"]
     assert snapshot["summary"]["counts"]["n_records"] == 1
 
 
@@ -255,8 +393,15 @@ def test_unified_static_dashboard_writes_html_snapshot_and_assets(tmp_path):
     paths = write_static_dashboard(tmp_path / "dashboard", snapshot)
 
     html = paths["html"].read_text(encoding="utf-8")
+    app = paths["app"].read_text(encoding="utf-8")
     assert "P2A unified dashboard" in html
+    assert "Experiments" in html
+    assert "trace-inspector" in html
     assert "window.__P2A_DASHBOARD_SNAPSHOT__" in html
+    assert "selectedExperimentKey" in app
+    assert "renderGraph" in app
+    assert "step_inspection" in app
+    assert "<details class" not in app
     assert paths["snapshot"].exists()
     assert paths["app"].exists()
     assert paths["css"].exists()

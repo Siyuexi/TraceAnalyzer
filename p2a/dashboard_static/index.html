@@ -24,8 +24,19 @@
   <button class="tab" data-tab="traces" type="button">Trajectories</button>
 </nav>
 <main>
+  <section class="selected-bar">
+    <div>
+      <div class="selected-label">Selected experiment</div>
+      <div id="selected-experiment">None</div>
+    </div>
+    <button id="clear-experiment" type="button">Clear</button>
+  </section>
   <section id="overview" class="tab-panel is-active">
     <div id="summary-grid" class="metric-grid"></div>
+    <section class="section">
+      <h2>Experiments</h2>
+      <div id="experiment-table" class="table-wrap"></div>
+    </section>
     <section class="section">
       <h2>Trend</h2>
       <div id="trend-table" class="table-wrap"></div>
@@ -52,7 +63,7 @@
       <h2>Trajectory drill-down</h2>
       <input id="trace-search" type="search" placeholder="Filter by instance, file, or pattern">
     </section>
-    <div id="trace-list" class="trace-list"></div>
+    <div id="trace-inspector" class="trace-inspector"></div>
   </section>
 </main>
 <script src="app.js"></script>

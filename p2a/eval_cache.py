@@ -17,6 +17,15 @@ DONE_STATUS = "done"
 ERROR_STATUS = "error"
 PENDING_STATUS = "pending"
 RUNNING_STATUS = "running"
+CHAIN_BAD_PATTERN_KEYS = (
+    "missed_anchor",
+    "missed_root_after_anchor",
+    "root_before_anchor",
+    "chain_stall",
+    "chain_read_loop",
+    "off_chain_read_spree",
+    "error_spiral_on_chain",
+)
 
 
 def utc_now() -> str:
@@ -537,6 +546,60 @@ def _rate(values: list[int | None]) -> float | None:
     return sum(real) / len(real) if real else None
 
 
+def _detail_from_metric_row(row: sqlite3.Row) -> dict[str, Any]:
+    metrics = json_loads(row["metrics_json"], {})
+    detail = metrics.get("detail") if isinstance(metrics, dict) else None
+    return detail if isinstance(detail, dict) else {}
+
+
+def _detail_number(detail: dict[str, Any], key: str) -> float | None:
+    return _number(detail.get(key))
+
+
+def _detail_bool(detail: dict[str, Any], key: str) -> int | None:
+    return _bool_int(detail.get(key))
+
+
+def _avg_detail(details: list[dict[str, Any]], key: str) -> float | None:
+    return _avg([_detail_number(detail, key) for detail in details])
+
+
+def _rate_detail(details: list[dict[str, Any]], key: str) -> float | None:
+    return _rate([_detail_bool(detail, key) for detail in details])
+
+
+def _sum_detail(details: list[dict[str, Any]], key: str) -> int:
+    total = 0
+    for detail in details:
+        value = detail.get(key)
+        if isinstance(value, bool) or value is None:
+            continue
+        if isinstance(value, int | float):
+            total += int(value)
+    return total
+
+
+def _detail_distribution(details: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for detail in details:
+        value = detail.get(key)
+        if value is not None:
+            counts[str(value)] += 1
+    return dict(sorted(counts.items()))
+
+
+def _chain_bad_distribution(details: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for detail in details:
+        patterns = detail.get("chain_bad_patterns")
+        if not isinstance(patterns, dict):
+            continue
+        for key in CHAIN_BAD_PATTERN_KEYS:
+            if patterns.get(key):
+                counts[key] += 1
+    return dict(sorted(counts.items()))
+
+
 def aggregate_model_metrics(
     conn: sqlite3.Connection,
     *,
@@ -582,7 +645,8 @@ def aggregate_model_metrics(
           q.reasoning_tokens,
           q.cache_hit_tokens,
           q.cache_write_tokens,
-          q.cost
+          q.cost,
+          q.metrics_json
         FROM run_cells c
         LEFT JOIN quantitative_metrics q ON q.cell_id = c.id
         {where_sql}
@@ -611,6 +675,15 @@ def aggregate_model_metrics(
         cache_hit = sum(float(row["cache_hit_tokens"] or 0) for row in metric_rows)
         cache_write = sum(float(row["cache_write_tokens"] or 0) for row in metric_rows)
         input_tokens = sum(float(row["input_tokens"] or 0) for row in metric_rows)
+        details = [_detail_from_metric_row(row) for row in metric_rows]
+        details = [detail for detail in details if detail]
+        chain_details = [detail for detail in details if detail.get("chain_evaluable") is True]
+        order_details = [detail for detail in details if detail.get("order_defined") is True]
+        block_order_details = [detail for detail in details if detail.get("block_order_defined") is True]
+        scored_read_blocks = _sum_detail(details, "n_scored_read_blocks")
+        total_blocks = _sum_detail(details, "n_blocks")
+        block_steps = _sum_detail(details, "n_block_steps")
+        scored_block_steps = _sum_detail(details, "n_scored_read_block_steps")
         out.append(
             {
                 "experiment_id": exp_id,
@@ -629,6 +702,71 @@ def aggregate_model_metrics(
                 "ground_truth_hit_rate": _rate([row["ground_truth_hit"] for row in metric_rows]),
                 "near_hit_rate": _rate([row["near_hit"] for row in metric_rows]),
                 "avg_min_distance": (sum(float(v) for v in distances) / len(distances)) if distances else None,
+                "avg_read_precision": _avg_detail(details, "hit_precision"),
+                "avg_node_recall": _avg_detail(details, "hit_recall"),
+                "avg_hit_f1": _avg_detail(details, "hit_f1"),
+                "chain_graph_coverage": _rate_detail(details, "chain_graph_covered"),
+                "chain_hit_rate": _rate_detail(chain_details, "chain_hit"),
+                "anchor_hit_rate": _rate_detail(chain_details, "anchor_hit"),
+                "root_hit_rate": _rate_detail(chain_details, "root_hit"),
+                "avg_chain_node_recall": _avg_detail(chain_details, "chain_node_recall"),
+                "avg_chain_read_precision": _avg_detail(chain_details, "chain_read_precision"),
+                "avg_first_anchor_step": _avg_detail(chain_details, "first_anchor_step"),
+                "avg_first_root_step": _avg_detail(chain_details, "first_root_step"),
+                "avg_steps_anchor_to_root": _avg_detail(chain_details, "steps_anchor_to_root"),
+                "anchor_before_root_rate": _rate_detail(chain_details, "anchor_before_root"),
+                "avg_order_score": _avg_detail(order_details, "order_score"),
+                "reverse_order_rate": _rate(
+                    [
+                        _bool_int((_detail_number(detail, "order_score") or 0) < 0)
+                        for detail in order_details
+                        if _detail_number(detail, "order_score") is not None
+                    ]
+                ),
+                "miracle_rate": _rate_detail(
+                    [detail for detail in details if detail.get("hit_ground_truth") and detail.get("miracle_step") is not None],
+                    "miracle_step",
+                ),
+                "avg_miracle_severity": _avg_detail(details, "miracle_severity"),
+                "avg_block_order_score": _avg_detail(block_order_details, "block_order_score"),
+                "block_reverse_order_rate": _rate(
+                    [
+                        _bool_int((_detail_number(detail, "block_order_score") or 0) < 0)
+                        for detail in block_order_details
+                        if _detail_number(detail, "block_order_score") is not None
+                    ]
+                ),
+                "block_miracle_rate": _rate_detail(
+                    [
+                        detail
+                        for detail in details
+                        if detail.get("hit_ground_truth") and detail.get("block_miracle_step") is not None
+                    ],
+                    "block_miracle_step",
+                ),
+                "avg_block_efficiency": _avg_detail(details, "block_efficiency"),
+                "avg_blocks_per_trace": (total_blocks / len(details)) if details else None,
+                "block_achieve_rate": (_sum_detail(details, "n_achieving_blocks") / scored_read_blocks)
+                if scored_read_blocks
+                else None,
+                "block_waste_rate": (_sum_detail(details, "n_wasted_blocks") / scored_read_blocks)
+                if scored_read_blocks
+                else None,
+                "block_loop_rate": (_sum_detail(details, "n_loop_blocks") / total_blocks) if total_blocks else None,
+                "achieving_block_step_share": (_sum_detail(details, "n_achieving_block_steps") / scored_block_steps)
+                if scored_block_steps
+                else None,
+                "wasted_block_step_share": (_sum_detail(details, "n_wasted_block_steps") / scored_block_steps)
+                if scored_block_steps
+                else None,
+                "loop_block_step_share": (_sum_detail(details, "n_loop_block_steps") / block_steps) if block_steps else None,
+                "loop_trace_rate": _rate_detail([detail.get("bad_patterns") or {} for detail in details], "has_loop"),
+                "error_spiral_rate": _rate_detail([detail.get("bad_patterns") or {} for detail in details], "error_spiral"),
+                "not_chain_evaluable_reasons": _detail_distribution(
+                    [detail for detail in details if not detail.get("chain_evaluable")],
+                    "not_chain_evaluable_reason",
+                ),
+                "chain_bad_patterns": _chain_bad_distribution(details),
                 "avg_turns": _avg([row["turns"] for row in metric_rows]),
                 "avg_tool_calls": _avg([row["tool_calls"] for row in metric_rows]),
                 "avg_wall_time": _avg([row["wall_time"] for row in metric_rows]),
@@ -637,6 +775,7 @@ def aggregate_model_metrics(
                 "avg_reasoning_tokens": _avg([row["reasoning_tokens"] for row in metric_rows]),
                 "cache_hit_rate": (cache_hit / (input_tokens + cache_hit)) if cache_hit and (input_tokens + cache_hit) else None,
                 "cache_write_rate": (cache_write / (input_tokens + cache_write)) if cache_write and (input_tokens + cache_write) else None,
+                "total_cache_write_tokens": cache_write if cache_write else None,
                 "total_cost": sum(float(row["cost"] or 0) for row in metric_rows) if metric_rows else None,
             }
         )
