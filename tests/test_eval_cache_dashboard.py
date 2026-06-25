@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from p2a.dashboard_adapter import DashboardRequest, _case_filter_model_metrics, build_dashboard_snapshot, read_dashboard_log
+from p2a.dashboard_adapter import DashboardRequest, _case_filter_model_metrics, _normalize_detail, build_dashboard_snapshot, read_dashboard_log
 from p2a import dashboard_server
 from p2a.dashboard_server import write_static_dashboard
 from p2a.eval_cache import aggregate_model_metrics, ensure_db, upsert_experiment, upsert_planned_cells, upsert_rollout_record
@@ -83,20 +83,26 @@ def _detail(instance_id: str, *, case_type: str | None = None):
         "block_order_defined": True,
         "block_miracle_step": False,
         "block_miracle_severity": 0,
+        "path_evaluable": True,
         "chain_evaluable": True,
+        "not_path_evaluable_reason": None,
         "not_chain_evaluable_reason": None,
+        "path_covered": True,
         "chain_graph_covered": True,
+        "path_hit": True,
         "chain_hit": True,
         "anchor_hit": True,
         "root_hit": True,
+        "path_node_recall": 1.0,
         "chain_node_recall": 1.0,
+        "path_read_precision": 1.0,
         "chain_read_precision": 1.0,
         "first_anchor_step": 0,
         "first_root_step": 0,
         "steps_anchor_to_root": 0,
         "anchor_before_root": True,
         "bad_patterns": {"has_loop": False, "error_spiral": False},
-        "chain_bad_patterns": {
+        "path_pattern_flags": {
             "missed_anchor": False,
             "missed_root_after_anchor": False,
             "root_before_anchor": False,
@@ -143,6 +149,36 @@ def _detail(instance_id: str, *, case_type: str | None = None):
         "n_wasted_block_steps": 0,
         "n_loop_block_steps": 0,
         "block_efficiency": 1.0,
+        "path_projection": {
+            "anchors": ["a.py::root"],
+            "roots": ["a.py::root"],
+            "context_nodes": [],
+            "graph_context_nodes": [],
+            "path_nodes": [
+                {
+                    "key": "a.py::root",
+                    "file_path": "a.py",
+                    "start_line": 1,
+                    "end_line": 20,
+                    "normalized_distance": 0.0,
+                    "node_role": "root_cause",
+                    "hit": True,
+                    "first_step": 0,
+                }
+            ],
+            "path_edges": [],
+            "context_edges": [],
+            "graph_context_edges": [],
+        },
+        "chain_bad_patterns": {
+            "missed_anchor": False,
+            "missed_root_after_anchor": False,
+            "root_before_anchor": False,
+            "chain_stall": False,
+            "chain_read_loop": False,
+            "off_chain_read_spree": False,
+            "error_spiral_on_chain": False,
+        },
         "chain_projection": {
             "anchors": ["a.py::root"],
             "roots": ["a.py::root"],
@@ -165,6 +201,7 @@ def _detail(instance_id: str, *, case_type: str | None = None):
     }
     if case_type is not None:
         detail["bonus_case_type"] = case_type
+        detail["path_case_kind"] = case_type
         detail["chain_case_kind"] = case_type
     return detail
 
@@ -194,11 +231,12 @@ def _bonus_map(instance_id: str):
 
 def _standard_order_detail(instance_id: str):
     detail = _detail(instance_id, case_type="standard")
-    detail["chain_projection"] = {
+    path_projection = {
         "anchors": ["a.py::symptom"],
         "roots": ["a.py::root"],
         "context_nodes": [],
-        "chain_nodes": [
+        "graph_context_nodes": [],
+        "path_nodes": [
             {
                 "key": "a.py::symptom",
                 "file_path": "a.py",
@@ -220,10 +258,59 @@ def _standard_order_detail(instance_id: str):
                 "first_step": 1,
             },
         ],
-        "chain_edges": [{"caller": "a.py::symptom", "callee": "a.py::root"}],
+        "path_edges": [{"caller": "a.py::symptom", "callee": "a.py::root"}],
         "context_edges": [],
+        "graph_context_edges": [],
+    }
+    detail["path_projection"] = path_projection
+    detail["chain_projection"] = {
+        "anchors": path_projection["anchors"],
+        "roots": path_projection["roots"],
+        "context_nodes": path_projection["context_nodes"],
+        "chain_nodes": path_projection["path_nodes"],
+        "chain_edges": [{"caller": "a.py::symptom", "callee": "a.py::root"}],
+        "context_edges": path_projection["context_edges"],
     }
     return detail
+
+
+def test_normalize_detail_mirrors_path_fields_over_legacy_defaults():
+    detail = {
+        "instance_id": "case-path-only",
+        "path_evaluable": True,
+        "not_path_evaluable_reason": None,
+        "path_case_kind": "direct",
+        "path_covered": True,
+        "path_hit": True,
+        "path_node_recall": 1.0,
+        "path_read_precision": 1.0,
+        "n_path_nodes": 1,
+        "n_hit_path_nodes": 1,
+        "path_pattern_flags": {"missed_anchor": False, "path_read_loop": True},
+        "path_projection": {
+            "anchors": ["a.py::root"],
+            "roots": ["a.py::root"],
+            "path_nodes": [{"key": "a.py::root", "hit": True}],
+            "path_edges": [],
+            "context_nodes": [],
+            "context_edges": [],
+        },
+    }
+
+    normalized = _normalize_detail(detail)
+
+    assert normalized["chain_evaluable"] is True
+    assert normalized["not_chain_evaluable_reason"] is None
+    assert normalized["chain_case_kind"] == "direct"
+    assert normalized["chain_graph_covered"] is True
+    assert normalized["chain_hit"] is True
+    assert normalized["chain_node_recall"] == 1.0
+    assert normalized["chain_read_precision"] == 1.0
+    assert normalized["n_chain_nodes"] == 1
+    assert normalized["n_hit_chain_nodes"] == 1
+    assert normalized["chain_projection"] == normalized["path_projection"]
+    assert normalized["chain_projection"]["chain_nodes"] == [{"key": "a.py::root", "hit": True}]
+    assert normalized["chain_bad_patterns"]["chain_read_loop"] is True
 
 
 def test_eval_cache_upserts_cells_without_duplicates(tmp_path):
@@ -328,6 +415,7 @@ def test_unified_dashboard_snapshot_includes_db_model_metrics(tmp_path):
     assert rows[0]["p2a_read_rate"] is None
     assert rows[0]["avg_read_precision"] is None
     assert rows[0]["avg_node_recall"] is None
+    assert rows[0]["avg_path_node_precision"] is None
     assert rows[0]["avg_chain_node_precision"] is None
     assert rows[0]["avg_hit_f1"] is None
     assert rows[0]["anchor_hit_rate"] is None
@@ -344,8 +432,14 @@ def test_unified_dashboard_snapshot_includes_db_model_metrics(tmp_path):
     assert snapshot["model_metrics"][0]["model_label"] == "dummy"
     assert snapshot["model_metrics"][0]["target"] == 2
     assert snapshot["model_metrics"][0]["avg_read_precision"] == 1.0
+    assert snapshot["model_metrics"][0]["avg_path_node_precision"] == 1.0
     assert snapshot["model_metrics"][0]["avg_chain_node_precision"] == 1.0
+    assert snapshot["path_metric_detail_count"] == 1
     assert snapshot["dynamic_traceable_detail_count"] == 1
+    assert snapshot["path_metric_model_metrics"][0]["model_label"] == "dummy"
+    assert snapshot["path_metric_model_metrics"][0]["target"] == 1
+    assert snapshot["path_metric_model_metrics"][0]["avg_tool_calls"] == 1.0
+    assert snapshot["path_metric_model_metrics"][0]["cache_hit_rate"] == 50 / 150
     assert snapshot["dynamic_traceable_model_metrics"][0]["model_label"] == "dummy"
     assert snapshot["dynamic_traceable_model_metrics"][0]["target"] == 1
     assert snapshot["dynamic_traceable_model_metrics"][0]["avg_tool_calls"] == 1.0
@@ -450,7 +544,9 @@ def test_model_metrics_ignore_other_case_bonus_map_fields(tmp_path):
         )
         other = _standard_order_detail("case-2")
         other["bonus_case_type"] = "missing_bonus_map"
+        other["path_case_kind"] = "missing_bonus_map"
         other["chain_case_kind"] = "missing_bonus_map"
+        other["path_evaluable"] = False
         other["chain_evaluable"] = False
         other["hit_precision"] = 0.0
         other["hit_recall"] = 0.0
@@ -483,7 +579,9 @@ def test_model_metrics_ignore_other_case_bonus_map_fields(tmp_path):
 
 def test_case_filter_metrics_bucket_non_evaluable_standard_as_others():
     detail = _standard_order_detail("case-1")
+    detail["path_evaluable"] = False
     detail["chain_evaluable"] = False
+    detail["not_path_evaluable_reason"] = "missing_anchor"
     detail["not_chain_evaluable_reason"] = "missing_anchor"
 
     rows = _case_filter_model_metrics([detail])
@@ -491,6 +589,7 @@ def test_case_filter_metrics_bucket_non_evaluable_standard_as_others():
     assert rows["standard"] == []
     assert rows["direct,standard"] == []
     assert rows["others"][0]["target"] == 1
+    assert rows["others"][0]["not_path_evaluable_reasons"] == {"missing_anchor": 1}
     assert rows["others"][0]["not_chain_evaluable_reasons"] == {"missing_anchor": 1}
 
 
@@ -567,6 +666,7 @@ def test_dashboard_does_not_reinfer_miracle_from_stored_first_hit_steps(tmp_path
     assert snapshot["details"][0]["miracle_step"] is False
     assert snapshot["details"][0]["block_miracle_step"] is False
     assert snapshot["model_metrics"][0]["miracle_rate"] == 0.0
+    assert snapshot["path_metric_model_metrics"][0]["miracle_rate"] == 0.0
     assert snapshot["dynamic_traceable_model_metrics"][0]["miracle_rate"] == 0.0
 
 
@@ -577,6 +677,8 @@ def test_dashboard_infers_default_bonus_map_dir_and_rescores_db_raw_rollouts(tmp
     bonus_dir.mkdir(parents=True)
     (bonus_dir / "case-1.json").write_text(json.dumps(_bonus_map("case-1")), encoding="utf-8")
     stale_detail = _detail("case-1", case_type="direct")
+    stale_detail["path_projection"]["path_nodes"][0].pop("source", None)
+    stale_detail["path_projection"]["path_nodes"][0]["source_preview"] = "truncated\n..."
     stale_detail["chain_projection"]["chain_nodes"][0].pop("source", None)
     stale_detail["chain_projection"]["chain_nodes"][0]["source_preview"] = "truncated\n..."
 
@@ -612,7 +714,7 @@ def test_dashboard_infers_default_bonus_map_dir_and_rescores_db_raw_rollouts(tmp
     snapshot = build_dashboard_snapshot(DashboardRequest(db_path=db, dataset="swebench-hard"))
 
     assert {"kind": "bonus_map_dir", "path": str(bonus_dir), "dataset": "swebench-hard", "mode": "inferred"} in snapshot["sources"]
-    root = snapshot["details"][0]["chain_projection"]["chain_nodes"][0]
+    root = snapshot["details"][0]["path_projection"]["path_nodes"][0]
     assert root["source"] == "def root():\n    return 1"
     assert not root["source"].endswith("...")
 
@@ -622,6 +724,8 @@ def test_dashboard_reads_node_source_from_bonus_map_for_stored_details(tmp_path)
     bonus_dir.mkdir()
     (bonus_dir / "case-1.json").write_text(json.dumps(_bonus_map("case-1")), encoding="utf-8")
     stale_detail = _detail("case-1", case_type="direct")
+    stale_detail["path_projection"]["path_nodes"][0].pop("source", None)
+    stale_detail["path_projection"]["path_nodes"][0]["source_preview"] = "truncated\n..."
     stale_detail["chain_projection"]["chain_nodes"][0].pop("source", None)
     stale_detail["chain_projection"]["chain_nodes"][0]["source_preview"] = "truncated\n..."
     details_file = tmp_path / "details.jsonl"
@@ -629,7 +733,7 @@ def test_dashboard_reads_node_source_from_bonus_map_for_stored_details(tmp_path)
 
     snapshot = build_dashboard_snapshot(DashboardRequest(details=(details_file,), bonus_map_dir=bonus_dir))
 
-    root = snapshot["details"][0]["chain_projection"]["chain_nodes"][0]
+    root = snapshot["details"][0]["path_projection"]["path_nodes"][0]
     assert root["source"] == "def root():\n    return 1"
     assert root["source_preview"] == "def root():\n    return 1"
 
@@ -640,6 +744,8 @@ def test_dashboard_node_source_uses_bonus_map_candidate_filenames(tmp_path):
     instance_id = "repo__1234567890"
     (bonus_dir / "repo__12345678.json").write_text(json.dumps(_bonus_map(instance_id)), encoding="utf-8")
     stale_detail = _detail(instance_id, case_type="direct")
+    stale_detail["path_projection"]["path_nodes"][0].pop("source", None)
+    stale_detail["path_projection"]["path_nodes"][0]["source_preview"] = "truncated\n..."
     stale_detail["chain_projection"]["chain_nodes"][0].pop("source", None)
     stale_detail["chain_projection"]["chain_nodes"][0]["source_preview"] = "truncated\n..."
     details_file = tmp_path / "details.jsonl"
@@ -647,7 +753,7 @@ def test_dashboard_node_source_uses_bonus_map_candidate_filenames(tmp_path):
 
     snapshot = build_dashboard_snapshot(DashboardRequest(details=(details_file,), bonus_map_dir=bonus_dir))
 
-    root = snapshot["details"][0]["chain_projection"]["chain_nodes"][0]
+    root = snapshot["details"][0]["path_projection"]["path_nodes"][0]
     assert root["source"] == "def root():\n    return 1"
     assert root["source_preview"] == "def root():\n    return 1"
 

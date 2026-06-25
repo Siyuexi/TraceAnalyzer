@@ -11,7 +11,7 @@ class FakeBatch:
         self.non_tensor_batch = non_tensor_batch
 
 
-def _schema_v5_bonus_map(instance_id="demo__chain"):
+def _schema_v5_bonus_map(instance_id="demo__path"):
     return {
         "instance_id": instance_id,
         "case_type": "standard",
@@ -89,10 +89,10 @@ def _schema_v5_bonus_map(instance_id="demo__chain"):
     }
 
 
-def test_validation_metrics_use_schema_v5_chain_projection(tmp_path):
+def test_validation_metrics_use_schema_v5_path_projection(tmp_path):
     bonus_dir = tmp_path / "bonus_maps"
     bonus_dir.mkdir()
-    (bonus_dir / "demo__chain.json").write_text(json.dumps(_schema_v5_bonus_map()), encoding="utf-8")
+    (bonus_dir / "demo__path.json").write_text(json.dumps(_schema_v5_bonus_map()), encoding="utf-8")
 
     batch = FakeBatch(
         {
@@ -101,7 +101,7 @@ def test_validation_metrics_use_schema_v5_chain_projection(tmp_path):
             "extra_fields": np.array(
                 [
                     {
-                        "instance_id": "demo__chain",
+                        "instance_id": "demo__path",
                         "p2a_step_traces": [
                             {
                                 "tool_calls": [
@@ -163,25 +163,31 @@ def test_validation_metrics_use_schema_v5_chain_projection(tmp_path):
     )
 
     detail = details[0]
+    assert detail["path_evaluable"] is True
     assert detail["chain_evaluable"] is True
+    assert detail["path_covered"] is True
     assert detail["chain_graph_covered"] is True
     assert detail["anchor_hit"] is True
     assert detail["root_hit"] is True
+    assert detail["path_hit"] is True
     assert detail["chain_hit"] is True
+    assert detail["path_node_recall"] == 2 / 3
+    assert detail["path_read_precision"] == 2 / 3
     assert detail["chain_node_recall"] == 2 / 3
     assert detail["chain_read_precision"] == 2 / 3
     assert detail["first_anchor_step"] == 1
     assert detail["first_root_step"] == 2
     assert detail["steps_anchor_to_root"] == 1
     assert detail["anchor_before_root"] is True
+    assert detail["path_pattern_flags"]["missed_anchor"] is False
     assert detail["chain_bad_patterns"]["missed_anchor"] is False
-    assert detail["chain_projection"]["chain_edges"] == [
+    assert detail["path_projection"]["path_edges"] == [
         {
             "caller": "app/views.py::symptom",
             "callee": "app/service.py::intermediate",
             "source": "app/views.py::symptom",
             "target": "app/service.py::intermediate",
-            "edge_type": "chain",
+            "edge_type": "path",
             "caller_role": "symptom",
             "callee_role": "intermediate",
             "role_transition": "symptom->intermediate",
@@ -191,23 +197,27 @@ def test_validation_metrics_use_schema_v5_chain_projection(tmp_path):
             "callee": "app/root.py::patched_root",
             "source": "app/service.py::intermediate",
             "target": "app/root.py::patched_root",
-            "edge_type": "chain",
+            "edge_type": "path",
             "caller_role": "intermediate",
             "callee_role": "root_cause",
             "role_transition": "intermediate->root_cause",
         },
     ]
-    context_by_key = {node["key"]: node for node in detail["chain_projection"]["context_nodes"]}
+    context_by_key = {node["key"]: node for node in detail["path_projection"]["context_nodes"]}
     assert context_by_key["tests/test_issue.py::test_issue"]["hit"] is True
     assert context_by_key["tests/test_issue.py::test_issue"]["normalized_distance"] == 1.0
     assert "source_preview" not in context_by_key["tests/test_issue.py::test_issue"]
-    chain_by_key = {node["key"]: node for node in detail["chain_projection"]["chain_nodes"]}
-    assert chain_by_key["app/views.py::symptom"]["normalized_distance"] == 1.0
-    assert chain_by_key["app/root.py::patched_root"]["normalized_distance"] == 0.0
+    path_by_key = {node["key"]: node for node in detail["path_projection"]["path_nodes"]}
+    assert path_by_key["app/views.py::symptom"]["normalized_distance"] == 1.0
+    assert path_by_key["app/root.py::patched_root"]["normalized_distance"] == 0.0
+    assert metrics["val-p2a/unit/path_coverage"] == 1.0
     assert metrics["val-p2a/unit/chain_graph_coverage"] == 1.0
     assert metrics["val-p2a/unit/anchor_hit_rate"] == 1.0
     assert metrics["val-p2a/unit/root_hit_rate"] == 1.0
+    assert metrics["val-p2a/unit/path_hit_rate"] == 1.0
     assert metrics["val-p2a/unit/chain_hit_rate"] == 1.0
+    assert metrics["val-p2a/unit/path_node_recall"] == 2 / 3
+    assert metrics["val-p2a/unit/path_read_precision"] == 2 / 3
     assert metrics["val-p2a/unit/chain_node_recall"] == 2 / 3
     assert metrics["val-p2a/unit/chain_read_precision"] == 2 / 3
     assert metrics["val-p2a/unit/time_to_anchor"] == 1.0
@@ -215,7 +225,7 @@ def test_validation_metrics_use_schema_v5_chain_projection(tmp_path):
     assert metrics["val-p2a/unit/steps_anchor_to_root"] == 1.0
 
 
-def test_chain_evaluability_reports_missing_anchor_reason(tmp_path):
+def test_path_evaluability_reports_missing_anchor_reason(tmp_path):
     bonus_dir = tmp_path / "bonus_maps"
     bonus_dir.mkdir()
     bonus_map = _schema_v5_bonus_map("demo__no_anchor")
@@ -240,17 +250,61 @@ def test_chain_evaluability_reports_missing_anchor_reason(tmp_path):
         m_max=3.0,
     )
 
+    assert details[0]["path_evaluable"] is False
     assert details[0]["chain_evaluable"] is False
+    assert details[0]["not_path_evaluable_reason"] == "traceable_no_anchor"
     assert details[0]["not_chain_evaluable_reason"] == "traceable_no_anchor"
 
 
-def test_chain_metrics_fall_back_to_top_level_reads_when_step_traces_are_empty(tmp_path):
+def test_path_pattern_rates_do_not_double_count_shared_legacy_flags(tmp_path):
     bonus_dir = tmp_path / "bonus_maps"
     bonus_dir.mkdir()
-    (bonus_dir / "demo__chain.json").write_text(json.dumps(_schema_v5_bonus_map()), encoding="utf-8")
+    (bonus_dir / "demo__path.json").write_text(json.dumps(_schema_v5_bonus_map()), encoding="utf-8")
+
     records = [
         {
-            "instance_id": "demo__chain",
+            "instance_id": "demo__path",
+            "data_source": "unit",
+            "p2a_step_traces": [
+                {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "str_replace_editor",
+                                "arguments": {
+                                    "command": "view",
+                                    "path": "/testbed/app/root.py",
+                                    "view_range": [40, 50],
+                                },
+                            }
+                        }
+                    ]
+                }
+            ],
+        }
+    ]
+
+    metrics, details = compute_validation_p2a_metrics(
+        records,
+        bonus_map_dir=str(bonus_dir),
+        tracking_mode="view_and_bash",
+        near_threshold=0.5,
+        m_max=3.0,
+    )
+
+    assert details[0]["path_evaluable"] is True
+    assert details[0]["path_pattern_flags"]["missed_anchor"] is True
+    assert details[0]["chain_bad_patterns"]["missed_anchor"] is True
+    assert metrics["val-p2a/unit/missed_anchor_rate"] == 1.0
+
+
+def test_path_metrics_fall_back_to_top_level_reads_when_step_traces_are_empty(tmp_path):
+    bonus_dir = tmp_path / "bonus_maps"
+    bonus_dir.mkdir()
+    (bonus_dir / "demo__path.json").write_text(json.dumps(_schema_v5_bonus_map()), encoding="utf-8")
+    records = [
+        {
+            "instance_id": "demo__path",
             "data_source": "unit",
             "p2a_step_traces": [{"step_idx": 0, "tool_calls": [], "response_text": "planning only"}],
             "response_text": "cat /testbed/app/views.py\ncat /testbed/app/root.py",
@@ -267,16 +321,22 @@ def test_chain_metrics_fall_back_to_top_level_reads_when_step_traces_are_empty(t
 
     detail = details[0]
     assert detail["hit_call_graph"] is True
+    assert detail["path_evaluable"] is True
     assert detail["chain_evaluable"] is True
     assert detail["anchor_hit"] is True
     assert detail["root_hit"] is True
+    assert detail["path_hit"] is True
     assert detail["chain_hit"] is True
+    assert detail["path_node_recall"] == 2 / 3
+    assert detail["path_read_precision"] == 1.0
     assert detail["chain_node_recall"] == 2 / 3
     assert detail["chain_read_precision"] == 1.0
     assert detail["first_anchor_step"] == 0
     assert detail["first_root_step"] == 0
     assert detail["steps_anchor_to_root"] == 0
+    assert metrics["val-p2a/unit/path_hit_rate"] == 1.0
     assert metrics["val-p2a/unit/chain_hit_rate"] == 1.0
+    assert metrics["val-p2a/unit/path_node_recall"] == 2 / 3
     assert metrics["val-p2a/unit/chain_node_recall"] == 2 / 3
 
 
@@ -570,13 +630,13 @@ def test_root_hit_without_prior_symptom_is_miracle_even_with_same_step_intermedi
     assert root_node["source_preview"].endswith("...")
 
 
-def test_same_step_full_chain_hit_is_not_miracle(tmp_path):
+def test_same_step_full_path_hit_is_not_miracle(tmp_path):
     bonus_dir = tmp_path / "bonus_maps"
     bonus_dir.mkdir()
-    (bonus_dir / "demo__same_step_chain.json").write_text(
+    (bonus_dir / "demo__same_step_path.json").write_text(
         json.dumps(
             {
-                "instance_id": "demo__same_step_chain",
+                "instance_id": "demo__same_step_path",
                 "case_type": "standard",
                 "traceable": True,
                 "selected_issue_anchor_nodes": ["pkg/demo.py::symptom"],
@@ -614,7 +674,7 @@ def test_same_step_full_chain_hit_is_not_miracle(tmp_path):
     )
     records = [
         {
-            "instance_id": "demo__same_step_chain",
+            "instance_id": "demo__same_step_path",
             "data_source": "unit",
             "p2a_step_traces": [
                 {
@@ -708,9 +768,10 @@ def test_direct_symptom_root_node_is_not_order_or_miracle_candidate(tmp_path):
         m_max=3.0,
     )
 
+    assert details[0]["path_evaluable"] is True
     assert details[0]["chain_evaluable"] is True
-    assert details[0]["chain_projection"]["anchors"] == ["pkg/demo.py::target"]
-    assert details[0]["chain_projection"]["roots"] == ["pkg/demo.py::target"]
+    assert details[0]["path_projection"]["anchors"] == ["pkg/demo.py::target"]
+    assert details[0]["path_projection"]["roots"] == ["pkg/demo.py::target"]
     assert details[0]["order_defined"] is False
     assert details[0]["order_score"] is None
     assert details[0]["miracle_step"] is None

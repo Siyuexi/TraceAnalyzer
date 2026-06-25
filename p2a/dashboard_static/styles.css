@@ -378,7 +378,7 @@ tr.is-selected td {
   border-color: #64748b;
   color: #111827;
 }
-.legend-step.chain { background: #dbeafe; border-color: #93c5fd; color: #1e3a8a; }
+.legend-step.path { background: #dbeafe; border-color: #93c5fd; color: #1e3a8a; }
 .legend-step.offmap { background: #fef3c7; border-color: #fcd34d; color: #78350f; }
 .legend-step.neutral { background: #f8fafc; color: #475467; }
 .legend-step.exec-other { background: #f8fafc; border-color: var(--line); color: #475467; }
@@ -438,9 +438,9 @@ tr.is-selected td {
 .metric-group-filter label.metric-group-outcome {
   background: #ecfdf5;
 }
-.kpi-table th.metric-group-dependency-path,
-.kpi-table td.metric-group-dependency-path,
-.metric-group-filter label.metric-group-dependency-path {
+.kpi-table th.metric-group-path,
+.kpi-table td.metric-group-path,
+.metric-group-filter label.metric-group-path {
   background: #fefce8;
 }
 .kpi-table th.metric-group-exploration-behavior,
@@ -833,7 +833,7 @@ pre.log {
   stroke: #98a2b3;
   stroke-width: 1.7;
 }
-.graph-edge.chain {
+.graph-edge.path {
   stroke: #2563eb;
   stroke-width: 2;
 }
@@ -841,19 +841,19 @@ pre.log {
   stroke: #667085;
   stroke-dasharray: 6 4;
 }
-.graph-edge.agent {
+.graph-edge.trace {
   stroke: #c2410c;
   stroke-width: 2.4;
   stroke-dasharray: 4 4;
   opacity: .95;
 }
-#graph-arrow-chain path {
+#graph-arrow-path path {
   fill: #2563eb;
 }
 #graph-arrow-context path {
   fill: #667085;
 }
-#graph-arrow-agent path {
+#graph-arrow-trace path {
   fill: #c2410c;
 }
 .graph-node circle {
@@ -868,7 +868,7 @@ pre.log {
 .graph-node.pre circle { fill: #fef3c7; stroke: #d97706; }
 .graph-node.root circle { fill: #fee2e2; stroke: #b42318; }
 .graph-node.symptom circle { fill: #dcfce7; stroke: #15803d; }
-.graph-node.chain circle { fill: #dbeafe; stroke: #2563eb; }
+.graph-node.path circle { fill: #dbeafe; stroke: #2563eb; }
 .graph-node.context circle { fill: #f2f4f7; stroke: #667085; }
 .graph-node.symptom-root-cause circle {
   fill: url(#graph-symptom-root-cause-fill);
@@ -895,7 +895,7 @@ pre.log {
 .graph-node.is-selected circle.graph-edit-ring,
 .graph-node.root circle.graph-edit-ring,
 .graph-node.symptom circle.graph-edit-ring,
-.graph-node.chain circle.graph-edit-ring,
+.graph-node.path circle.graph-edit-ring,
 .graph-node.context circle.graph-edit-ring,
 .graph-node.symptom-root-cause circle.graph-edit-ring {
   fill: none;
@@ -927,7 +927,7 @@ pre.log {
   font-weight: 800;
   fill: #fff7ed;
 }
-.graph-agent-label {
+.graph-trace-label {
   paint-order: stroke;
   stroke: #fff7ed;
   stroke-width: 4px;
@@ -1079,7 +1079,7 @@ pre.log {
   background: var(--step-bg);
   border-color: #64748b;
 }
-.step-thumb.chain { background: #dbeafe; border-color: #93c5fd; }
+.step-thumb.path { background: #dbeafe; border-color: #93c5fd; }
 .step-thumb.offmap { background: #fef3c7; border-color: #fcd34d; }
 .step-thumb.bad { background: #ffe4e6; border-color: #fb7185; }
 .step-thumb.neutral { background: #f8fafc; }
@@ -1173,7 +1173,7 @@ pre.log {
   border-left-color: #ef4444;
   background: #fff1f2;
 }
-.node-hit-group.chain {
+.node-hit-group.path {
   border-left-color: #3b82f6;
   background: #eff6ff;
 }
@@ -1195,7 +1195,7 @@ pre.log {
 }
 .node-hit-group.symptom .node-hit-swatch { background: #22c55e; }
 .node-hit-group.root .node-hit-swatch { background: #ef4444; }
-.node-hit-group.chain .node-hit-swatch { background: #3b82f6; }
+.node-hit-group.path .node-hit-swatch { background: #3b82f6; }
 .node-hit-list {
   display: grid;
   gap: 5px;

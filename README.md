@@ -3,10 +3,10 @@
 Program-Analysis-based Process Advantage (P2A) for SWE agentic RL, implemented on
 the **Uni-Agent** training stack with our **ARL** cluster as the sandbox backend.
 P2A reshapes the per-step RL advantage using a precomputed **bonus map**: a
-runtime fault-propagation graph from the issue symptom to the terminal patched
-root cause, with a test-filtered F2P→root-cause fallback when no issue symptom
-anchor can be matched. Steps whose agent actions land on this path get a larger
-advantage.
+captured **Graph** from failing-test execution plus a rewardable **Path** from
+the issue symptom to the terminal patched root cause, with a test-filtered
+F2P→root-cause fallback when no issue symptom anchor can be matched. Steps whose
+agent actions land on this Path get a larger advantage.
 
 Everything is **self-contained**: data comes from HuggingFace, images from the
 pair-diag mirror of the original R2E images. There is **no dependency on the old
@@ -14,12 +14,12 @@ pair-diag mirror of the original R2E images. There is **no dependency on the old
 
 ## Bonus-map anchors
 
-Dynamic bonus maps keep observed call-graph nodes for diagnostics, but only the
-bonus path is rewardable. Target semantics are:
+Dynamic bonus maps keep observed Graph nodes for diagnostics, but only the
+Path is rewardable. Target semantics are:
 `test_harness -> pre_symptom -> symptom -> intermediate -> root_cause`.
 `test_harness` and `pre_symptom` are excluded from `hop_max` and read matching;
 `symptom`, `intermediate`, and `root_cause` are rewardable. If no high-confidence
-issue symptom anchor matches the trace, the fallback excludes only test harness
+issue symptom anchor matches the captured Graph, the fallback excludes only test harness
 frames and treats all remaining F2P→terminal-root frames as rewardable.
 
 > **ARL is the sandbox, not a "remote".** The `arl-env` SDK connects directly to the
@@ -81,14 +81,14 @@ src/
     check_deps_cpu.sh         # CPU dependency/import smoke check
     check_uni_agent_runtime.py # GPU/runtime import smoke check
   p2a/
-    core.py                   # bonus-map load + read->callgraph match + m(d)=m_max^(1-d) multiplier
+    core.py                   # bonus-map load + read->Graph match + m(d)=m_max^(1-d) multiplier
     trainer.py                # apply_p2a_reshape: capture agent reads -> reshape advantage
     main.py                   # training entry; P2AFullyAsyncTrainer (vanilla if P2A_BONUS_MAP_DIR unset)
     rollouter.py              # validation rollouter wrapper for live graph diagnostics
     validation_metrics.py     # aggregate val-p2a/* localization metrics
     third_party_eval.py       # OpenAI-compatible external model rollout harness
     test_setup.py             # startup_fixup_command(repo) — loads config/startup_fixups.json
-    trace.py                  # instrumentation + call-graph build (bonus-map precompute)
+    trace.py                  # Graph-capture instrumentation + legacy call_graph artifact build
     eval_fault_localization.py # offline eval rollout read->fault-localization metrics
     hf_assets.py              # shared HuggingFace model/dataset path helpers
     runtime_env.py            # Ray runtime-env path normalization helpers
@@ -203,10 +203,10 @@ bash scripts/setup.sh maps r2e-gym-subset
 
 Set `P2A_BONUS_MAP_DIR` to the matching directory when enabling P2A training.
 
-Each generated map includes `call_graph_nodes`, `call_graph_edges`, and a
-per-node `source` snippet when the sandbox file can be read. The edge list is
-diagnostic schema for topology views; training still reshapes from node
-distances.
+Each generated map includes Graph nodes and edges under the legacy artifact keys
+`call_graph_nodes` and `call_graph_edges`, plus a per-node `source` snippet when
+the sandbox file can be read. The edge list is diagnostic schema for topology
+views; training still reshapes from node distances.
 
 Skip this step for a pure baseline run. P2A training reads these maps through
 `P2A_BONUS_MAP_DIR`.
@@ -354,7 +354,7 @@ TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet \
 
 `P2A_CREDIT_GRANULARITY=step` is the default and preserves per-step reshape
 behavior. Set `P2A_CREDIT_GRANULARITY=block` to group adjacent same-purpose
-steps and apply credit to read blocks that touch the call graph.
+steps and apply credit to read blocks that touch the Graph.
 
 ### Step 8. Optional offline analysis
 
@@ -444,7 +444,7 @@ timeline in the middle, and a wide right panel with parsed tool/action details,
 separate reasoning/chat text, collapsible raw action/observation payloads, and
 inline edit diffs when write actions provide old/new text. Step colors and trace
 markers come from P2A parser/scorer fields: reads, writes, execution errors,
-root-cause edits, symptom/root-cause hits, and dependency-path hits are computed
+root-cause edits, symptom/root-cause hits, and Path hits are computed
 in `p2a/core.py`, `p2a/eval_fault_localization.py`, and
 `p2a/dashboard_adapter.py`, then rendered by the frontend. Execution-failure
 marks use structured tool status, nonzero exit codes, explicit error fields, or
@@ -471,7 +471,7 @@ validation scoring uses `P2A_EVAL_BONUS_MAP_DIR`, and the HTML dashboard reads
 
 For a main-style smoke/default run, set the API key and run the wrapper. It
 defaults to `swebench-hard`, builds the parquet if missing, precomputes matching
-dependency/call-graph maps, and writes rollout + fault-localization artifacts
+Graph/Path bonus maps, and writes rollout + fault-localization artifacts
 under `data/third_party/<dataset>/<model>/`:
 
 ```bash
@@ -514,7 +514,7 @@ The Metrics tab keeps per-model progress and efficiency/cost/cache visibility,
 but the primary diagnostic metrics are the shared Python scorer outputs:
 graph P./R./F1, path P./R./F1,
 anchor/root hit rates, order/reverse-order,
-miracle, purpose-block achieved/wasted/loop rates, and chain bad-pattern flags.
+miracle, purpose-block achieved/wasted/loop rates, and Path pattern flags.
 
 If the smoke phase records only system errors such as ARL gateway or interactive
 shell failures, batch mode stops before the full phase and reports the structured
@@ -595,18 +595,19 @@ the training split and `P2A_EVAL_BONUS_MAP_DIR` at the validation split.
 | Metric | Meaning |
 |---|---|
 | `bonus_map_coverage` | Fraction of rollout rows with a matching eval bonus map. |
-| `call_graph_coverage` | Fraction with a bonus map that contains call-graph nodes. |
+| `call_graph_coverage` | Fraction with a bonus map that contains Graph nodes; the metric name is a legacy storage/API key. |
 | `read_rate` | Fraction of rows where file-viewing actions were recovered. |
-| `graph_hit_rate_over_call_graphs` | Fraction whose reads hit any node in the eval call graph. |
+| `graph_hit_rate_over_call_graphs` | Fraction whose reads hit any node in the eval Graph; the suffix is legacy naming. |
 | `ground_truth_hit_rate_over_call_graphs` | Fraction whose reads hit a patched callable (`distance == 0`). |
 | `near_hit_rate_over_call_graphs` | Fraction whose best read distance is `<= --near-threshold` (default `0.5`). |
 | `avg_read_precision` / `avg_node_recall` / `avg_hit_f1` | Graph P., Graph R., and Graph F1 across scored rollouts. |
-| `avg_chain_node_precision` / `chain_node_recall` / `avg_chain_node_f1` | Path P., Path R., and Path F1 over deduplicated path/context node hits. The raw `chain_read_precision` field remains a read-level compatibility metric, but the dashboard does not expose it as Path P. |
+| `avg_path_node_precision` / `avg_path_node_recall` / `avg_path_node_f1` | Dashboard Path P., Path R., and Path F1 over deduplicated Path/context node hits; legacy `avg_chain_*` aliases are kept for old artifacts. |
+| `path_node_recall` / `path_read_precision` | CLI summary aliases for Path node recall and read-level Path hit share; legacy `chain_*` aliases are kept for old artifacts. |
 | `avg_order_score` / `reverse_order_rate` | Kendall-style agreement between read order and movement from tests toward patched callables. |
 | `miracle_rate_over_gt_hits` | Fraction of ground-truth hits that jump directly to patched code before reading intermediate graph levels. |
 | `avg_block_order_score` / `block_miracle_rate_over_gt_hits` | Same order and miracle diagnostics after purpose-block segmentation. |
 | `block_achieve_rate` / `block_waste_rate` / `block_loop_rate` | Purpose-block outcomes, including repeated same-action loop blocks. |
-| `avg_block_efficiency_steps` | Average steps to first call-graph hit inside achieving read blocks. |
+| `avg_block_efficiency_steps` | Average steps to first Graph hit inside achieving read blocks. |
 | `achieving_block_step_share` / `wasted_block_step_share` / `loop_block_step_share` | Share of block-covered steps spent in each block outcome. |
 | `bad_pattern_trace_rate` / `error_spiral_rate` | Trace-level loop and repeated-error flags. Step-level execution errors are parsed from tool results, command status, and traceback/error text. |
 | `avg_min_distance_on_hits` | Lower is better; `0` means the model read the edited callable. |

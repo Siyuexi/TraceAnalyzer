@@ -18,8 +18,8 @@ from typing import Any, Iterable
 from p2a.core import (
     BonusMapStore,
     compute_p2a_multiplier,
-    is_rewardable_call_graph_node,
-    match_reads_to_callgraph,
+    is_rewardable_graph_node,
+    match_reads_to_graph,
     normalize_action,
     parse_read_actions,
     parse_read_actions_from_tool_calls,
@@ -46,10 +46,22 @@ EXECUTION_ERROR_TEXT_PATTERN = re.compile(
     r"\b(exit status|exit code|returned non-zero|command not found|segmentation fault)\b",
     re.IGNORECASE,
 )
-CHAIN_CASE_TYPES = {"standard", "direct"}
-CHAIN_NODE_ROLES = {"symptom", "intermediate", "root_cause"}
-CHAIN_CONTEXT_ROLES = {"test_harness", "pre_symptom"}
-CHAIN_BAD_PATTERN_KEYS = (
+# Persisted eval artifacts historically used `chain_*` keys for what the
+# dashboard now calls Path. New code should prefer the `path_*` aliases; the
+# legacy keys remain readable/writable for old DB rows and detail JSON files.
+PATH_CASE_TYPES = {"standard", "direct"}
+PATH_NODE_ROLES = {"symptom", "intermediate", "root_cause"}
+PATH_CONTEXT_ROLES = {"test_harness", "pre_symptom"}
+PATH_PATTERN_KEYS = (
+    "missed_anchor",
+    "missed_root_after_anchor",
+    "root_before_anchor",
+    "path_stall",
+    "path_read_loop",
+    "off_path_read_spree",
+    "error_spiral_on_path",
+)
+LEGACY_PATH_PATTERN_KEYS = (
     "missed_anchor",
     "missed_root_after_anchor",
     "root_before_anchor",
@@ -58,6 +70,43 @@ CHAIN_BAD_PATTERN_KEYS = (
     "off_chain_read_spree",
     "error_spiral_on_chain",
 )
+CHAIN_CASE_TYPES = PATH_CASE_TYPES
+CHAIN_NODE_ROLES = PATH_NODE_ROLES
+CHAIN_CONTEXT_ROLES = PATH_CONTEXT_ROLES
+CHAIN_BAD_PATTERN_KEYS = LEGACY_PATH_PATTERN_KEYS
+LEGACY_PATH_PATTERN_ALIASES = {
+    "chain_stall": "path_stall",
+    "chain_read_loop": "path_read_loop",
+    "off_chain_read_spree": "off_path_read_spree",
+    "error_spiral_on_chain": "error_spiral_on_path",
+}
+
+PATH_DETAIL_ALIASES = {
+    "chain_evaluable": "path_evaluable",
+    "not_chain_evaluable_reason": "not_path_evaluable_reason",
+    "chain_case_kind": "path_case_kind",
+    "chain_graph_covered": "path_covered",
+    "chain_projection": "path_projection",
+    "chain_hit": "path_hit",
+    "chain_node_recall": "path_node_recall",
+    "chain_read_precision": "path_read_precision",
+    "n_chain_nodes": "n_path_nodes",
+    "n_hit_chain_nodes": "n_hit_path_nodes",
+    "chain_bad_patterns": "path_pattern_flags",
+}
+LEGACY_DETAIL_DEFAULTS = {
+    "chain_evaluable": False,
+    "not_chain_evaluable_reason": "missing_bonus_map",
+    "chain_case_kind": None,
+    "chain_graph_covered": False,
+    "chain_projection": None,
+    "chain_hit": False,
+    "chain_node_recall": None,
+    "chain_read_precision": None,
+    "n_chain_nodes": 0,
+    "n_hit_chain_nodes": 0,
+    "chain_bad_patterns": {},
+}
 
 
 def _maybe_json(value: Any) -> Any:
@@ -86,6 +135,45 @@ def _json_default(value: Any) -> Any:
     if isinstance(value, float) and math.isnan(value):
         return None
     return str(value)
+
+
+def _sync_path_aliases(detail: dict[str, Any]) -> dict[str, Any]:
+    """Mirror legacy `chain_*` detail keys to current Path terminology."""
+    for legacy_key, path_key in PATH_DETAIL_ALIASES.items():
+        legacy_is_default = (
+            legacy_key in detail
+            and path_key in detail
+            and detail.get(legacy_key) == LEGACY_DETAIL_DEFAULTS.get(legacy_key, object())
+            and detail.get(path_key) != detail.get(legacy_key)
+        )
+        if path_key in detail and (legacy_key not in detail or legacy_is_default):
+            detail[legacy_key] = detail[path_key]
+        elif legacy_key in detail and path_key not in detail:
+            detail[path_key] = detail[legacy_key]
+    projection = detail.get("path_projection")
+    if isinstance(projection, dict):
+        projection.setdefault("path_nodes", projection.get("chain_nodes") or [])
+        projection.setdefault("path_edges", projection.get("chain_edges") or [])
+        projection.setdefault("graph_context_nodes", projection.get("context_nodes") or [])
+        projection.setdefault("graph_context_edges", projection.get("context_edges") or [])
+        projection.setdefault("chain_nodes", projection.get("path_nodes") or [])
+        projection.setdefault("chain_edges", projection.get("path_edges") or [])
+        projection.setdefault("context_nodes", projection.get("graph_context_nodes") or [])
+        projection.setdefault("context_edges", projection.get("graph_context_edges") or [])
+    for key in ("path_pattern_flags", "chain_bad_patterns"):
+        patterns = detail.get(key)
+        if isinstance(patterns, dict):
+            _sync_path_pattern_aliases(patterns)
+    return detail
+
+
+def _sync_path_pattern_aliases(patterns: dict[str, Any]) -> dict[str, Any]:
+    for legacy_key, path_key in LEGACY_PATH_PATTERN_ALIASES.items():
+        if path_key in patterns and legacy_key not in patterns:
+            patterns[legacy_key] = patterns[path_key]
+        elif legacy_key in patterns and path_key not in patterns:
+            patterns[path_key] = patterns[legacy_key]
+    return patterns
 
 
 def _records_from_json_payload(payload: Any) -> Iterable[dict]:
@@ -401,7 +489,7 @@ def extract_record_reads(
 
 def _first_matching_step(step_reads: list[list[dict]], bonus_map: dict, *, require_gt: bool) -> int | None:
     for idx, reads in enumerate(step_reads):
-        distance = match_reads_to_callgraph(reads, bonus_map)
+        distance = match_reads_to_graph(reads, bonus_map)
         if distance < 0:
             continue
         if require_gt and distance != 0.0:
@@ -414,7 +502,7 @@ def _read_hit_nodes(read: dict, bonus_map: dict, *, rewardable_only: bool = True
     nodes = bonus_map.get("call_graph_nodes", {}) if bonus_map else {}
     hits = set()
     for node_key, node in nodes.items():
-        if rewardable_only and not is_rewardable_call_graph_node(node):
+        if rewardable_only and not is_rewardable_graph_node(node):
             continue
         if read["file_path"] != node["file_path"]:
             continue
@@ -601,7 +689,7 @@ def _edge_dict(caller: str, callee: str, edge_type: str, nodes: dict[str, dict])
     }
 
 
-def _reward_path_edges(bonus_map: dict) -> list[tuple[str, str]]:
+def _path_edges(bonus_map: dict) -> list[tuple[str, str]]:
     explicit = _edge_pairs(bonus_map.get("reward_path_edges"))
     if explicit:
         return explicit
@@ -618,7 +706,7 @@ def _reward_path_edges(bonus_map: dict) -> list[tuple[str, str]]:
     ]
 
 
-def _call_graph_edges(bonus_map: dict) -> list[tuple[str, str]]:
+def _graph_edges(bonus_map: dict) -> list[tuple[str, str]]:
     explicit = _edge_pairs(bonus_map.get("call_graph_edges"))
     if explicit:
         return explicit
@@ -632,6 +720,10 @@ def _call_graph_edges(bonus_map: dict) -> list[tuple[str, str]]:
         and isinstance(item.get("caller"), str)
         and isinstance(item.get("callee"), str)
     ]
+
+
+def _call_graph_edges(bonus_map: dict) -> list[tuple[str, str]]:
+    return _graph_edges(bonus_map)
 
 
 def _reachable_from(starts: set[str], edges: list[tuple[str, str]]) -> set[str]:
@@ -664,19 +756,19 @@ def _can_reach(starts: set[str], edges: list[tuple[str, str]]) -> set[str]:
     return seen
 
 
-def _chain_evaluability(bonus_map: dict | None) -> tuple[bool, str | None]:
+def _path_evaluability(bonus_map: dict | None) -> tuple[bool, str | None]:
     if not bonus_map:
         return False, "missing_bonus_map"
     case_type = str(bonus_map.get("case_type") or "")
     anchors = _string_list(bonus_map.get("selected_issue_anchor_nodes"))
-    if case_type not in CHAIN_CASE_TYPES:
+    if case_type not in PATH_CASE_TYPES:
         return False, str(bonus_map.get("reason_code") or case_type or "missing_case_type")
     if not anchors:
         return False, "traceable_no_anchor"
     return True, None
 
 
-def _chain_projection(
+def _path_projection(
     bonus_map: dict,
     hit_nodes: set[str],
     first_hits: dict[str, int],
@@ -689,35 +781,35 @@ def _chain_projection(
     if not roots:
         roots = {key for key, node in nodes.items() if node.get("node_role") == "root_cause"}
 
-    reward_edges = [(caller, callee) for caller, callee in _reward_path_edges(bonus_map) if caller in nodes and callee in nodes]
-    forward = _reachable_from(anchors, reward_edges) if anchors else set()
-    backward = _can_reach(roots, reward_edges) if roots else set()
-    selected_chain_edges = [
+    path_edges = [(caller, callee) for caller, callee in _path_edges(bonus_map) if caller in nodes and callee in nodes]
+    forward = _reachable_from(anchors, path_edges) if anchors else set()
+    backward = _can_reach(roots, path_edges) if roots else set()
+    selected_path_edges = [
         (caller, callee)
-        for caller, callee in reward_edges
+        for caller, callee in path_edges
         if caller in forward and callee in forward and caller in backward and callee in backward
     ]
-    chain_node_keys = set(anchors) | set(roots)
-    for caller, callee in selected_chain_edges:
-        chain_node_keys.add(caller)
-        chain_node_keys.add(callee)
-    if not selected_chain_edges:
-        chain_node_keys.update(
+    path_node_keys = set(anchors) | set(roots)
+    for caller, callee in selected_path_edges:
+        path_node_keys.add(caller)
+        path_node_keys.add(callee)
+    if not selected_path_edges:
+        path_node_keys.update(
             key
             for key, node in nodes.items()
-            if node.get("node_role") in CHAIN_NODE_ROLES and (key in anchors or key in roots)
+            if node.get("node_role") in PATH_NODE_ROLES and (key in anchors or key in roots)
         )
 
-    call_edges = [(caller, callee) for caller, callee in _call_graph_edges(bonus_map) if caller in nodes and callee in nodes]
+    call_edges = [(caller, callee) for caller, callee in _graph_edges(bonus_map) if caller in nodes and callee in nodes]
     reverse_call_edges: dict[str, set[str]] = defaultdict(set)
     for caller, callee in call_edges:
         reverse_call_edges[callee].add(caller)
     context_node_keys: set[str] = set()
-    frontier = list(chain_node_keys)
+    frontier = list(path_node_keys)
     while frontier:
         current = frontier.pop()
         for prev in reverse_call_edges.get(current, set()):
-            if prev in context_node_keys or _node_role(prev, nodes) not in CHAIN_CONTEXT_ROLES:
+            if prev in context_node_keys or _node_role(prev, nodes) not in PATH_CONTEXT_ROLES:
                 continue
             context_node_keys.add(prev)
             frontier.append(prev)
@@ -725,7 +817,7 @@ def _chain_projection(
     context_edge_keys = [
         (caller, callee)
         for caller, callee in call_edges
-        if caller in context_node_keys and callee in (context_node_keys | chain_node_keys)
+        if caller in context_node_keys and callee in (context_node_keys | path_node_keys)
     ]
 
     def node_summary(node_key: str, *, group: str) -> dict[str, Any]:
@@ -747,7 +839,7 @@ def _chain_projection(
             "hit": node_key in hit_nodes,
             "first_step": first_hits.get(node_key),
         }
-        if role in CHAIN_NODE_ROLES:
+        if role in PATH_NODE_ROLES:
             summary["source"] = _source_text(node)
             summary["source_preview"] = _source_preview(node)
         return summary
@@ -761,120 +853,139 @@ def _chain_projection(
             node_key,
         )
 
-    chain_nodes = [node_summary(key, group="chain") for key in sorted(chain_node_keys, key=node_sort_key)]
+    path_nodes = [node_summary(key, group="path") for key in sorted(path_node_keys, key=node_sort_key)]
     context_nodes = [node_summary(key, group="context") for key in sorted(context_node_keys, key=node_sort_key)]
     return {
         "anchors": sorted(anchors),
         "roots": sorted(roots),
-        "chain_nodes": chain_nodes,
-        "chain_edges": [_edge_dict(caller, callee, "chain", nodes) for caller, callee in selected_chain_edges],
+        "path_nodes": path_nodes,
+        "path_edges": [_edge_dict(caller, callee, "path", nodes) for caller, callee in selected_path_edges],
         "context_nodes": context_nodes,
         "context_edges": [_edge_dict(caller, callee, "context", nodes) for caller, callee in context_edge_keys],
+        "chain_nodes": path_nodes,
+        "chain_edges": [_edge_dict(caller, callee, "chain", nodes) for caller, callee in selected_path_edges],
     }
 
 
-def _is_bonus_metric_evaluable(item: dict[str, Any]) -> bool:
-    case_kind = item.get("chain_case_kind") or item.get("bonus_case_type")
-    return item.get("chain_evaluable") is True and case_kind in CHAIN_CASE_TYPES
+def _path_case_kind(item: dict[str, Any]) -> str | None:
+    value = item.get("path_case_kind", item.get("chain_case_kind"))
+    return str(value) if value is not None else None
+
+
+def _is_path_metric_evaluable(item: dict[str, Any]) -> bool:
+    case_kind = _path_case_kind(item) or item.get("bonus_case_type")
+    return item.get("path_evaluable", item.get("chain_evaluable")) is True and case_kind in PATH_CASE_TYPES
 
 
 def _is_order_metric_evaluable(item: dict[str, Any]) -> bool:
-    if not _is_bonus_metric_evaluable(item):
+    if not _is_path_metric_evaluable(item):
         return False
-    projection = item.get("chain_projection") or {}
+    projection = item.get("path_projection") or item.get("chain_projection") or {}
     anchors = set(projection.get("anchors") or [])
     roots = set(projection.get("roots") or [])
     if anchors & roots:
         return False
-    return bool(projection.get("chain_edges") or [])
+    return bool(projection.get("path_edges") or projection.get("chain_edges") or [])
 
 
-def _chain_step_hits(
+def _path_step_hits(
     step_reads: list[list[dict]],
     bonus_map: dict,
-    chain_nodes: set[str],
+    path_nodes: set[str],
     anchor_nodes: set[str],
     root_nodes: set[str],
 ) -> dict[str, Any]:
-    chain_hit_steps: list[int] = []
+    path_hit_steps: list[int] = []
     anchor_hit_steps: list[int] = []
     root_hit_steps: list[int] = []
-    hit_chain_nodes: set[str] = set()
-    read_hits_chain = 0
-    read_hits_off_chain = 0
+    hit_path_nodes: set[str] = set()
+    read_hits_path = 0
+    read_hits_off_path = 0
     node_step_counts: Counter[str] = Counter()
     for step_idx, reads in enumerate(step_reads):
-        step_chain_hits: set[str] = set()
+        step_path_hits: set[str] = set()
         for read in reads:
             hits = _read_hit_nodes(read, bonus_map, rewardable_only=False)
-            chain_hits = hits & chain_nodes
-            if chain_hits:
-                read_hits_chain += 1
-                step_chain_hits.update(chain_hits)
-                hit_chain_nodes.update(chain_hits)
+            path_hits = hits & path_nodes
+            if path_hits:
+                read_hits_path += 1
+                step_path_hits.update(path_hits)
+                hit_path_nodes.update(path_hits)
             else:
-                read_hits_off_chain += 1
-        if step_chain_hits:
-            chain_hit_steps.append(step_idx)
-            for node_key in step_chain_hits:
+                read_hits_off_path += 1
+        if step_path_hits:
+            path_hit_steps.append(step_idx)
+            for node_key in step_path_hits:
                 node_step_counts[node_key] += 1
-            if step_chain_hits & anchor_nodes:
+            if step_path_hits & anchor_nodes:
                 anchor_hit_steps.append(step_idx)
-            if step_chain_hits & root_nodes:
+            if step_path_hits & root_nodes:
                 root_hit_steps.append(step_idx)
     return {
-        "chain_hit_steps": chain_hit_steps,
+        "path_hit_steps": path_hit_steps,
         "anchor_hit_steps": anchor_hit_steps,
         "root_hit_steps": root_hit_steps,
-        "hit_chain_nodes": hit_chain_nodes,
-        "read_hits_chain": read_hits_chain,
-        "read_hits_off_chain": read_hits_off_chain,
+        "hit_path_nodes": hit_path_nodes,
+        "read_hits_path": read_hits_path,
+        "read_hits_off_path": read_hits_off_path,
+        "chain_hit_steps": path_hit_steps,
+        "hit_chain_nodes": hit_path_nodes,
+        "read_hits_chain": read_hits_path,
+        "read_hits_off_chain": read_hits_off_path,
         "node_step_counts": node_step_counts,
     }
 
 
-def _chain_bad_patterns(
+def _path_pattern_flags(
     *,
-    chain_evaluable: bool,
-    chain_case_kind: str | None,
+    path_evaluable: bool,
+    path_case_kind: str | None,
     first_anchor_step: int | None,
     first_root_step: int | None,
     root_hit_steps: list[int],
-    chain_hit_steps: list[int],
-    read_hits_chain: int,
-    read_hits_off_chain: int,
+    path_hit_steps: list[int],
+    read_hits_path: int,
+    read_hits_off_path: int,
     node_step_counts: Counter[str],
     step_items: list[Any],
 ) -> dict[str, Any]:
-    if not chain_evaluable:
-        return {key: False for key in CHAIN_BAD_PATTERN_KEYS}
+    if not path_evaluable:
+        return {key: False for key in PATH_PATTERN_KEYS}
     root_after_anchor = (
         first_anchor_step is not None
         and any(step >= first_anchor_step for step in root_hit_steps)
     )
     root_before_anchor = (
-        chain_case_kind != "direct"
+        path_case_kind != "direct"
         and first_anchor_step is not None
         and first_root_step is not None
         and first_root_step < first_anchor_step
     )
-    chain_steps_after_anchor = [
+    path_steps_after_anchor = [
         step
-        for step in chain_hit_steps
+        for step in path_hit_steps
         if first_anchor_step is not None and step > first_anchor_step
     ]
-    return {
+    flags = {
         "missed_anchor": first_anchor_step is None,
         "missed_root_after_anchor": first_anchor_step is not None and not root_after_anchor,
         "root_before_anchor": root_before_anchor,
-        "chain_stall": first_anchor_step is not None and not root_after_anchor and len(chain_steps_after_anchor) >= 2,
-        "chain_read_loop": any(count >= 3 for count in node_step_counts.values()),
-        "off_chain_read_spree": read_hits_off_chain >= 3 and read_hits_off_chain > read_hits_chain,
-        "error_spiral_on_chain": _max_error_run_on_steps(step_items, set(chain_hit_steps)) >= 3,
-        "n_chain_read_steps": len(chain_hit_steps),
-        "n_chain_read_hits": read_hits_chain,
-        "n_off_chain_reads": read_hits_off_chain,
+        "path_stall": first_anchor_step is not None and not root_after_anchor and len(path_steps_after_anchor) >= 2,
+        "path_read_loop": any(count >= 3 for count in node_step_counts.values()),
+        "off_path_read_spree": read_hits_off_path >= 3 and read_hits_off_path > read_hits_path,
+        "error_spiral_on_path": _max_error_run_on_steps(step_items, set(path_hit_steps)) >= 3,
+        "n_path_read_steps": len(path_hit_steps),
+        "n_path_read_hits": read_hits_path,
+        "n_off_path_reads": read_hits_off_path,
     }
+    flags.update(
+        {
+            "n_chain_read_steps": flags["n_path_read_steps"],
+            "n_chain_read_hits": flags["n_path_read_hits"],
+            "n_off_chain_reads": flags["n_off_path_reads"],
+        }
+    )
+    return _sync_path_pattern_aliases(flags)
 
 
 def _graph_topology(bonus_map: dict, hit_nodes: set[str], first_hits: dict[str, int]) -> dict:
@@ -906,7 +1017,7 @@ def _graph_topology(bonus_map: dict, hit_nodes: set[str], first_hits: dict[str, 
                 "source_preview": _source_preview(node),
             }
         )
-    edges = [[caller, callee] for caller, callee in _call_graph_edges(bonus_map)]
+    edges = [[caller, callee] for caller, callee in _graph_edges(bonus_map)]
     return {"nodes": node_items, "edges": edges}
 
 
@@ -1085,7 +1196,7 @@ def _purpose_blocks(
 
         signatures = [_tool_signature(normalized_traces[idx], tracking_mode) for idx in block["trace_indices"]]
         is_loop = len(signatures) >= 3 and len(set(signatures)) == 1
-        distance = match_reads_to_callgraph(reads, bonus_map)
+        distance = match_reads_to_graph(reads, bonus_map)
         outcome_defined = has_graph and block["family"] == "read"
         achieved = outcome_defined and distance >= 0
         wasted = outcome_defined and not achieved
@@ -1210,24 +1321,24 @@ def score_record(
         "block_miracle_step": None,
         "block_miracle_severity": None,
         "graph_topology": None,
-        "chain_evaluable": False,
-        "not_chain_evaluable_reason": "missing_bonus_map",
-        "chain_case_kind": None,
-        "chain_graph_covered": False,
-        "chain_projection": None,
-        "chain_hit": False,
+        "path_evaluable": False,
+        "not_path_evaluable_reason": "missing_bonus_map",
+        "path_case_kind": None,
+        "path_covered": False,
+        "path_projection": None,
+        "path_hit": False,
         "anchor_hit": False,
         "root_hit": False,
-        "chain_node_recall": None,
-        "chain_read_precision": None,
+        "path_node_recall": None,
+        "path_read_precision": None,
         "first_anchor_step": None,
         "first_root_step": None,
         "steps_anchor_to_root": None,
         "anchor_before_root": None,
-        "n_chain_nodes": 0,
+        "n_path_nodes": 0,
         "n_context_nodes": 0,
-        "n_hit_chain_nodes": 0,
-        "chain_bad_patterns": {key: False for key in CHAIN_BAD_PATTERN_KEYS},
+        "n_hit_path_nodes": 0,
+        "path_pattern_flags": {key: False for key in PATH_PATTERN_KEYS},
         "step_details": step_details,
         "edited_root_cause": any(bool(step.get("edited_root_cause")) for step in step_details),
         "purpose_blocks": purpose_blocks,
@@ -1235,12 +1346,12 @@ def score_record(
         **block_stats,
     }
     if not bonus_map:
-        return result
+        return _sync_path_aliases(result)
 
     result["bonus_case_type"] = bonus_map.get("case_type")
     result["bonus_traceable"] = bool(bonus_map.get("traceable"))
     nodes = bonus_map.get("call_graph_nodes", {})
-    rewardable_nodes = {key: node for key, node in nodes.items() if is_rewardable_call_graph_node(node)}
+    rewardable_nodes = {key: node for key, node in nodes.items() if is_rewardable_graph_node(node)}
     result["has_call_graph"] = bool(nodes)
     result["n_call_graph_nodes"] = len(nodes)
     result["n_rewardable_call_graph_nodes"] = len(rewardable_nodes)
@@ -1250,56 +1361,56 @@ def score_record(
         _step_node_first_hits(scoring_step_reads, bonus_map, rewardable_only=False) if scoring_step_reads else {}
     )
     result["graph_topology"] = _graph_topology(bonus_map, set(), step_first_hits)
-    chain_evaluable, not_chain_reason = _chain_evaluability(bonus_map)
-    result["chain_evaluable"] = chain_evaluable
-    result["not_chain_evaluable_reason"] = not_chain_reason
-    result["chain_case_kind"] = result["bonus_case_type"] if result["bonus_case_type"] in CHAIN_CASE_TYPES else None
+    path_evaluable, not_path_reason = _path_evaluability(bonus_map)
+    result["path_evaluable"] = path_evaluable
+    result["not_path_evaluable_reason"] = not_path_reason
+    result["path_case_kind"] = result["bonus_case_type"] if result["bonus_case_type"] in PATH_CASE_TYPES else None
 
     all_hit_nodes = _all_read_hit_nodes(reads, bonus_map, rewardable_only=False)
-    chain_projection = _chain_projection(bonus_map, all_hit_nodes, scoring_first_hits_all)
-    result["chain_projection"] = chain_projection
-    chain_node_keys = {node["key"] for node in chain_projection.get("chain_nodes", [])}
-    context_node_keys = {node["key"] for node in chain_projection.get("context_nodes", [])}
-    anchor_nodes = set(chain_projection.get("anchors") or [])
-    root_nodes = set(chain_projection.get("roots") or [])
-    result["n_chain_nodes"] = len(chain_node_keys)
+    path_projection = _path_projection(bonus_map, all_hit_nodes, scoring_first_hits_all)
+    result["path_projection"] = path_projection
+    path_node_keys = {node["key"] for node in path_projection.get("path_nodes", path_projection.get("chain_nodes", []))}
+    context_node_keys = {node["key"] for node in path_projection.get("context_nodes", [])}
+    anchor_nodes = set(path_projection.get("anchors") or [])
+    root_nodes = set(path_projection.get("roots") or [])
+    result["n_path_nodes"] = len(path_node_keys)
     result["n_context_nodes"] = len(context_node_keys)
-    result["chain_graph_covered"] = chain_evaluable and bool(chain_node_keys) and bool(anchor_nodes) and bool(root_nodes)
-    if chain_evaluable and chain_node_keys:
-        chain_stats = _chain_step_hits(scoring_step_reads, bonus_map, chain_node_keys, anchor_nodes, root_nodes)
-        hit_chain_nodes = chain_stats["hit_chain_nodes"]
-        first_anchor = min(chain_stats["anchor_hit_steps"]) if chain_stats["anchor_hit_steps"] else None
-        first_root = min(chain_stats["root_hit_steps"]) if chain_stats["root_hit_steps"] else None
-        result["n_hit_chain_nodes"] = len(hit_chain_nodes)
-        result["chain_hit"] = bool(hit_chain_nodes)
+    result["path_covered"] = path_evaluable and bool(path_node_keys) and bool(anchor_nodes) and bool(root_nodes)
+    if path_evaluable and path_node_keys:
+        path_stats = _path_step_hits(scoring_step_reads, bonus_map, path_node_keys, anchor_nodes, root_nodes)
+        hit_path_nodes = path_stats["hit_path_nodes"]
+        first_anchor = min(path_stats["anchor_hit_steps"]) if path_stats["anchor_hit_steps"] else None
+        first_root = min(path_stats["root_hit_steps"]) if path_stats["root_hit_steps"] else None
+        result["n_hit_path_nodes"] = len(hit_path_nodes)
+        result["path_hit"] = bool(hit_path_nodes)
         result["anchor_hit"] = first_anchor is not None
         result["root_hit"] = first_root is not None
         result["first_anchor_step"] = first_anchor
         result["first_root_step"] = first_root
-        result["chain_node_recall"] = len(hit_chain_nodes) / len(chain_node_keys) if chain_node_keys else None
-        n_chain_scored_reads = chain_stats["read_hits_chain"] + chain_stats["read_hits_off_chain"]
-        result["chain_read_precision"] = (
-            chain_stats["read_hits_chain"] / n_chain_scored_reads if n_chain_scored_reads else None
+        result["path_node_recall"] = len(hit_path_nodes) / len(path_node_keys) if path_node_keys else None
+        n_path_scored_reads = path_stats["read_hits_path"] + path_stats["read_hits_off_path"]
+        result["path_read_precision"] = (
+            path_stats["read_hits_path"] / n_path_scored_reads if n_path_scored_reads else None
         )
-        if result["chain_case_kind"] != "direct" and first_anchor is not None and first_root is not None:
+        if result["path_case_kind"] != "direct" and first_anchor is not None and first_root is not None:
             result["steps_anchor_to_root"] = first_root - first_anchor
             result["anchor_before_root"] = first_anchor <= first_root
-        result["chain_bad_patterns"] = _chain_bad_patterns(
-            chain_evaluable=chain_evaluable,
-            chain_case_kind=result["chain_case_kind"],
+        result["path_pattern_flags"] = _path_pattern_flags(
+            path_evaluable=path_evaluable,
+            path_case_kind=result["path_case_kind"],
             first_anchor_step=first_anchor,
             first_root_step=first_root,
-            root_hit_steps=chain_stats["root_hit_steps"],
-            chain_hit_steps=chain_stats["chain_hit_steps"],
-            read_hits_chain=chain_stats["read_hits_chain"],
-            read_hits_off_chain=chain_stats["read_hits_off_chain"],
-            node_step_counts=chain_stats["node_step_counts"],
+            root_hit_steps=path_stats["root_hit_steps"],
+            path_hit_steps=path_stats["path_hit_steps"],
+            read_hits_path=path_stats["read_hits_path"],
+            read_hits_off_path=path_stats["read_hits_off_path"],
+            node_step_counts=path_stats["node_step_counts"],
             step_items=step_items,
         )
 
-    distance = match_reads_to_callgraph(reads, bonus_map)
+    distance = match_reads_to_graph(reads, bonus_map)
     if distance < 0:
-        return result
+        return _sync_path_aliases(result)
 
     hit_nodes = _all_read_hit_nodes(reads, bonus_map)
     result["n_hit_nodes"] = len(hit_nodes)
@@ -1342,7 +1453,7 @@ def score_record(
         result["first_hit_step"] = 0
         if distance == 0.0:
             result["first_ground_truth_step"] = 0
-    return result
+    return _sync_path_aliases(result)
 
 
 def _rate(num: int | float, denom: int | float) -> float | None:
@@ -1362,17 +1473,19 @@ def summarize(details: list[dict], *, source: Path, bonus_map_dir: Path, trackin
     order_scores = []
     block_order_scores = []
     block_efficiencies = []
-    chain_recalls = []
-    chain_precisions = []
+    path_recalls = []
+    path_read_precisions = []
     times_to_anchor = []
     times_to_root = []
     steps_anchor_to_root = []
     recall_histogram = Counter()
     hop_coverage = Counter()
-    not_chain_reasons = Counter()
-    chain_bad_patterns = Counter()
+    not_path_reasons = Counter()
+    path_pattern_counts = Counter()
+    legacy_path_pattern_counts = Counter()
 
     for item in details:
+        _sync_path_aliases(item)
         counts["n_records"] += 1
         if item["instance_id"]:
             counts["n_with_instance_id"] += 1
@@ -1401,38 +1514,46 @@ def summarize(details: list[dict], *, source: Path, bonus_map_dir: Path, trackin
             counts["n_traces_with_loop"] += 1
         if bad_patterns.get("error_spiral"):
             counts["n_traces_with_error_spiral"] += 1
-        if item.get("chain_graph_covered"):
+        if item.get("path_covered"):
             counts["n_chain_graph_covered"] += 1
-        if item.get("chain_evaluable"):
+        if item.get("path_evaluable"):
+            counts["n_path_evaluable"] += 1
             counts["n_chain_evaluable"] += 1
-            if item.get("chain_hit"):
+            if item.get("path_hit"):
                 counts["n_chain_hit"] += 1
             if item.get("anchor_hit"):
                 counts["n_anchor_hit"] += 1
             if item.get("root_hit"):
                 counts["n_root_hit"] += 1
-            if item.get("chain_node_recall") is not None:
-                chain_recalls.append(item["chain_node_recall"])
-            if item.get("chain_read_precision") is not None:
-                chain_precisions.append(item["chain_read_precision"])
+            if item.get("path_node_recall") is not None:
+                path_recalls.append(item["path_node_recall"])
+            if item.get("path_read_precision") is not None:
+                path_read_precisions.append(item["path_read_precision"])
             if item.get("first_anchor_step") is not None:
                 times_to_anchor.append(item["first_anchor_step"])
             if item.get("first_root_step") is not None:
                 times_to_root.append(item["first_root_step"])
-            if item.get("chain_case_kind") != "direct":
+            if item.get("path_case_kind") != "direct":
                 counts["n_chain_order_candidates"] += 1
                 if item.get("anchor_before_root") is not None:
                     counts["n_chain_order_defined"] += 1
                     steps_anchor_to_root.append(item["steps_anchor_to_root"])
                     if item.get("anchor_before_root"):
                         counts["n_anchor_before_root"] += 1
-            for name in CHAIN_BAD_PATTERN_KEYS:
-                if (item.get("chain_bad_patterns") or {}).get(name):
-                    chain_bad_patterns[name] += 1
+            pattern_flags = _sync_path_pattern_aliases(item.get("path_pattern_flags") or {})
+            for name in PATH_PATTERN_KEYS:
+                if pattern_flags.get(name):
+                    path_pattern_counts[name] += 1
                     counts[f"n_{name}"] += 1
+            for name in CHAIN_BAD_PATTERN_KEYS:
+                if pattern_flags.get(name):
+                    legacy_path_pattern_counts[name] += 1
+                    if name not in PATH_PATTERN_KEYS:
+                        counts[f"n_{name}"] += 1
         else:
+            counts["n_not_path_evaluable"] += 1
             counts["n_not_chain_evaluable"] += 1
-            not_chain_reasons[str(item.get("not_chain_evaluable_reason") or "unknown")] += 1
+            not_path_reasons[str(item.get("not_path_evaluable_reason") or "unknown")] += 1
         if item["hit_call_graph"]:
             counts["n_hit_call_graph"] += 1
             distances.append(item["min_distance"])
@@ -1487,11 +1608,11 @@ def summarize(details: list[dict], *, source: Path, bonus_map_dir: Path, trackin
             bucket["n_hit_ground_truth"] += 1
         if item["hit_near"]:
             bucket["n_hit_near"] += 1
-        if item.get("chain_evaluable"):
+        if item.get("path_evaluable"):
             bucket["n_chain_evaluable"] += 1
         else:
             bucket["n_not_chain_evaluable"] += 1
-        if item.get("chain_hit"):
+        if item.get("path_hit"):
             bucket["n_chain_hit"] += 1
         if item.get("anchor_hit"):
             bucket["n_anchor_hit"] += 1
@@ -1501,20 +1622,21 @@ def summarize(details: list[dict], *, source: Path, bonus_map_dir: Path, trackin
     n_records = counts["n_records"]
     n_with_bonus = counts["n_with_bonus_map"]
     n_with_graph = counts["n_with_call_graph"]
-    n_chain_evaluable = counts["n_chain_evaluable"]
+    n_path_evaluable = counts["n_chain_evaluable"]
     summary_by_case = {}
     for case_type, bucket in sorted(by_case.items()):
         denom = bucket["n_with_call_graph"] or bucket["n"]
-        chain_denom = bucket["n_chain_evaluable"]
+        path_denom = bucket["n_chain_evaluable"]
         summary_by_case[case_type] = {
             **dict(bucket),
             "read_rate": _rate(bucket["n_with_reads"], bucket["n"]),
             "graph_hit_rate": _rate(bucket["n_hit_call_graph"], denom),
             "ground_truth_hit_rate": _rate(bucket["n_hit_ground_truth"], denom),
             "near_hit_rate": _rate(bucket["n_hit_near"], denom),
-            "chain_hit_rate": _rate(bucket["n_chain_hit"], chain_denom),
-            "anchor_hit_rate": _rate(bucket["n_anchor_hit"], chain_denom),
-            "root_hit_rate": _rate(bucket["n_root_hit"], chain_denom),
+            "path_hit_rate": _rate(bucket["n_chain_hit"], path_denom),
+            "chain_hit_rate": _rate(bucket["n_chain_hit"], path_denom),
+            "anchor_hit_rate": _rate(bucket["n_anchor_hit"], path_denom),
+            "root_hit_rate": _rate(bucket["n_root_hit"], path_denom),
         }
 
     return {
@@ -1531,20 +1653,28 @@ def summarize(details: list[dict], *, source: Path, bonus_map_dir: Path, trackin
             "bonus_map_coverage": _rate(n_with_bonus, n_records),
             "call_graph_coverage": _rate(n_with_graph, n_records),
             "read_rate": _rate(counts["n_with_reads"], n_records),
+            "path_coverage": _rate(counts["n_chain_graph_covered"], n_records),
             "chain_graph_coverage": _rate(counts["n_chain_graph_covered"], n_records),
-            "anchor_hit_rate": _rate(counts["n_anchor_hit"], n_chain_evaluable),
-            "root_hit_rate": _rate(counts["n_root_hit"], n_chain_evaluable),
-            "chain_hit_rate": _rate(counts["n_chain_hit"], n_chain_evaluable),
-            "chain_node_recall": sum(chain_recalls) / len(chain_recalls) if chain_recalls else None,
-            "chain_read_precision": sum(chain_precisions) / len(chain_precisions) if chain_precisions else None,
+            "anchor_hit_rate": _rate(counts["n_anchor_hit"], n_path_evaluable),
+            "root_hit_rate": _rate(counts["n_root_hit"], n_path_evaluable),
+            "path_hit_rate": _rate(counts["n_chain_hit"], n_path_evaluable),
+            "chain_hit_rate": _rate(counts["n_chain_hit"], n_path_evaluable),
+            "path_node_recall": sum(path_recalls) / len(path_recalls) if path_recalls else None,
+            "path_read_precision": sum(path_read_precisions) / len(path_read_precisions) if path_read_precisions else None,
+            "chain_node_recall": sum(path_recalls) / len(path_recalls) if path_recalls else None,
+            "chain_read_precision": sum(path_read_precisions) / len(path_read_precisions) if path_read_precisions else None,
             "anchor_before_root_rate": _rate(counts["n_anchor_before_root"], counts["n_chain_order_defined"]),
-            "missed_anchor_rate": _rate(counts["n_missed_anchor"], n_chain_evaluable),
-            "missed_root_after_anchor_rate": _rate(counts["n_missed_root_after_anchor"], n_chain_evaluable),
+            "missed_anchor_rate": _rate(counts["n_missed_anchor"], n_path_evaluable),
+            "missed_root_after_anchor_rate": _rate(counts["n_missed_root_after_anchor"], n_path_evaluable),
             "root_before_anchor_rate": _rate(counts["n_root_before_anchor"], counts["n_chain_order_defined"]),
-            "chain_stall_rate": _rate(counts["n_chain_stall"], n_chain_evaluable),
-            "chain_read_loop_rate": _rate(counts["n_chain_read_loop"], n_chain_evaluable),
-            "off_chain_read_spree_rate": _rate(counts["n_off_chain_read_spree"], n_chain_evaluable),
-            "error_spiral_on_chain_rate": _rate(counts["n_error_spiral_on_chain"], n_chain_evaluable),
+            "path_stall_rate": _rate(counts["n_path_stall"], n_path_evaluable),
+            "path_read_loop_rate": _rate(counts["n_path_read_loop"], n_path_evaluable),
+            "off_path_read_spree_rate": _rate(counts["n_off_path_read_spree"], n_path_evaluable),
+            "error_spiral_on_path_rate": _rate(counts["n_error_spiral_on_path"], n_path_evaluable),
+            "chain_stall_rate": _rate(counts["n_chain_stall"], n_path_evaluable),
+            "chain_read_loop_rate": _rate(counts["n_chain_read_loop"], n_path_evaluable),
+            "off_chain_read_spree_rate": _rate(counts["n_off_chain_read_spree"], n_path_evaluable),
+            "error_spiral_on_chain_rate": _rate(counts["n_error_spiral_on_chain"], n_path_evaluable),
             "graph_hit_rate_over_bonus_maps": _rate(counts["n_hit_call_graph"], n_with_bonus),
             "graph_hit_rate_over_call_graphs": _rate(counts["n_hit_call_graph"], n_with_graph),
             "ground_truth_hit_rate_over_call_graphs": _rate(counts["n_hit_ground_truth"], n_with_graph),
@@ -1581,8 +1711,10 @@ def summarize(details: list[dict], *, source: Path, bonus_map_dir: Path, trackin
         "distributions": {
             "recall_histogram": dict(sorted(recall_histogram.items())),
             "hop_coverage": dict(sorted(hop_coverage.items(), key=lambda item: float(item[0]))),
-            "not_chain_evaluable_reasons": dict(sorted(not_chain_reasons.items())),
-            "chain_bad_patterns": dict(sorted(chain_bad_patterns.items())),
+            "not_path_evaluable_reasons": dict(sorted(not_path_reasons.items())),
+            "not_chain_evaluable_reasons": dict(sorted(not_path_reasons.items())),
+            "path_pattern_flags": dict(sorted(path_pattern_counts.items())),
+            "chain_bad_patterns": dict(sorted(legacy_path_pattern_counts.items())),
         },
         "by_case_type": summary_by_case,
     }
@@ -1621,10 +1753,14 @@ def summarize_trends(
                 "rates": {
                     key: summary["rates"].get(key)
                     for key in (
+                        "path_coverage",
                         "chain_graph_coverage",
                         "anchor_hit_rate",
                         "root_hit_rate",
+                        "path_hit_rate",
                         "chain_hit_rate",
+                        "path_node_recall",
+                        "path_read_precision",
                         "chain_node_recall",
                         "chain_read_precision",
                         "anchor_before_root_rate",

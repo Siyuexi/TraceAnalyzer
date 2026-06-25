@@ -17,13 +17,13 @@ const state = {
     scope: true,
     graph: true,
     outcome: true,
-    dependency_path: true,
+    path: true,
     exploration_behavior: true,
     purpose_blocks: true,
     efficiency_cost: true,
   },
   showGraphContext: false,
-  graphEdgeFilters: { reward: true, call: false, agent: true },
+  graphEdgeFilters: { path: true, graph: false, trace: true },
 };
 
 const BONUS_MAP_METRIC_CASE_TYPES = new Set(["direct", "standard"]);
@@ -42,7 +42,7 @@ const MACRO_METRIC_GROUPS = [
     title: "Graph",
     items: [
       ["Graph P.", "Parsed reads that hit a Graph node."],
-      ["Graph R.", "Graph nodes hit by the agent trace."],
+      ["Graph R.", "Graph nodes hit by the agent Trace."],
       ["Graph F1", "Harmonic mean of Graph P. and Graph R."],
     ],
   },
@@ -58,11 +58,11 @@ const MACRO_METRIC_GROUPS = [
     ],
   },
   {
-    key: "dependency_path",
+    key: "path",
     title: "Path",
     items: [
-      ["Path P.", "Unique hit nodes that are Path nodes."],
-      ["Path R.", "Unique Path nodes hit by the agent trace."],
+      ["Path P.", "Unique Trace-hit Graph nodes that are on the issue symptom-to-root-cause Path."],
+      ["Path R.", "Unique Path nodes hit by the agent Trace."],
       ["Path F1", "Harmonic mean of Path P. and Path R."],
     ],
   },
@@ -71,8 +71,8 @@ const MACRO_METRIC_GROUPS = [
     title: "Pattern",
     items: [
       ["Order score", "Whether graph hits move from symptom toward root cause."],
-      ["Reverse rate", "Filtered trace share with reverse traversal marker."],
-      ["Miracle rate", "Filtered trace share with miracle marker."],
+      ["Reverse rate", "Filtered Trace share with reverse traversal marker."],
+      ["Miracle rate", "Filtered Trace share with miracle marker."],
       ["Loop trace", "Traces with repeated exploration behavior."],
       ["Error spiral", "Long consecutive tool-error runs."],
     ],
@@ -81,7 +81,7 @@ const MACRO_METRIC_GROUPS = [
     key: "purpose_blocks",
     title: "Purpose Blocks",
     items: [
-      ["Blocks", "Average intention blocks per trace."],
+      ["Blocks", "Average intention blocks per Trace."],
       ["Achieved", "Read blocks that hit useful graph nodes."],
       ["Wasted", "Read blocks with no map payoff."],
       ["Loop blocks", "Blocks repeating the same exploration intent."],
@@ -116,9 +116,9 @@ const TRACE_LEGEND_GROUPS = [
     items: [
       { sample: '<span class="legend-step root"><span class="legend-step-num">7</span><span>root cause</span></span>', text: "This step hit root cause." },
       { sample: '<span class="legend-step symptom"><span class="legend-step-num">3</span><span>symptom</span></span>', text: "This step hit symptom." },
-      { sample: '<span class="legend-step chain"><span class="legend-step-num">5</span><span>map hit</span></span>', text: "This step hit another dependency-path node." },
+      { sample: '<span class="legend-step path"><span class="legend-step-num">5</span><span>Path hit</span></span>', text: "This step hit another Path node." },
       { sample: '<span class="legend-step multi-hit" style="--step-bg: linear-gradient(90deg, #dcfce7 0 33.33%, #dbeafe 33.33% 66.67%, #fee2e2 66.67% 100%);"><span class="legend-step-num">3</span><span>split</span></span>', text: "One step hit multiple map roles." },
-      { sample: '<span class="legend-step offmap"><span class="legend-step-num">9</span><span>off map</span></span>', text: "Parsed read outside the dependency path." },
+      { sample: '<span class="legend-step offmap"><span class="legend-step-num">9</span><span>off Path</span></span>', text: "Parsed read outside the Path." },
     ],
   },
   {
@@ -137,8 +137,8 @@ const GRAPH_LEGEND_GROUPS = [
     title: "Nodes",
     items: [
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node symptom hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">7</text></g><text class="legend-graph-text" x="42" y="16">hit step</text><text class="legend-graph-sub" x="42" y="29">step 7</text></svg>', text: "Number is the first visited step." },
-      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node chain miss" transform="translate(20,19)"><circle r="14"></circle></g><text class="legend-graph-text" x="42" y="16">map node</text><text class="legend-graph-sub" x="42" y="29">not hit</text></svg>', text: "Faded node was not visited." },
-      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node chain hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">4</text></g><text class="legend-graph-text" x="42" y="16">save x3</text><text class="legend-graph-sub" x="42" y="29">same span</text></svg>', text: "Multiple symbols share one source span." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node path miss" transform="translate(20,19)"><circle r="14"></circle></g><text class="legend-graph-text" x="42" y="16">Path node</text><text class="legend-graph-sub" x="42" y="29">not hit</text></svg>', text: "Faded node was not visited." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node path hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">4</text></g><text class="legend-graph-text" x="42" y="16">save x3</text><text class="legend-graph-sub" x="42" y="29">same span</text></svg>', text: "Multiple symbols share one source span." },
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><linearGradient id="graph-symptom-root-cause-fill" x1="0" y1="1" x2="1" y2="0"><stop offset="50%" stop-color="#dcfce7"></stop><stop offset="50%" stop-color="#fee2e2"></stop></linearGradient></defs><g class="graph-node symptom-root-cause hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">2</text></g><text class="legend-graph-text" x="42" y="16">S+RC</text><text class="legend-graph-sub" x="42" y="29">same callable</text></svg>', text: "Same callable has both roles." },
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node root hit edited" transform="translate(20,19)"><circle r="14"></circle><circle class="graph-edit-ring" r="18"></circle><text class="graph-step" y="4">8</text></g><text class="legend-graph-text" x="42" y="16">final edit</text><text class="legend-graph-sub" x="42" y="29">purple ring</text></svg>', text: "Last edit landed on this node." },
     ],
@@ -146,10 +146,10 @@ const GRAPH_LEGEND_GROUPS = [
   {
     title: "Edges",
     items: [
-      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-chain" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2563eb"></path></marker></defs><path class="graph-edge chain" d="M12 20 C42 6, 74 6, 108 20" marker-end="url(#legend-arrow-chain)"></path></svg>', text: "Path edge: fixed Graph edge on the symptom-to-root Path." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-path" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2563eb"></path></marker></defs><path class="graph-edge path" d="M12 20 C42 6, 74 6, 108 20" marker-end="url(#legend-arrow-path)"></path></svg>', text: "Path edge: fixed Graph edge on the symptom-to-root Path." },
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-context" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#667085"></path></marker></defs><path class="graph-edge context" d="M12 20 C42 32, 74 32, 108 20" marker-end="url(#legend-arrow-context)"></path></svg>', text: "Graph edge: fixed Graph edge outside the Path." },
-      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-agent" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#c2410c"></path></marker></defs><path class="graph-edge agent" d="M12 20 C42 6, 74 32, 108 20" marker-end="url(#legend-arrow-agent)"></path><text class="graph-agent-label" x="58" y="19">1</text></svg>', text: "Trace edge: observed jump between visited Graph nodes." },
-      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-order" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2563eb"></path></marker></defs><circle cx="16" cy="19" r="10" fill="#dcfce7" stroke="#15803d" stroke-width="2"></circle><path class="graph-edge chain" d="M28 19 C48 19, 62 19, 82 19" marker-end="url(#legend-arrow-order)"></path><circle cx="98" cy="19" r="10" fill="#fee2e2" stroke="#b42318" stroke-width="2"></circle></svg>', text: "Dependency direction: symptom to root cause." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-trace" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#c2410c"></path></marker></defs><path class="graph-edge trace" d="M12 20 C42 6, 74 32, 108 20" marker-end="url(#legend-arrow-trace)"></path><text class="graph-trace-label" x="58" y="19">1</text></svg>', text: "Trace edge: observed jump between visited Graph nodes." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-order" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2563eb"></path></marker></defs><circle cx="16" cy="19" r="10" fill="#dcfce7" stroke="#15803d" stroke-width="2"></circle><path class="graph-edge path" d="M28 19 C48 19, 62 19, 82 19" marker-end="url(#legend-arrow-order)"></path><circle cx="98" cy="19" r="10" fill="#fee2e2" stroke="#b42318" stroke-width="2"></circle></svg>', text: "Dependency direction: symptom to root cause." },
     ],
   },
 ];
@@ -338,7 +338,7 @@ function restoreInspectorScroll(scrollState) {
 
 function setGraphContext(show) {
   state.showGraphContext = Boolean(show);
-  if (state.showGraphContext) state.graphEdgeFilters.call = true;
+  if (state.showGraphContext) state.graphEdgeFilters.graph = true;
 }
 
 function resetTracePanels() {
@@ -381,33 +381,62 @@ function detailCellKey(detail) {
   return detail?.eval_cell_key || detail?.experiment_key || "";
 }
 
+function pathValue(detail, currentKey, legacyKey, fallback = undefined) {
+  if (!detail) return fallback;
+  if (detail[currentKey] !== undefined) return detail[currentKey];
+  if (detail[legacyKey] !== undefined) return detail[legacyKey];
+  return fallback;
+}
+
+function pathProjection(detail) {
+  const projection = pathValue(detail, "path_projection", "chain_projection", {});
+  return projection && typeof projection === "object" ? projection : {};
+}
+
+function pathNodes(detail) {
+  const projection = pathProjection(detail);
+  const nodes = projection.path_nodes || projection.chain_nodes || [];
+  return Array.isArray(nodes) ? nodes : [];
+}
+
+function graphContextNodes(detail) {
+  const nodes = pathProjection(detail).context_nodes || [];
+  return Array.isArray(nodes) ? nodes : [];
+}
+
+function pathEdges(detail) {
+  const projection = pathProjection(detail);
+  const edges = projection.path_edges || projection.chain_edges || [];
+  return Array.isArray(edges) ? edges : [];
+}
+
 function detailCaseType(detail) {
-  return String(detail?.bonus_case_type || detail?.chain_case_kind || "");
+  return String(detail?.bonus_case_type || pathValue(detail, "path_case_kind", "chain_case_kind", "") || "");
 }
 
 function detailCaseFilterBucket(detail) {
   const caseType = detailCaseType(detail);
-  if (detail?.chain_evaluable === true && caseType === "direct") return "direct";
-  if (detail?.chain_evaluable === true && caseType === "standard") return "standard";
+  if (pathValue(detail, "path_evaluable", "chain_evaluable") === true && caseType === "direct") return "direct";
+  if (pathValue(detail, "path_evaluable", "chain_evaluable") === true && caseType === "standard") return "standard";
   return "others";
 }
 
-function isBonusMapMetricDetail(detail) {
-  return detail?.chain_evaluable === true && BONUS_MAP_METRIC_CASE_TYPES.has(detailCaseType(detail));
+function isPathMetricDetail(detail) {
+  return pathValue(detail, "path_evaluable", "chain_evaluable") === true && BONUS_MAP_METRIC_CASE_TYPES.has(detailCaseType(detail));
 }
 
 function hasDualSymptomRoot(detail) {
-  const projection = detail?.chain_projection || {};
+  const projection = pathProjection(detail);
   const roots = new Set(projection.roots || []);
   return (projection.anchors || []).some((anchor) => roots.has(anchor));
 }
 
-function hasRewardPathEdges(detail) {
-  return (detail?.chain_projection?.chain_edges || []).length > 0;
+function hasPathEdges(detail) {
+  return pathEdges(detail).length > 0;
 }
 
 function isOrderMetricDetail(detail) {
-  return isBonusMapMetricDetail(detail) && hasRewardPathEdges(detail) && !hasDualSymptomRoot(detail);
+  return isPathMetricDetail(detail) && hasPathEdges(detail) && !hasDualSymptomRoot(detail);
 }
 
 function caseFilterEnabled(detail) {
@@ -454,18 +483,17 @@ function activeDetails(snapshot) {
   return details.filter(caseFilterEnabled);
 }
 
-function chainNodePrecision(detail) {
-  const projection = detail?.chain_projection || {};
-  const chain = projection.chain_nodes || [];
-  const context = projection.context_nodes || [];
-  const hitChain = chain.filter((node) => node?.hit).length;
+function pathNodePrecision(detail) {
+  const path = pathNodes(detail);
+  const context = graphContextNodes(detail);
+  const hitPath = path.filter((node) => node?.hit).length;
   const hitContext = context.filter((node) => node?.hit).length;
-  const denom = hitChain + hitContext;
-  return denom ? hitChain / denom : null;
+  const denom = hitPath + hitContext;
+  return denom ? hitPath / denom : null;
 }
 
-function chainNodeF1(detail) {
-  return f1(chainNodePrecision(detail), detail?.chain_node_recall);
+function pathNodeF1(detail) {
+  return f1(pathNodePrecision(detail), pathValue(detail, "path_node_recall", "chain_node_recall"));
 }
 
 function metricsFromDetails(details, snapshot) {
@@ -480,7 +508,7 @@ function metricsFromDetails(details, snapshot) {
   return [...groups.entries()].map(([key, items]) => {
     const cell = cellLookup.get(key) || {};
     const first = items[0] || {};
-    const bonusItems = items.filter(isBonusMapMetricDetail);
+    const bonusItems = items.filter(isPathMetricDetail);
     const orderMetricItems = items.filter(isOrderMetricDetail);
     const orderItems = orderMetricItems.filter((item) => item.order_defined === true);
     const blockOrderItems = orderMetricItems.filter((item) => item.block_order_defined === true);
@@ -509,10 +537,14 @@ function metricsFromDetails(details, snapshot) {
       avg_hit_f1: avg(bonusItems.map((item) => item.hit_f1)),
       anchor_hit_rate: rate(bonusItems.map((item) => item.anchor_hit)),
       root_hit_rate: rate(bonusItems.map((item) => item.root_hit)),
-      avg_chain_node_recall: avg(bonusItems.map((item) => item.chain_node_recall)),
-      avg_chain_node_precision: avg(bonusItems.map(chainNodePrecision)),
-      avg_chain_node_f1: avg(bonusItems.map(chainNodeF1)),
-      avg_chain_read_precision: avg(bonusItems.map((item) => item.chain_read_precision)),
+      avg_path_node_recall: avg(bonusItems.map((item) => pathValue(item, "path_node_recall", "chain_node_recall"))),
+      avg_path_node_precision: avg(bonusItems.map(pathNodePrecision)),
+      avg_path_node_f1: avg(bonusItems.map(pathNodeF1)),
+      avg_path_read_precision: avg(bonusItems.map((item) => pathValue(item, "path_read_precision", "chain_read_precision"))),
+      avg_chain_node_recall: avg(bonusItems.map((item) => pathValue(item, "path_node_recall", "chain_node_recall"))),
+      avg_chain_node_precision: avg(bonusItems.map(pathNodePrecision)),
+      avg_chain_node_f1: avg(bonusItems.map(pathNodeF1)),
+      avg_chain_read_precision: avg(bonusItems.map((item) => pathValue(item, "path_read_precision", "chain_read_precision"))),
       avg_first_anchor_step: avg(bonusItems.map((item) => item.first_anchor_step)),
       avg_first_root_step: avg(bonusItems.map((item) => item.first_root_step)),
       avg_order_score: avg(orderItems.map((item) => item.order_score)),
@@ -559,7 +591,7 @@ function activeModelMetrics(snapshot) {
   const details = activeDetails(snapshot);
   const fallbackRows = details.length ? metricsFromDetails(details, snapshot) : [];
   if (state.caseFilters.direct && state.caseFilters.standard && !state.caseFilters.others) {
-    const rows = snapshot?.dynamic_traceable_model_metrics || [];
+    const rows = snapshot?.path_metric_model_metrics || snapshot?.dynamic_traceable_model_metrics || [];
     if (rows.length) return mergeMissingMetricFields(rows, fallbackRows);
   }
   if (allCaseFiltersEnabled()) return mergeMissingMetricFields(snapshot?.model_metrics || [], fallbackRows);
@@ -785,11 +817,11 @@ function renderTrend(snapshot) {
         <td>${esc(pct(rates.bonus_map_coverage))}</td>
         <td>${esc(pct(rates.call_graph_coverage))}</td>
         <td>${esc(pct(rates.read_rate))}</td>
-        <td>${esc(pct(rates.chain_graph_coverage))}</td>
+        <td>${esc(pct(rates.path_coverage ?? rates.chain_graph_coverage))}</td>
       </tr>`;
     });
   document.getElementById("trend-table").innerHTML = table(
-    ["Data source", "Step", "N", "Bonus maps", "Call graphs", "Read rate", "Chain coverage"],
+    ["Data source", "Step", "N", "Bonus maps", "Graphs", "Read rate", "Path coverage"],
     rows
   );
 }
@@ -813,7 +845,7 @@ function renderDistributions(snapshot) {
   document.getElementById("distribution-grid").innerHTML = [
     miniTable(`Dataset population (${state.selectedDataset})`, { unique_instances: population }),
     miniTable("Case types", dist.case_types),
-    miniTable("Not chain-evaluable", dist.not_chain_evaluable_reasons),
+    miniTable("Not Path-evaluable", dist.not_path_evaluable_reasons || dist.not_chain_evaluable_reasons),
     miniTable("Graph availability", dist.availability),
   ].join("");
 }
@@ -838,9 +870,9 @@ function kpiColumns(hasCacheWrite) {
     { header: "Root cause hit", group: "outcome", value: (row) => pct(row.root_hit_rate) },
     { header: "First symptom", group: "outcome", value: (row) => fmt(row.avg_first_anchor_step, 1) },
     { header: "First root cause", group: "outcome", value: (row) => fmt(row.avg_first_root_step, 1) },
-    { header: "Path P.", group: "dependency_path", value: (row) => pct(row.avg_chain_node_precision) },
-    { header: "Path R.", group: "dependency_path", value: (row) => pct(row.avg_chain_node_recall) },
-    { header: "Path F1", group: "dependency_path", value: (row) => pct(row.avg_chain_node_f1 ?? f1(row.avg_chain_node_precision, row.avg_chain_node_recall)) },
+    { header: "Path P.", group: "path", value: (row) => pct(row.avg_path_node_precision ?? row.avg_chain_node_precision) },
+    { header: "Path R.", group: "path", value: (row) => pct(row.avg_path_node_recall ?? row.avg_chain_node_recall) },
+    { header: "Path F1", group: "path", value: (row) => pct(row.avg_path_node_f1 ?? row.avg_chain_node_f1 ?? f1(row.avg_path_node_precision ?? row.avg_chain_node_precision, row.avg_path_node_recall ?? row.avg_chain_node_recall)) },
     { header: "Order score", group: "exploration_behavior", value: (row) => fmt(row.avg_order_score) },
     { header: "Reverse rate", group: "exploration_behavior", value: (row) => pct(row.reverse_order_rate) },
     { header: "Miracle rate", group: "exploration_behavior", value: (row) => pct(row.miracle_rate) },
@@ -877,7 +909,7 @@ function renderModels(snapshot) {
   scopeBits.push(`case types: ${activeCaseFilterLabels()}`);
   const scopeNote = `Metrics and Traces both use the current global filters (${scopeBits.join("; ")}).`;
   document.getElementById("model-table").innerHTML = `
-    <div class="panel-note">Metrics are scoped to dataset <strong>${esc(state.selectedDataset)}</strong>. ${esc(scopeNote)} Trace metrics score the whole agent trace; dependency-path metrics score the fixed bonus-map path.</div>
+    <div class="panel-note">Metrics are scoped to dataset <strong>${esc(state.selectedDataset)}</strong>. ${esc(scopeNote)} Graph metrics score reads against the captured dependency Graph; Path metrics score the issue symptom-to-root-cause Path; Trace metrics describe the agent trajectory.</div>
     ${renderMetricGroupControls()}
     ${metricDefinitions("Metric definitions", MACRO_METRIC_GROUPS)}
     <div class="table-wrap kpi-table">${renderKpiTable(columns, rows)}</div>`;
@@ -946,8 +978,8 @@ function traceBlob(detail) {
     files: detail.read_files,
     step_reads: (detail.step_inspection || []).map((step) => step.recovered_reads || step.target_path || step.path),
     bad: detail.bad_patterns,
-    chain_bad: detail.chain_bad_patterns,
-    reason: detail.not_chain_evaluable_reason,
+    path_patterns: pathValue(detail, "path_pattern_flags", "chain_bad_patterns"),
+    reason: pathValue(detail, "not_path_evaluable_reason", "not_chain_evaluable_reason"),
   }).toLowerCase();
 }
 
@@ -971,7 +1003,7 @@ function roleTone(node) {
   if (role === "pre_symptom") return "pre";
   if (role === "root_cause") return "root";
   if (role === "symptom") return "symptom";
-  if (role === "intermediate") return "chain";
+  if (role === "intermediate") return "path";
   return "context";
 }
 
@@ -1006,11 +1038,11 @@ function compareGraphNodes(a, b) {
 }
 
 function detailRootKeys(detail) {
-  return new Set(detail?.chain_projection?.roots || []);
+  return new Set(pathProjection(detail).roots || []);
 }
 
 function detailSymptomKeys(detail) {
-  return new Set(detail?.chain_projection?.anchors || []);
+  return new Set(pathProjection(detail).anchors || []);
 }
 
 function hitNodeIsRootCause(node, detail) {
@@ -1027,7 +1059,7 @@ function hitNodeIsSymptomRootCause(node, detail) {
 
 const STEP_ROLE_COLORS = {
   symptom: "#dcfce7",
-  chain: "#dbeafe",
+  path: "#dbeafe",
   root: "#fee2e2",
 };
 
@@ -1039,7 +1071,7 @@ function stepRoleSegments(step, detail) {
   if (nodes.some((node) => hitNodeIsSymptomRootCause(node, detail))) return ["symptom-root-cause"];
   const roles = [];
   if (nodes.some((node) => hitNodeIsSymptom(node, detail))) roles.push("symptom");
-  if (nodes.some((node) => !hitNodeIsSymptom(node, detail) && !hitNodeIsRootCause(node, detail))) roles.push("chain");
+  if (nodes.some((node) => !hitNodeIsSymptom(node, detail) && !hitNodeIsRootCause(node, detail))) roles.push("path");
   if (nodes.some((node) => hitNodeIsRootCause(node, detail))) roles.push("root");
   if (roles.length) return roles;
   if ((scored.n_reads || 0) > 0 || (step?.recovered_reads || []).length || step?.action_family === "read") return ["offmap"];
@@ -1089,9 +1121,9 @@ function stepTone(step, detail) {
 }
 
 function graphNodes(detail, { includeContext = state.showGraphContext } = {}) {
-  const projection = detail?.chain_projection || {};
-  const chainNodes = projection.chain_nodes || [];
-  const contextNodes = projection.context_nodes || [];
+  const projection = pathProjection(detail);
+  const currentPathNodes = pathNodes(detail);
+  const contextNodes = graphContextNodes(detail);
   const anchors = new Set(projection.anchors || []);
   const roots = new Set(projection.roots || []);
   const editedNodes = finalEditNodeKeys(detail);
@@ -1109,13 +1141,13 @@ function graphNodes(detail, { includeContext = state.showGraphContext } = {}) {
   });
   };
   const topologyNodes = detail?.graph_topology?.nodes || [];
-  if (includeContext && topologyNodes.length) return topologyNodes.map((node) => annotateNode({ ...node, group: node.rewardable ? "chain" : "context" }));
-  const projected = includeContext ? [...contextNodes, ...chainNodes] : chainNodes;
+  if (includeContext && topologyNodes.length) return topologyNodes.map((node) => annotateNode({ ...node, group: node.rewardable ? "path" : "context" }));
+  const projected = includeContext ? [...contextNodes, ...currentPathNodes] : currentPathNodes;
   if (projected.length) return projected.map(annotateNode);
-  return topologyNodes.map((node) => annotateNode({ ...node, group: node.rewardable ? "chain" : "context" }));
+  return topologyNodes.map((node) => annotateNode({ ...node, group: node.rewardable ? "path" : "context" }));
 }
 
-function normalizeGraphEdge(edge, edgeType = "chain") {
+function normalizeGraphEdge(edge, edgeType = "path") {
   if (Array.isArray(edge)) {
     return { caller: edge[0], callee: edge[1], source: edge[0], target: edge[1], edge_type: edgeType };
   }
@@ -1124,23 +1156,23 @@ function normalizeGraphEdge(edge, edgeType = "chain") {
   return { ...edge, caller, callee, source: caller, target: callee, edge_type: edge?.edge_type || edgeType };
 }
 
-function graphEdges(detail, { includeContext = state.showGraphContext, includeCallGraph = state.graphEdgeFilters.call === true } = {}) {
-  const projection = detail?.chain_projection || {};
-  const chainEdges = projection.chain_edges || [];
+function graphEdges(detail, { includeContext = state.showGraphContext, includeGraph = state.graphEdgeFilters.graph === true } = {}) {
+  const projection = pathProjection(detail);
+  const currentPathEdges = pathEdges(detail);
   const contextEdges = projection.context_edges || [];
   const topologyEdges = detail?.graph_topology?.edges || [];
-  if ((includeContext || includeCallGraph) && topologyEdges.length) {
-    const chainEdgeKeys = new Set(chainEdges.map((edge) => `${edge.caller || edge.source}->${edge.callee || edge.target}`));
+  if ((includeContext || includeGraph) && topologyEdges.length) {
+    const pathEdgeKeys = new Set(currentPathEdges.map((edge) => `${edge.caller || edge.source}->${edge.callee || edge.target}`));
     return topologyEdges.map((edge) => {
       const normalized = normalizeGraphEdge(edge, "context");
       const key = `${normalized.caller}->${normalized.callee}`;
-      return { ...normalized, edge_type: chainEdgeKeys.has(key) ? "chain" : "context" };
+      return { ...normalized, edge_type: pathEdgeKeys.has(key) ? "path" : "context" };
     });
   }
-  const edges = includeContext ? [...contextEdges, ...chainEdges] : chainEdges;
-  const projected = [...(projection.context_nodes || []), ...(projection.chain_nodes || [])];
-  if (projected.length) return edges.map((edge) => normalizeGraphEdge(edge, edge.edge_type || "chain"));
-  return topologyEdges.map((edge) => normalizeGraphEdge(edge, "chain"));
+  const edges = includeContext ? [...contextEdges, ...currentPathEdges] : currentPathEdges;
+  const projected = [...graphContextNodes(detail), ...pathNodes(detail)];
+  if (projected.length) return edges.map((edge) => normalizeGraphEdge(edge, edge.edge_type === "context" ? "context" : "path"));
+  return topologyEdges.map((edge) => normalizeGraphEdge(edge, "path"));
 }
 
 function graphGroupKey(node) {
@@ -1209,7 +1241,7 @@ function aggregateGraph(nodes, edges) {
     const key = `${source}->${target}`;
     const aggregateEdge = { ...edge, caller: source, callee: target, source, target };
     const existing = aggregateEdgeByKey.get(key);
-    if (!existing || existing.edge_type !== "chain" && aggregateEdge.edge_type === "chain") {
+    if (!existing || existing.edge_type !== "path" && aggregateEdge.edge_type === "path") {
       aggregateEdgeByKey.set(key, aggregateEdge);
     }
   });
@@ -1221,9 +1253,10 @@ function graphModel(detail, options = {}) {
 }
 
 function graphEdgeBucket(edge) {
-  if (edge.edge_type === "agent") return "agent";
-  if (edge.edge_type === "context") return "call";
-  return "reward";
+  if (edge.edge_type === "trace") return "trace";
+  if (edge.edge_type === "agent") return "trace";
+  if (edge.edge_type === "context") return "graph";
+  return "path";
 }
 
 function graphEdgeVisible(edge) {
@@ -1238,8 +1271,7 @@ function stepHitNodeKeys(step) {
 }
 
 function firstHitNodeKeysFromProjection(detail) {
-  const projection = detail?.chain_projection || {};
-  const nodes = [...(projection.context_nodes || []), ...(projection.chain_nodes || [])];
+  const nodes = [...graphContextNodes(detail), ...pathNodes(detail)];
   return nodes
     .filter((node) => node?.first_step !== null && node?.first_step !== undefined)
     .sort((a, b) => Number(a.first_step) - Number(b.first_step))
@@ -1247,7 +1279,7 @@ function firstHitNodeKeysFromProjection(detail) {
     .filter((key) => typeof key === "string" && key);
 }
 
-function agentTraversalEdges(detail, model) {
+function traceEdges(detail, model) {
   const visible = new Set(model.nodes.map((node) => node.key));
   const toVisibleKey = (rawKey) => {
     const mapped = model.nodeKeyMap?.get(rawKey) || rawKey;
@@ -1277,7 +1309,7 @@ function agentTraversalEdges(detail, model) {
     const target = sequence[index];
     if (!source || !target || source === target) continue;
     const key = `${source}->${target}`;
-    const current = edgeByKey.get(key) || { source, target, caller: source, callee: target, edge_type: "agent", first_hop: index, count: 0 };
+    const current = edgeByKey.get(key) || { source, target, caller: source, callee: target, edge_type: "trace", first_hop: index, count: 0 };
     current.count += 1;
     edgeByKey.set(key, current);
   }
@@ -1294,17 +1326,17 @@ function nodeRoleLabel(node) {
 }
 
 function graphEdgeMarker(edge) {
-  if (edge.edge_type === "agent") return "graph-arrow-agent";
-  return edge.edge_type === "context" ? "graph-arrow-context" : "graph-arrow-chain";
+  if (edge.edge_type === "trace" || edge.edge_type === "agent") return "graph-arrow-trace";
+  return edge.edge_type === "context" ? "graph-arrow-context" : "graph-arrow-path";
 }
 
-function graphEdgePath(a, b, edgeType = "chain") {
+function graphEdgePath(a, b, edgeType = "path") {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   const len = Math.sqrt(dx * dx + dy * dy) || 1;
   const startPad = 22;
   const endPad = 24;
-  const perpendicular = edgeType === "agent" ? 12 : 0;
+  const perpendicular = edgeType === "trace" ? 12 : 0;
   const px = -dy / len * perpendicular;
   const py = dx / len * perpendicular;
   const sx = a.x + dx / len * startPad + px;
@@ -1312,7 +1344,7 @@ function graphEdgePath(a, b, edgeType = "chain") {
   const tx = b.x - dx / len * endPad + px;
   const ty = b.y - dy / len * endPad + py;
   const direction = dx >= 0 ? 1 : -1;
-  const bendFactor = edgeType === "agent" ? 0.58 : 0.45;
+  const bendFactor = edgeType === "trace" ? 0.58 : 0.45;
   const bend = Math.max(60, Math.abs(dx) * bendFactor);
   const sameLayerBend = Math.abs(dx) < 12 ? 90 : bend;
   const c1x = sx + direction * sameLayerBend;
@@ -1582,7 +1614,7 @@ function renderGraphSourcePanel(model) {
   return `<aside class="graph-source-panel">
     <h4>Node Source</h4>
     <div class="node-source-meta"><strong>${esc(selected.label || selected.key)}</strong><span>${esc(nodeRoleLabel(selected))}</span><span>${esc(location)}</span><span>${esc(language)}</span></div>
-    ${sourcePayload.truncated ? '<div class="node-source-warning">Full source was unavailable from bonus-map data; showing the stored preview.</div>' : ""}
+    ${sourcePayload.truncated ? '<div class="node-source-warning">Full source was unavailable from the Graph artifact; showing the stored preview.</div>' : ""}
     ${members}
     ${source ? `<div class="node-source-code"><pre class="code-view language-${esc(language)}"><code>${highlightCode(source, language)}</code></pre></div>` : '<div class="empty">No source was captured for this node.</div>'}
   </aside>`;
@@ -1616,12 +1648,12 @@ function renderTraceTitleCard(detail) {
 }
 
 function renderGraph(detail) {
-  const projection = detail?.chain_projection || {};
+  const projection = pathProjection(detail);
   const contextNodeCount = (projection.context_nodes || []).length;
   const contextEdgeCount = (projection.context_edges || []).length;
   const model = graphModel(detail);
   const nodes = model.nodes;
-  if (!nodes.length) return '<div class="empty">No bonus-map graph available for this instance.</div>';
+  if (!nodes.length) return '<div class="empty">No Graph available for this instance.</div>';
   const fixedEdges = model.edges;
   const edges = fixedEdges.filter(graphEdgeVisible);
   const layers = new Map();
@@ -1649,18 +1681,18 @@ function renderGraph(detail) {
     const a = positions.get(caller);
     const b = positions.get(callee);
     if (!a || !b) return "";
-    const edgeType = edge.edge_type === "context" ? "context" : "chain";
+    const edgeType = edge.edge_type === "context" ? "context" : "path";
     return `<path class="graph-edge ${esc(edgeType)}" d="${graphEdgePath(a, b, edgeType)}" marker-end="url(#${graphEdgeMarker(edge)})"><title>${esc(caller)} -> ${esc(callee)} (${esc(edgeType)})</title></path>`;
   }).join("");
-  const allTraversalEdges = agentTraversalEdges(detail, model);
-  const traversalEdges = state.graphEdgeFilters.agent ? allTraversalEdges : [];
+  const allTraversalEdges = traceEdges(detail, model);
+  const traversalEdges = state.graphEdgeFilters.trace ? allTraversalEdges : [];
   const traversalSvg = traversalEdges.map((edge) => {
     const a = positions.get(edge.source);
     const b = positions.get(edge.target);
     if (!a || !b) return "";
     const label = graphEdgeLabelPosition(a, b);
     const hopLabel = edge.count > 1 ? `${edge.first_hop}x${edge.count}` : String(edge.first_hop);
-    return `<path class="graph-edge agent graph-agent-edge" d="${graphEdgePath(a, b, "agent")}" marker-end="url(#graph-arrow-agent)"><title>Trace edge ${esc(edge.source)} -> ${esc(edge.target)} first hop ${esc(edge.first_hop)}${edge.count > 1 ? ` repeated ${esc(edge.count)} times` : ""}</title></path><text class="graph-agent-label" x="${label.x.toFixed(1)}" y="${label.y.toFixed(1)}">${esc(hopLabel)}</text>`;
+    return `<path class="graph-edge trace graph-trace-edge" d="${graphEdgePath(a, b, "trace")}" marker-end="url(#graph-arrow-trace)"><title>Trace edge ${esc(edge.source)} -> ${esc(edge.target)} first hop ${esc(edge.first_hop)}${edge.count > 1 ? ` repeated ${esc(edge.count)} times` : ""}</title></path><text class="graph-trace-label" x="${label.x.toFixed(1)}" y="${label.y.toFixed(1)}">${esc(hopLabel)}</text>`;
   }).join("");
   const nodeSvg = nodes.map((node) => {
     const pos = positions.get(node.key);
@@ -1685,29 +1717,29 @@ function renderGraph(detail) {
   const hiddenFixedEdgeCount = fixedEdges.length - edges.length;
   const hiddenTraversalEdgeCount = allTraversalEdges.length - traversalEdges.length;
   const edgeFilterSummary = [
-    state.graphEdgeFilters.reward ? "Path edges" : null,
-    state.graphEdgeFilters.call ? "Graph edges" : null,
-    state.graphEdgeFilters.agent ? "Trace edges" : null,
+    state.graphEdgeFilters.path ? "Path edges" : null,
+    state.graphEdgeFilters.graph ? "Graph edges" : null,
+    state.graphEdgeFilters.trace ? "Trace edges" : null,
   ].filter(Boolean).join(", ") || "none";
   const scope = state.showGraphContext
     ? `Full Graph: ${nodes.length} visual nodes, ${edges.length}/${fixedEdges.length} fixed edges, ${traversalEdges.length}/${allTraversalEdges.length} Trace edges.`
     : `Core Path: ${nodes.length} visual nodes, ${edges.length}/${fixedEdges.length} fixed edges, ${traversalEdges.length}/${allTraversalEdges.length} Trace edges. ${contextNodeCount} context/harness nodes and ${contextEdgeCount} context edges are hidden.`;
   const hiddenNote = hiddenFixedEdgeCount || hiddenTraversalEdgeCount
-    ? ` Hidden by arrow filter: ${hiddenFixedEdgeCount} fixed, ${hiddenTraversalEdgeCount} agent.`
+    ? ` Hidden by arrow filter: ${hiddenFixedEdgeCount} fixed, ${hiddenTraversalEdgeCount} Trace.`
     : "";
   const note = edges.length || traversalEdges.length
     ? `${scope} Showing edges: ${edgeFilterSummary}. Blue edges are Path edges; gray edges are Graph edges outside the Path; orange dashed edges are Trace edges over visible Graph nodes.${hiddenNote}`
     : `${scope} Showing edges: ${edgeFilterSummary}. No edges are visible under the current edge filter.`;
   const hasSelectedSource = model.nodes.some((node) => node.key === state.selectedGraphNodeKey);
-  return `<section class="graph-panel" aria-label="Dependency graph">
+  return `<section class="graph-panel" aria-label="Graph">
     <div class="graph-head">
       <div class="graph-controls">
         ${contextNodeCount || contextEdgeCount || (detail?.graph_topology?.nodes || []).length ? `<label class="graph-toggle"><input id="graph-context-toggle" type="checkbox" ${state.showGraphContext ? "checked" : ""}> Show full Graph</label>` : ""}
         <fieldset class="graph-edge-filter" aria-label="Graph edge filter">
           <legend>Edges</legend>
-          <label><input class="graph-edge-filter-checkbox" type="checkbox" data-edge-filter="reward" ${state.graphEdgeFilters.reward ? "checked" : ""}> Path edges</label>
-          <label><input class="graph-edge-filter-checkbox" type="checkbox" data-edge-filter="call" ${state.graphEdgeFilters.call ? "checked" : ""}> Graph edges</label>
-          <label><input class="graph-edge-filter-checkbox" type="checkbox" data-edge-filter="agent" ${state.graphEdgeFilters.agent ? "checked" : ""}> Trace edges</label>
+          <label><input class="graph-edge-filter-checkbox" type="checkbox" data-edge-filter="path" ${state.graphEdgeFilters.path ? "checked" : ""}> Path edges</label>
+          <label><input class="graph-edge-filter-checkbox" type="checkbox" data-edge-filter="graph" ${state.graphEdgeFilters.graph ? "checked" : ""}> Graph edges</label>
+          <label><input class="graph-edge-filter-checkbox" type="checkbox" data-edge-filter="trace" ${state.graphEdgeFilters.trace ? "checked" : ""}> Trace edges</label>
         </fieldset>
       </div>
     </div>
@@ -1719,9 +1751,9 @@ function renderGraph(detail) {
             <stop offset="50%" stop-color="#dcfce7"></stop>
             <stop offset="50%" stop-color="#fee2e2"></stop>
           </linearGradient>
-          <marker id="graph-arrow-chain" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z"></path></marker>
+          <marker id="graph-arrow-path" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z"></path></marker>
           <marker id="graph-arrow-context" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z"></path></marker>
-          <marker id="graph-arrow-agent" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z"></path></marker>
+          <marker id="graph-arrow-trace" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z"></path></marker>
         </defs>
         ${edgeSvg}${traversalSvg}${nodeSvg}
       </svg></div>
@@ -1761,8 +1793,10 @@ function traceStatusIcons(detail) {
 function traceSummary(detail) {
   const steps = (detail.step_inspection || detail.step_details || []).length;
   const blocks = (detail.purpose_blocks || []).length;
-  const mapHits = detail.n_chain_nodes ? ` · map ${fmt(detail.n_hit_chain_nodes ?? 0)}/${fmt(detail.n_chain_nodes)}` : "";
-  return `${fmt(steps)} steps · ${fmt(blocks)} blocks${mapHits}`;
+  const nPathNodes = pathValue(detail, "n_path_nodes", "n_chain_nodes", 0);
+  const nHitPathNodes = pathValue(detail, "n_hit_path_nodes", "n_hit_chain_nodes", 0);
+  const pathHits = nPathNodes ? ` · Path ${fmt(nHitPathNodes)}/${fmt(nPathNodes)}` : "";
+  return `${fmt(steps)} steps · ${fmt(blocks)} blocks${pathHits}`;
 }
 
 function renderTraceList(snapshot) {
@@ -1781,7 +1815,7 @@ function renderTraceList(snapshot) {
 }
 
 function renderTraceLegend() {
-  return `${visualLegend("", TRACE_LEGEND_GROUPS)}${visualLegend("Dependency graph", GRAPH_LEGEND_GROUPS)}`;
+  return `${visualLegend("", TRACE_LEGEND_GROUPS)}${visualLegend("Graph", GRAPH_LEGEND_GROUPS)}`;
 }
 
 function renderTraceWorkspacePanels(detail) {
@@ -1958,7 +1992,7 @@ function nodeLineRange(node) {
 function groupedStepHitNodes(step, detail) {
   const groups = [
     { key: "symptom", label: "symptom", nodes: [] },
-    { key: "chain", label: "map hit", nodes: [] },
+    { key: "path", label: "Path hit", nodes: [] },
     { key: "root", label: "root cause", nodes: [] },
   ];
   for (const node of stepHitNodes(step)) {
@@ -1974,7 +2008,7 @@ function groupedStepHitNodes(step, detail) {
 function renderStepNodeHits(step, detail) {
   const groups = groupedStepHitNodes(step, detail).filter((group) => group.nodes.length);
   if (!groups.length) {
-    return `<section class="step-node-hits"><h4>Visited bonus-map nodes</h4><div class="empty">No bonus-map node hit in this step.</div></section>`;
+    return `<section class="step-node-hits"><h4>Visited Graph nodes</h4><div class="empty">No Graph node hit in this step.</div></section>`;
   }
   const groupHtml = groups.map((group) => `<div class="node-hit-group ${esc(group.key)}">
     <div class="node-hit-group-title"><span class="node-hit-swatch"></span><span>${esc(group.label)}</span></div>
@@ -1986,7 +2020,7 @@ function renderStepNodeHits(step, detail) {
       </li>`).join("")}
     </ul>
   </div>`).join("");
-  return `<section class="step-node-hits"><h4>Visited bonus-map nodes</h4><div class="node-hit-groups">${groupHtml}</div></section>`;
+  return `<section class="step-node-hits"><h4>Visited Graph nodes</h4><div class="node-hit-groups">${groupHtml}</div></section>`;
 }
 
 function renderToggle(title, value, className = "", open = false) {

@@ -53,6 +53,12 @@ is on `main`.
   **Path** means the issue symptom-to-root-cause subgraph/path. **Trace** means
   the model/agent execution trajectory. Do not use "Trace" for the captured
   dependency graph in user-facing labels or research text.
+- Treat `call_graph_*`, `chain_*`, `dynamic_traceable_*`, and historical
+  instrumentation filenames as legacy storage/API vocabulary. New helpers,
+  variables, comments, UI labels, README/proposal text, and issue descriptions
+  should use Graph, Path, and Trace directly; when old keys are required for
+  backward compatibility, isolate them behind explicit alias/normalization
+  helpers and label them as legacy.
 - If a dashboard feature depends on read/write/error/root-cause semantics, add
   or reuse the corresponding parser/scorer fields in P2A source first, then
   render those fields in the frontend. Avoid frontend-only inference for

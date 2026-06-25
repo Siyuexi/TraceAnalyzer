@@ -17,7 +17,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
     assert ".graph-content.has-source" in css
     assert ".metric-group-filter" in css
     assert ".kpi-table th.metric-group-graph" in css
-    assert ".kpi-table th.metric-group-dependency-path" in css
+    assert ".kpi-table th.metric-group-path" in css
     snapshot = {
         "schema_version": "p2a_unified_dashboard_v1",
         "sources": [{"kind": "db", "path": "demo.sqlite"}],
@@ -32,8 +32,9 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                     "n_instances": 2,
                     "distributions": {
                         "case_types": {"direct": 2},
+                        "not_path_evaluable_reasons": {},
                         "not_chain_evaluable_reasons": {},
-                        "availability": {"with_bonus_map": 2, "with_call_graph": 2, "chain_evaluable": 2, "not_chain_evaluable": 0},
+                        "availability": {"with_bonus_map": 2, "with_call_graph": 2, "path_evaluable": 2, "chain_evaluable": 2, "not_path_evaluable": 0, "not_chain_evaluable": 0},
                     },
                 }
             },
@@ -65,6 +66,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 "trajectory_count": 1,
                 "resolved_rate": 0.0,
                 "root_hit_rate": 1.0,
+                "path_node_recall": 1.0,
                 "chain_node_recall": 1.0,
                 "read_precision": 1.0,
             },
@@ -95,6 +97,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 "model_label": "model-a",
                 "target": 1,
                 "done": 1,
+                "avg_path_read_precision": 1.0,
                 "avg_chain_read_precision": 1.0,
             },
             {
@@ -108,8 +111,24 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 "model_label": "model-b",
                 "target": 1,
                 "done": 1,
+                "avg_path_read_precision": 0.0,
                 "avg_chain_read_precision": 0.0,
             },
+        ],
+        "path_metric_model_metrics": [
+            {
+                "eval_cell_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
+                "experiment_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
+                "source_kind": "third_party_api",
+                "experiment_id": "exp-a",
+                "provider_source": "internal_api",
+                "dataset": "swebench-hard",
+                "model_api_name": "model-a",
+                "model_label": "model-a",
+                "target": 1,
+                "done": 1,
+                "avg_path_read_precision": 1.0,
+            }
         ],
         "dynamic_traceable_model_metrics": [
             {
@@ -123,6 +142,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 "model_label": "model-a",
                 "target": 1,
                 "done": 1,
+                "avg_path_read_precision": 1.0,
                 "avg_chain_read_precision": 1.0,
             }
         ],
@@ -142,6 +162,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 }
             ]
         },
+        "path_metric_detail_count": 1,
         "dynamic_traceable_detail_count": 1,
         "runs": [],
         "details": [
@@ -170,6 +191,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 "cost": 1.25,
                 "root_hit": True,
                 "anchor_hit": True,
+                "path_hit": True,
                 "chain_hit": True,
                 "order_score": -1.0,
                 "order_defined": True,
@@ -177,13 +199,76 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 "block_order_score": -1.0,
                 "block_order_defined": True,
                 "block_miracle_step": True,
+                "path_evaluable": True,
                 "chain_evaluable": True,
+                "path_case_kind": "direct",
                 "chain_case_kind": "direct",
+                "path_node_recall": 1.0,
                 "chain_node_recall": 1.0,
+                "path_read_precision": 1.0,
                 "chain_read_precision": 1.0,
                 "edited_root_cause": True,
                 "bad_patterns": {"has_loop": False, "error_spiral": False},
+                "path_pattern_flags": {},
                 "chain_bad_patterns": {},
+                "path_projection": {
+                    "anchors": ["pkg/symptom.py::symptom"],
+                    "roots": ["pkg/root.py::root"],
+                    "graph_context_nodes": [
+                        {
+                            "key": "tests/test_demo.py::test_demo",
+                            "file_path": "tests/test_demo.py",
+                            "start_line": 1,
+                            "end_line": 10,
+                            "normalized_distance": 1.0,
+                            "node_role": "test_harness",
+                            "hit": False,
+                            "first_step": None,
+                        }
+                    ],
+                    "path_nodes": [
+                        {
+                            "key": "pkg/symptom.py::symptom",
+                            "file_path": "pkg/symptom.py",
+                            "start_line": 1,
+                            "end_line": 10,
+                            "normalized_distance": 1.0,
+                            "node_role": "symptom",
+                            "hit": True,
+                            "first_step": 0,
+                        },
+                        {
+                            "key": "pkg/root.py::root",
+                            "file_path": "pkg/root.py",
+                            "start_line": 1,
+                            "end_line": 10,
+                            "normalized_distance": 0.0,
+                            "node_role": "root_cause",
+                            "hit": True,
+                            "first_step": 1,
+                            "source_preview": "def root(self, obj):\n    self.value = obj.good\n    return self.value",
+                        },
+                    ],
+                    "path_edges": [],
+                    "graph_context_edges": [
+                        {"caller": "tests/test_demo.py::test_demo", "callee": "pkg/symptom.py::symptom"}
+                    ],
+                    "context_nodes": [
+                        {
+                            "key": "tests/test_demo.py::test_demo",
+                            "file_path": "tests/test_demo.py",
+                            "start_line": 1,
+                            "end_line": 10,
+                            "normalized_distance": 1.0,
+                            "node_role": "test_harness",
+                            "hit": False,
+                            "first_step": None,
+                        }
+                    ],
+                    "context_edges": [
+                        {"caller": "tests/test_demo.py::test_demo", "callee": "pkg/symptom.py::symptom"}
+                    ],
+                },
                 "chain_projection": {
                     "anchors": ["pkg/symptom.py::symptom"],
                     "roots": ["pkg/root.py::root"],
@@ -397,7 +482,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             if (run("state.tracePanelOpen.graph") !== false || run("state.tracePanelOpen.steps") !== true || run("state.activeTracePanel") !== "steps") {
               throw new Error("trace workspace should default to graph collapsed and trace expanded");
             }
-            for (const needle of ["trace-left", "trace-title-card", "trace-section", 'id="trace-graph-section"', 'id="trace-step-section"', "<summary>Graph</summary>", "<summary>Trace</summary>", "Instance overview", "Issue description", "markdown-body", "<strong>details</strong>", "language-python", "print", "Golden patch", "patch-view", "diff-meta", "diff-file", "diff-hunk", "diff-del", "diff-add", "diff --git", "<svg", "Show full Graph", "Edges", "Path edges", "Graph edges", "Trace edges", "case-a", "model-a · run-a", "1 context/harness nodes", "Showing edges: Path edges, Trace edges", "graph-agent-edge", "graph-edit-ring", "data-node-key"]) {
+            for (const needle of ["trace-left", "trace-title-card", "trace-section", 'id="trace-graph-section"', 'id="trace-step-section"', "<summary>Graph</summary>", "<summary>Trace</summary>", "Instance overview", "Issue description", "markdown-body", "<strong>details</strong>", "language-python", "print", "Golden patch", "patch-view", "diff-meta", "diff-file", "diff-hunk", "diff-del", "diff-add", "diff --git", "<svg", "Show full Graph", "Edges", "Path edges", "Graph edges", "Trace edges", "case-a", "model-a · run-a", "1 context/harness nodes", "Showing edges: Path edges, Trace edges", "graph-trace-edge", "graph-edit-ring", "data-node-key"]) {
               if (!traceHtml.includes(needle)) throw new Error(`missing inspector fragment: ${needle}`);
             }
             if (traceHtml.includes('id="trace-graph-section" class="trace-section trace-graph-section" data-trace-panel="graph" open')) {
@@ -413,10 +498,10 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
               if (traceHtml.includes(needle)) throw new Error(`graph panel should not contain stale title or top legend fragment: ${needle}`);
             }
             const stepHtml = traceHtml;
-            for (const needle of ["trace-middle", "trace-right", "step-thumb root-edit", "step-thumb symptom is-error", "data-step-tone=", "data-step-roles=", "Purpose blocks", "Visited bonus-map nodes", "node-hit-group root", "pkg/root.py", "Reasoning", "Chat", "Tool calls", "str_replace_editor", "Action", "Observation", "Inline diff"]) {
+            for (const needle of ["trace-middle", "trace-right", "step-thumb root-edit", "step-thumb symptom is-error", "data-step-tone=", "data-step-roles=", "Purpose blocks", "Visited Graph nodes", "node-hit-group root", "pkg/root.py", "Reasoning", "Chat", "Tool calls", "str_replace_editor", "Action", "Observation", "Inline diff"]) {
               if (!stepHtml.includes(needle)) throw new Error(`missing step panel fragment: ${needle}`);
             }
-            if (stepHtml.indexOf("Visited bonus-map nodes") > stepHtml.indexOf("Tool calls")) {
+            if (stepHtml.indexOf("Visited Graph nodes") > stepHtml.indexOf("Tool calls")) {
               throw new Error("step node hit summary should render above parsed tool calls");
             }
             for (const needle of ["Reward path", "Call graph", "Agent path", "Dependency-path edges", "Other call edges", "Agent-traversal edges", "dependency-path edges", "other call edges", "agent-traversal edges", "Dependency-path edge", "Other call edge", "Agent-traversal edge", "reward-path", "call-graph", "agent-path"]) {
@@ -465,7 +550,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
               {key: "pkg/mid.py::mid", node_role: "intermediate"},
               {key: "pkg/root.py::root", node_role: "root_cause"}
             ]}}, state.snapshot.details[0]))`);
-            if (splitRoles !== JSON.stringify(["symptom", "chain", "root"])) {
+            if (splitRoles !== JSON.stringify(["symptom", "path", "root"])) {
               throw new Error(`unexpected split roles: ${splitRoles}`);
             }
             const dualNodeTone = run(`stepTone({scored: {hit_nodes: [
@@ -495,10 +580,10 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
               {key: "pkg/mid.py::Middle.step", file_path: "pkg/mid.py", start_line: 9, end_line: 9, node_role: "intermediate"},
               {key: "pkg/root.py::Root.fix", file_path: "pkg/root.py", start_line: 10, end_line: 20, node_role: "root_cause"}
             ]}}, state.snapshot.details[0])`);
-            for (const needle of ["node-hit-group symptom", "node-hit-group chain", "node-hit-group root", "pkg/symptom.py", "Symptom.run", "pkg/mid.py", "Middle.step", "pkg/root.py", "Root.fix", ":10-20"]) {
+            for (const needle of ["node-hit-group symptom", "node-hit-group path", "node-hit-group root", "pkg/symptom.py", "Symptom.run", "pkg/mid.py", "Middle.step", "pkg/root.py", "Root.fix", ":10-20"]) {
               if (!nodeHitHtml.includes(needle)) throw new Error(`missing step node hit fragment: ${needle}`);
             }
-            if (!(nodeHitHtml.indexOf("node-hit-group symptom") < nodeHitHtml.indexOf("node-hit-group chain") && nodeHitHtml.indexOf("node-hit-group chain") < nodeHitHtml.indexOf("node-hit-group root"))) {
+            if (!(nodeHitHtml.indexOf("node-hit-group symptom") < nodeHitHtml.indexOf("node-hit-group path") && nodeHitHtml.indexOf("node-hit-group path") < nodeHitHtml.indexOf("node-hit-group root"))) {
               throw new Error("map hit group should render between symptom and root cause");
             }
             if (!stepHtml.includes('detail-toggle observation-toggle" open')) {
@@ -515,13 +600,13 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
               if (traceHtml.includes(needle)) throw new Error(`edge-less graph should suppress badge: ${needle}`);
             }
             run("setTracePanelOpen('graph', true); renderTraceInspector(state.snapshot);");
-            run("state.graphEdgeFilters.agent = false; renderTraceInspector(state.snapshot);");
-            const noAgentHtml = elements.get("trace-inspector").innerHTML;
-            if (noAgentHtml.includes("graph-agent-edge")) {
+            run("state.graphEdgeFilters.trace = false; renderTraceInspector(state.snapshot);");
+            const noTraceHtml = elements.get("trace-inspector").innerHTML;
+            if (noTraceHtml.includes("graph-trace-edge")) {
               throw new Error("Trace edge filter did not hide Trace arrows");
             }
-            run("state.graphEdgeFilters.agent = true; renderTraceInspector(state.snapshot);");
-            run("state.showGraphContext = false; state.graphEdgeFilters.call = true; renderTraceInspector(state.snapshot);");
+            run("state.graphEdgeFilters.trace = true; renderTraceInspector(state.snapshot);");
+            run("state.showGraphContext = false; state.graphEdgeFilters.graph = true; renderTraceInspector(state.snapshot);");
             const callGraphHtml = elements.get("trace-inspector").innerHTML;
             if (!callGraphHtml.includes("Core Path") || !callGraphHtml.includes("graph-edge context")) {
               throw new Error("graph filter should reveal in-scope Graph edges without full graph toggle");
@@ -529,16 +614,16 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             for (const needle of ["tests/test_demo.py::test_demo", "test_harness"]) {
               if (callGraphHtml.includes(needle)) throw new Error(`call graph filter leaked full-graph node: ${needle}`);
             }
-            run("state.graphEdgeFilters.call = false; setGraphContext(true); renderTraceInspector(state.snapshot);");
+            run("state.graphEdgeFilters.graph = false; setGraphContext(true); renderTraceInspector(state.snapshot);");
             const fullGraphHtml = elements.get("trace-inspector").innerHTML;
-            if (run("state.graphEdgeFilters.call") !== true || !fullGraphHtml.includes("Showing edges: Path edges, Graph edges, Trace edges")) {
+            if (run("state.graphEdgeFilters.graph") !== true || !fullGraphHtml.includes("Showing edges: Path edges, Graph edges, Trace edges")) {
               throw new Error("full graph toggle should reveal Graph arrows");
             }
             for (const needle of ["Tool summary", "Recovered reads", "Matched bonus-map nodes"]) {
               if (stepHtml.includes(needle)) throw new Error(`stale inspector fragment: ${needle}`);
             }
             const legendHtml = elements.get("trace-legend").innerHTML;
-            for (const needle of ["Trace Patterns", "Read Step Colors", "Write / Execute / Other Step Colors", "legend-icon", "Hit symptom: observed failure signal", "Hit root cause: expected cause or fix target", "Edited root cause: a write landed on a root-cause node", "Loop: repeated purpose block", "Reverse: traversal goes against dependency order", "Write action modified root cause", "Write action did not hit root cause", "One step hit multiple map roles", "Tool or command execution failed", "Exec or other tool without a parsed read hit", "exec / other", "Parsed read outside the dependency path", "Dependency graph", "Nodes", "Edges", "Number is the first visited step", "Last edit landed on this node", "Trace edge", "Faded node was not visited", "Path edge", "Graph edge", "Dependency direction", 'x1="0" y1="1" x2="1" y2="0"']) {
+            for (const needle of ["Trace Patterns", "Read Step Colors", "Write / Execute / Other Step Colors", "legend-icon", "Hit symptom: observed failure signal", "Hit root cause: expected cause or fix target", "Edited root cause: a write landed on a root-cause node", "Loop: repeated purpose block", "Reverse: traversal goes against dependency order", "Write action modified root cause", "Write action did not hit root cause", "One step hit multiple map roles", "Tool or command execution failed", "Exec or other tool without a parsed read hit", "exec / other", "Parsed read outside the Path", "Graph", "Nodes", "Edges", "Number is the first visited step", "Last edit landed on this node", "Trace edge", "Faded node was not visited", "Path edge", "Graph edge", "Dependency direction", 'x1="0" y1="1" x2="1" y2="0"']) {
               if (!legendHtml.includes(needle)) throw new Error(`missing trajectory legend fragment: ${needle}`);
             }
             if (legendHtml.includes("Trajectory labels and colors")) {
@@ -557,7 +642,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
               if (legendHtml.includes(needle)) throw new Error(`trajectory legend should not include long prose: ${needle}`);
             }
             const modelHtml = elements.get("model-table").innerHTML;
-            for (const needle of ["KPI groups", "metric-group-checkbox", "metric-group-graph", "metric-group-dependency-path", "Metric definitions", "Graph", "Outcome", "Path", "Pattern", "Purpose Blocks", "Efficiency and Cost", "Graph P.", "Graph R.", "Graph F1", "Path P.", "Path R.", "Path F1", "Symptom hit", "Root cause hit", "Evaluator-resolved pass rate", "Completed cases over planned cases"]) {
+            for (const needle of ["KPI groups", "metric-group-checkbox", "metric-group-graph", "metric-group-path", "Metric definitions", "Graph", "Outcome", "Path", "Pattern", "Purpose Blocks", "Efficiency and Cost", "Graph P.", "Graph R.", "Graph F1", "Path P.", "Path R.", "Path F1", "Symptom hit", "Root cause hit", "Evaluator-resolved pass rate", "Completed cases over planned cases"]) {
               if (!modelHtml.includes(needle)) throw new Error(`missing macro glossary fragment: ${needle}`);
             }
             for (const needle of ["Effect and Evidence", "Graph Hits", "Dependency Path", "Exploration Behavior", "Path-read hit ratio", "Trace P.", "Trace R.", "Trace F1", "Trace precision", "Trace recall", "Path node precision", "Path node recall", "Path read precision", "Path hit ratio", "Graph hit ratio", "Read recall", "Not defined: no canonical required-read set", "Scored read actions that hit useful"]) {
@@ -579,8 +664,8 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             if (!allColumnHeaders.includes(expectedOrder)) {
               throw new Error(`KPI columns are not grouped by class: ${allColumnHeaders}`);
             }
-            const pathP = run("kpiColumns(false).find((column) => column.header === 'Path P.').value({avg_chain_node_precision: 0.25, avg_chain_read_precision: 1.0, avg_chain_node_recall: 0.5})");
-            const pathF1 = run("kpiColumns(false).find((column) => column.header === 'Path F1').value({avg_chain_node_precision: 0.25, avg_chain_read_precision: 1.0, avg_chain_node_recall: 0.5})");
+            const pathP = run("kpiColumns(false).find((column) => column.header === 'Path P.').value({avg_path_node_precision: 0.25, avg_path_read_precision: 1.0, avg_path_node_recall: 0.5})");
+            const pathF1 = run("kpiColumns(false).find((column) => column.header === 'Path F1').value({avg_path_node_precision: 0.25, avg_path_read_precision: 1.0, avg_path_node_recall: 0.5})");
             if (pathP !== "25.0%" || pathF1 !== "33.3%") {
               throw new Error(`Path P/F1 should use deduplicated node precision, got ${pathP}/${pathF1}`);
             }

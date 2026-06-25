@@ -43,7 +43,8 @@ touching this tree. The research-level `CLAUDE.md` is at the repo root.
 
 - `../../datasets` and `../../models` are the shared roots for reusable datasets
   and model checkpoints. Generated P2A parquets use `DATA`, conventionally
-  `../../datasets/p2a`.
+  `../../datasets/p2a`; override the model root with `MODEL_PATH`, `MODEL`, or
+  `P2A_MODELS_DIR`.
 - `src/data` is the default artifact root for TraceAnalyzer-generated outputs:
   bonus maps, validation details, SQLite eval caches, rollout dumps, analysis
   reports, and dashboard snapshots. Override the root with `P2A_ARTIFACTS_DIR`
@@ -79,6 +80,58 @@ touching this tree. The research-level `CLAUDE.md` is at the repo root.
   semantics, experiment definitions, or public terminology, update root
   `proposal.md`, `proposal.html`, and `report/proposal.html` in the same unit.
 
+## Semantic consistency rules
+
+- Do not let dashboard-only terminology drift from P2A functionality. Trace
+  labels, KPI names, legend text, reports, and README explanations must use the
+  same semantics as `p2a/core.py`, `p2a/eval_fault_localization.py`, and
+  `p2a/dashboard_adapter.py`.
+- Use Graph / Path / Trace terminology consistently. **Graph** means the real
+  dependency graph captured from instrumentation/failing-test execution.
+  **Path** means the issue symptom-to-root-cause subgraph/path. **Trace** means
+  the model/agent execution trajectory. Do not use "Trace" for the captured
+  dependency graph in user-facing labels or research text.
+- Treat `call_graph_*`, `chain_*`, `dynamic_traceable_*`, and historical
+  instrumentation filenames as legacy storage/API vocabulary. New helpers,
+  variables, comments, UI labels, README/proposal text, and issue descriptions
+  should use Graph, Path, and Trace directly; when old keys are required for
+  backward compatibility, isolate them behind explicit alias/normalization
+  helpers and label them as legacy.
+- If a dashboard feature depends on read/write/error/root-cause semantics, add
+  or reuse the corresponding parser/scorer fields in P2A source first, then
+  render those fields in the frontend. Avoid frontend-only inference for
+  metrics or trace status unless it is a compatibility fallback for old
+  artifacts.
+- Treat the SQLite eval cache as a raw capture and run-status store by default.
+  Dashboard metrics and trace pattern states must be computed from raw rollout
+  content plus bonus maps in dashboard/scorer code, not trusted from stale DB
+  score fields. New collection paths should store basic facts such as resolved
+  state, token usage, runtime, artifacts, and raw rollout content, but should
+  not populate localization score columns, `metrics_json.detail`, or pattern
+  flags. If dashboard-computed scores are persisted later, the write path is
+  one-way dashboard -> DB and the default read path still recomputes.
+- Treat node source code as bonus-map data. Dashboard Node Source must read full
+  callable source from the inferred or explicit P2A bonus-map directory; DB
+  `source_preview` fields are only compatibility fallbacks for old artifacts.
+- Execution failure must be inferred from structured tool/runtime signals such
+  as `status`, `error`, nonzero exit code, or traceback/command-failure output,
+  not from broad keyword scans over source code or successful read observations.
+- Keep the unified dashboard compatible with local training, local inference,
+  and third-party API inference artifacts. New trace fields should degrade
+  cleanly when older artifacts do not contain them.
+- When public-facing semantics change, update the README and, where research
+  claims are affected, keep the proposal/report documents synchronized.
+
+## Dashboard service deployment
+
+- This environment is a server. Do not present dashboard preview URLs bound to
+  `127.0.0.1` or `localhost` as user-accessible links.
+- For user-accessible dashboard services, bind the server to `0.0.0.0` and give
+  the user the server public IP plus port, for example
+  `http://<server-public-ip>:8770`.
+- When the user says they will manage the service themselves, provide the exact
+  start/stop commands only; do not start or keep the service running for them.
+
 ## P2A advantage — verify before trusting (TODO)
 
 `p2a/trainer.py::apply_p2a_reshape` + `p2a/core.py` implement and wire the reshape
@@ -96,7 +149,9 @@ proving P2A works on the Uni-Agent tool set and actually captures actions
   This is unrelated to VRC's `remote` facility — `vrc remote` targets the **GPU
   server** for command debugging. ARL gateway reachability is independent of
   `vrc remote health`; do not infer one from the other.
-- Every Python invocation inside `src/` uses `uv run` (pinned `uv.lock`).
+- Every Python invocation inside `src/` uses `uv run` (pinned `uv.lock`). Keep
+  local P2A imports resolvable with `PYTHONPATH=uni-agent/verl:uni-agent:.` when
+  running from this `src/` directory.
 - **Comments describe the present design, not the code's history.** Do NOT write
   changelog/defensive comments ("previously did X, it was a bug, changed to Y",
   "reverted the … switch", dated attributions, PR/issue numbers as narrative). Git

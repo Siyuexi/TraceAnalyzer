@@ -1,7 +1,7 @@
 """
 P2A (Process-to-Advantage) core module.
 
-Implements the V2 multiplicative advantage reshaping based on call-graph distance:
+Implements the V2 multiplicative advantage reshaping based on Graph distance:
   A_token = A_seq * m(d)^sign(A)
   where m(d) = m_max^(1-d), d = normalized hop distance in [0,1].
 
@@ -9,7 +9,7 @@ Components:
   - BonusMapStore: loads precomputed bonus maps (per instance_id)
   - parse_read_actions: extracts file viewing actions from agent responses
   - parse_write_actions_from_tool_calls: extracts file writing/editing actions
-  - match_reads_to_callgraph: matches Read actions to call graph nodes
+  - match_reads_to_graph: matches Read actions to Graph nodes
   - compute_p2a_multiplier: V2 multiply/divide formula
 
 Tracking modes:
@@ -714,25 +714,25 @@ def parse_read_actions(response_text: str, tracking_mode: str = "view_only") -> 
 
 
 # ---------------------------------------------------------------------------
-# Call graph matching
+# Graph matching
 # ---------------------------------------------------------------------------
 
 
-def is_rewardable_call_graph_node(node: dict) -> bool:
-    """Whether a call-graph node participates in P2A reward matching."""
+def is_rewardable_graph_node(node: dict) -> bool:
+    """Whether a Graph node participates in P2A reward matching."""
     return bool(node.get("rewardable", True))
 
 
-def match_reads_to_callgraph(reads: list[dict], bonus_map: dict) -> float:
-    """Match Read actions against call graph nodes.
+def match_reads_to_graph(reads: list[dict], bonus_map: dict) -> float:
+    """Match Read actions against captured Graph nodes.
 
     For each read action, check if its file_path and line range overlap with any
-    call graph node. Among all matches, return the minimum normalized distance
+    Graph node. Among all matches, return the minimum normalized distance
     (i.e., max bonus).
 
     Args:
         reads: List of read actions from parse_read_actions().
-        bonus_map: A bonus map dict with "call_graph_nodes" key.
+        bonus_map: A bonus map dict with legacy "call_graph_nodes" storage key.
 
     Returns:
         Minimum normalized distance in [0, 1] if any match found, -1.0 otherwise.
@@ -752,7 +752,7 @@ def match_reads_to_callgraph(reads: list[dict], bonus_map: dict) -> float:
         read_end = read["end_line"]
 
         for _node_key, node in nodes.items():
-            if not is_rewardable_call_graph_node(node):
+            if not is_rewardable_graph_node(node):
                 continue
             node_path = node["file_path"]
             node_start = node["start_line"]
@@ -771,6 +771,16 @@ def match_reads_to_callgraph(reads: list[dict], bonus_map: dict) -> float:
         return -1.0
 
     return min_distance
+
+
+def is_rewardable_call_graph_node(node: dict) -> bool:
+    """Compatibility alias for the legacy call-graph storage vocabulary."""
+    return is_rewardable_graph_node(node)
+
+
+def match_reads_to_callgraph(reads: list[dict], bonus_map: dict) -> float:
+    """Compatibility alias for legacy callers; new code should use Graph."""
+    return match_reads_to_graph(reads, bonus_map)
 
 
 # ---------------------------------------------------------------------------

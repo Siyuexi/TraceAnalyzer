@@ -19,6 +19,7 @@ from p2a.eval_fault_localization import (
     _json_default,
     _kendall_order,
     _miracle_stats,
+    _sync_path_aliases,
     iter_records,
     score_record,
     summarize,
@@ -35,7 +36,19 @@ THIRD_PARTY_PROVIDER_SOURCES = {
     "third_party",
     "api",
 }
-CHAIN_BAD_PATTERN_KEYS = (
+# Legacy DB/detail JSON uses `chain_*` keys for Path concepts. Dashboard code
+# should use Path helpers and only touch legacy keys through compatibility
+# accessors.
+PATH_PATTERN_KEYS = (
+    "missed_anchor",
+    "missed_root_after_anchor",
+    "root_before_anchor",
+    "path_stall",
+    "path_read_loop",
+    "off_path_read_spree",
+    "error_spiral_on_path",
+)
+LEGACY_PATH_PATTERN_KEYS = (
     "missed_anchor",
     "missed_root_after_anchor",
     "root_before_anchor",
@@ -44,7 +57,9 @@ CHAIN_BAD_PATTERN_KEYS = (
     "off_chain_read_spree",
     "error_spiral_on_chain",
 )
-DYNAMIC_TRACEABLE_CASE_TYPES = {"direct", "standard"}
+CHAIN_BAD_PATTERN_KEYS = LEGACY_PATH_PATTERN_KEYS
+PATH_METRIC_CASE_TYPES = {"direct", "standard"}
+DYNAMIC_TRACEABLE_CASE_TYPES = PATH_METRIC_CASE_TYPES
 CASE_FILTER_BUCKETS = ("direct", "standard", "others")
 DATASET_PARQUET_FILENAMES = {
     "swebench-hard": ("swe_bench_verified_hard.parquet",),
@@ -502,8 +517,9 @@ def _enrich_details_from_bonus_maps(details: list[dict[str, Any]], bonus_map_dir
         source_nodes = loaded[instance_id]
         if not source_nodes:
             continue
-        projection = detail.get("chain_projection")
-        if isinstance(projection, dict):
+        projection = _path_projection(detail)
+        if projection:
+            _enrich_node_list_sources(projection.get("path_nodes"), source_nodes)
             _enrich_node_list_sources(projection.get("chain_nodes"), source_nodes)
             _enrich_node_list_sources(projection.get("context_nodes"), source_nodes)
         topology = detail.get("graph_topology")
@@ -672,22 +688,23 @@ def _enrich_detail_from_record(
     enriched["cache_write_tokens"] = _number(token_usage.get("cache_write_tokens"))
     enriched["cost"] = _number(token_usage.get("cost"))
     enriched["step_inspection"] = _step_inspection(record, enriched.get("step_details") or [])
+    _sync_path_aliases(enriched)
     return enriched
 
 
 def _is_scored_detail(record: dict[str, Any]) -> bool:
     return "record_index" in record and (
-        "chain_evaluable" in record or "hit_call_graph" in record or "step_details" in record
+        "path_evaluable" in record or "chain_evaluable" in record or "hit_call_graph" in record or "step_details" in record
     )
 
 
 def _detail_bonus_map(detail: dict[str, Any]) -> dict[str, Any] | None:
-    projection = detail.get("chain_projection") if isinstance(detail.get("chain_projection"), dict) else {}
+    projection = _path_projection(detail)
     nodes: dict[str, dict[str, Any]] = {}
-    for node in projection.get("context_nodes") or []:
+    for node in _path_context_nodes(detail):
         if isinstance(node, dict) and node.get("key"):
             nodes[str(node["key"])] = {**node, "rewardable": node.get("rewardable", False)}
-    for node in projection.get("chain_nodes") or []:
+    for node in _path_nodes(detail):
         if isinstance(node, dict) and node.get("key"):
             nodes[str(node["key"])] = {**node, "rewardable": node.get("rewardable", True)}
     topology = detail.get("graph_topology") if isinstance(detail.get("graph_topology"), dict) else {}
@@ -701,7 +718,7 @@ def _detail_bonus_map(detail: dict[str, Any]) -> dict[str, Any] | None:
         "call_graph_nodes": nodes,
         "selected_issue_anchor_nodes": projection.get("anchors") or [],
         "root_cause_nodes": projection.get("roots") or [],
-        "reward_path_edges": projection.get("chain_edges") or [],
+        "reward_path_edges": _path_edges(detail),
     }
 
 
@@ -867,7 +884,9 @@ def _normalize_detail(detail: dict[str, Any], index: int | None = None) -> dict[
         "block_efficiency": None,
     }
     normalized.update(detail)
+    _sync_path_aliases(normalized)
     _repair_order_semantics(normalized)
+    _sync_path_aliases(normalized)
     return normalized
 
 
@@ -894,6 +913,8 @@ def _finalize_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "n_with_bonus_map",
         "n_with_call_graph",
         "n_with_reads",
+        "n_path_evaluable",
+        "n_not_path_evaluable",
         "n_chain_evaluable",
         "n_not_chain_evaluable",
     ):
@@ -1543,13 +1564,39 @@ def _sum_int(items: Iterable[dict[str, Any]], key: str) -> int:
     return total
 
 
-def _chain_node_precision(detail: dict[str, Any]) -> float | None:
-    projection = detail.get("chain_projection") or {}
-    chain_nodes = projection.get("chain_nodes") or []
+def _path_projection(detail: dict[str, Any]) -> dict[str, Any]:
+    _sync_path_aliases(detail)
+    projection = detail.get("path_projection") or detail.get("chain_projection") or {}
+    return projection if isinstance(projection, dict) else {}
+
+
+def _path_nodes(detail: dict[str, Any]) -> list[Any]:
+    projection = _path_projection(detail)
+    nodes = projection.get("path_nodes", projection.get("chain_nodes", []))
+    return nodes if isinstance(nodes, list) else []
+
+
+def _path_context_nodes(detail: dict[str, Any]) -> list[Any]:
+    projection = _path_projection(detail)
     context_nodes = projection.get("context_nodes") or []
-    if not isinstance(chain_nodes, list) or not isinstance(context_nodes, list):
-        return None
-    hit_chain = sum(1 for node in chain_nodes if isinstance(node, dict) and node.get("hit"))
+    return context_nodes if isinstance(context_nodes, list) else []
+
+
+def _path_edges(detail: dict[str, Any]) -> list[Any]:
+    projection = _path_projection(detail)
+    edges = projection.get("path_edges", projection.get("chain_edges", []))
+    return edges if isinstance(edges, list) else []
+
+
+def _path_value(detail: dict[str, Any], path_key: str, legacy_key: str, default: Any = None) -> Any:
+    _sync_path_aliases(detail)
+    return detail.get(path_key, detail.get(legacy_key, default))
+
+
+def _path_node_precision(detail: dict[str, Any]) -> float | None:
+    path_nodes = _path_nodes(detail)
+    context_nodes = _path_context_nodes(detail)
+    hit_chain = sum(1 for node in path_nodes if isinstance(node, dict) and node.get("hit"))
     hit_context = sum(1 for node in context_nodes if isinstance(node, dict) and node.get("hit"))
     denom = hit_chain + hit_context
     return (hit_chain / denom) if denom else None
@@ -1562,8 +1609,8 @@ def _f1(precision: float | None, recall: float | None) -> float | None:
     return 2 * precision * recall / denom if denom else 0.0
 
 
-def _chain_node_f1(detail: dict[str, Any]) -> float | None:
-    return _f1(_chain_node_precision(detail), _number(detail.get("chain_node_recall")))
+def _path_node_f1(detail: dict[str, Any]) -> float | None:
+    return _f1(_path_node_precision(detail), _number(_path_value(detail, "path_node_recall", "chain_node_recall")))
 
 
 def _distribution(items: Iterable[dict[str, Any]], key: str) -> dict[str, int]:
@@ -1576,34 +1623,38 @@ def _distribution(items: Iterable[dict[str, Any]], key: str) -> dict[str, int]:
 
 
 def _detail_case_type(detail: dict[str, Any]) -> str:
-    return str(detail.get("bonus_case_type") or detail.get("chain_case_kind") or "")
+    return str(detail.get("bonus_case_type") or _path_value(detail, "path_case_kind", "chain_case_kind", "") or "")
 
 
 def _case_filter_bucket(detail: dict[str, Any]) -> str:
     case_type = _detail_case_type(detail)
-    if detail.get("chain_evaluable") is True and case_type in {"direct", "standard"}:
+    if _path_value(detail, "path_evaluable", "chain_evaluable") is True and case_type in {"direct", "standard"}:
         return case_type
     return "others"
 
 
+def _is_path_metric_detail(detail: dict[str, Any]) -> bool:
+    return _path_value(detail, "path_evaluable", "chain_evaluable") is True and _detail_case_type(detail) in PATH_METRIC_CASE_TYPES
+
+
 def _is_dynamic_traceable_detail(detail: dict[str, Any]) -> bool:
-    return detail.get("chain_evaluable") is True and _detail_case_type(detail) in DYNAMIC_TRACEABLE_CASE_TYPES
+    """Compatibility wrapper for old code paths; prefer _is_path_metric_detail."""
+    return _is_path_metric_detail(detail)
 
 
 def _has_dual_symptom_root(detail: dict[str, Any]) -> bool:
-    projection = detail.get("chain_projection") or {}
+    projection = _path_projection(detail)
     anchors = set(projection.get("anchors") or [])
     roots = set(projection.get("roots") or [])
     return bool(anchors & roots)
 
 
-def _has_reward_path_edges(detail: dict[str, Any]) -> bool:
-    projection = detail.get("chain_projection") or {}
-    return bool(projection.get("chain_edges") or [])
+def _has_path_edges(detail: dict[str, Any]) -> bool:
+    return bool(_path_edges(detail))
 
 
 def _is_order_metric_detail(detail: dict[str, Any]) -> bool:
-    return _is_dynamic_traceable_detail(detail) and _has_reward_path_edges(detail) and not _has_dual_symptom_root(detail)
+    return _is_path_metric_detail(detail) and _has_path_edges(detail) and not _has_dual_symptom_root(detail)
 
 
 def _instance_key(detail: dict[str, Any]) -> str:
@@ -1619,8 +1670,8 @@ def _unique_dataset_details(details: Iterable[dict[str, Any]]) -> dict[str, list
         if current is None:
             by_dataset[dataset][instance] = detail
             continue
-        current_score = int(bool(current.get("has_bonus_map"))) + int(bool(current.get("chain_evaluable")))
-        new_score = int(bool(detail.get("has_bonus_map"))) + int(bool(detail.get("chain_evaluable")))
+        current_score = int(bool(current.get("has_bonus_map"))) + int(bool(_path_value(current, "path_evaluable", "chain_evaluable")))
+        new_score = int(bool(detail.get("has_bonus_map"))) + int(bool(_path_value(detail, "path_evaluable", "chain_evaluable")))
         if new_score > current_score:
             by_dataset[dataset][instance] = detail
     return {dataset: list(items.values()) for dataset, items in sorted(by_dataset.items())}
@@ -1630,10 +1681,12 @@ def _dataset_distributions(details: list[dict[str, Any]]) -> dict[str, dict[str,
     out: dict[str, dict[str, Any]] = {}
     for dataset, items in _unique_dataset_details(details).items():
         case_types: dict[str, int] = defaultdict(int)
-        not_chain: dict[str, int] = defaultdict(int)
+        not_path: dict[str, int] = defaultdict(int)
         availability = {
             "with_bonus_map": 0,
             "with_call_graph": 0,
+            "path_evaluable": 0,
+            "not_path_evaluable": 0,
             "chain_evaluable": 0,
             "not_chain_evaluable": 0,
         }
@@ -1643,36 +1696,41 @@ def _dataset_distributions(details: list[dict[str, Any]]) -> dict[str, dict[str,
                 availability["with_bonus_map"] += 1
             if item.get("has_call_graph"):
                 availability["with_call_graph"] += 1
-            if item.get("chain_evaluable"):
+            if _path_value(item, "path_evaluable", "chain_evaluable"):
+                availability["path_evaluable"] += 1
                 availability["chain_evaluable"] += 1
             else:
+                availability["not_path_evaluable"] += 1
                 availability["not_chain_evaluable"] += 1
-                not_chain[str(item.get("not_chain_evaluable_reason") or "unknown")] += 1
+                not_path[str(_path_value(item, "not_path_evaluable_reason", "not_chain_evaluable_reason", "unknown") or "unknown")] += 1
         out[dataset] = {
             "dataset": dataset,
             "n_instances": len(items),
             "distributions": {
                 "case_types": dict(sorted(case_types.items())),
-                "not_chain_evaluable_reasons": dict(sorted(not_chain.items())),
+                "not_path_evaluable_reasons": dict(sorted(not_path.items())),
+                "not_chain_evaluable_reasons": dict(sorted(not_path.items())),
                 "availability": availability,
             },
         }
     return out
 
 
-def _chain_bad_distribution(details: Iterable[dict[str, Any]]) -> dict[str, int]:
+def _path_pattern_distribution(details: Iterable[dict[str, Any]], keys: Iterable[str] = PATH_PATTERN_KEYS) -> dict[str, int]:
     counts: dict[str, int] = defaultdict(int)
     for detail in details:
-        patterns = detail.get("chain_bad_patterns")
+        patterns = _path_value(detail, "path_pattern_flags", "chain_bad_patterns")
         if not isinstance(patterns, dict):
             continue
-        for key in CHAIN_BAD_PATTERN_KEYS:
+        for key in keys:
             if patterns.get(key):
                 counts[key] += 1
     return dict(sorted(counts.items()))
 
 
 def _detail_model_metrics(details: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for detail in details:
+        _sync_path_aliases(detail)
     groups: dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for detail in details:
         key = (
@@ -1687,14 +1745,14 @@ def _detail_model_metrics(details: list[dict[str, Any]]) -> list[dict[str, Any]]
 
     rows = []
     for (experiment_key, source_kind, experiment_id, provider_source, dataset, model_label), items in sorted(groups.items()):
-        bonus_items = [item for item in items if _is_dynamic_traceable_detail(item)]
+        path_metric_items = [item for item in items if _is_path_metric_detail(item)]
         order_metric_items = [item for item in items if _is_order_metric_detail(item)]
         order_items = [item for item in order_metric_items if item.get("order_defined") is True]
         block_order_items = [item for item in order_metric_items if item.get("block_order_defined") is True]
-        scored_blocks = _sum_int(bonus_items, "n_scored_read_blocks")
-        total_blocks = _sum_int(bonus_items, "n_blocks")
-        scored_block_steps = _sum_int(bonus_items, "n_scored_read_block_steps")
-        block_steps = _sum_int(bonus_items, "n_block_steps")
+        scored_blocks = _sum_int(path_metric_items, "n_scored_read_blocks")
+        total_blocks = _sum_int(path_metric_items, "n_blocks")
+        scored_block_steps = _sum_int(path_metric_items, "n_scored_read_block_steps")
+        block_steps = _sum_int(path_metric_items, "n_block_steps")
         cache_hit = sum(float(item.get("cache_hit_tokens") or 0) for item in items)
         cache_write = sum(float(item.get("cache_write_tokens") or 0) for item in items)
         input_tokens = sum(float(item.get("input_tokens") or 0) for item in items)
@@ -1719,21 +1777,31 @@ def _detail_model_metrics(details: list[dict[str, Any]]) -> list[dict[str, Any]]
             "ground_truth_hit_rate": _rate(item.get("hit_ground_truth") for item in items),
             "near_hit_rate": _rate(item.get("hit_near") for item in items),
             "avg_min_distance": _avg(item.get("min_distance") for item in items),
-            "avg_read_precision": _avg(item.get("hit_precision") for item in bonus_items),
-            "avg_node_recall": _avg(item.get("hit_recall") for item in bonus_items),
-            "avg_hit_f1": _avg(item.get("hit_f1") for item in bonus_items),
-            "chain_graph_coverage": _rate(item.get("chain_graph_covered") for item in bonus_items),
-            "chain_hit_rate": _rate(item.get("chain_hit") for item in bonus_items),
-            "anchor_hit_rate": _rate(item.get("anchor_hit") for item in bonus_items),
-            "root_hit_rate": _rate(item.get("root_hit") for item in bonus_items),
-            "avg_chain_node_recall": _avg(item.get("chain_node_recall") for item in bonus_items),
-            "avg_chain_node_precision": _avg(_chain_node_precision(item) for item in bonus_items),
-            "avg_chain_node_f1": _avg(_chain_node_f1(item) for item in bonus_items),
-            "avg_chain_read_precision": _avg(item.get("chain_read_precision") for item in bonus_items),
-            "avg_first_anchor_step": _avg(item.get("first_anchor_step") for item in bonus_items),
-            "avg_first_root_step": _avg(item.get("first_root_step") for item in bonus_items),
-            "avg_steps_anchor_to_root": _avg(item.get("steps_anchor_to_root") for item in bonus_items),
-            "anchor_before_root_rate": _rate(item.get("anchor_before_root") for item in bonus_items),
+            "avg_read_precision": _avg(item.get("hit_precision") for item in path_metric_items),
+            "avg_node_recall": _avg(item.get("hit_recall") for item in path_metric_items),
+            "avg_hit_f1": _avg(item.get("hit_f1") for item in path_metric_items),
+            "path_coverage": _rate(_path_value(item, "path_covered", "chain_graph_covered") for item in path_metric_items),
+            "chain_graph_coverage": _rate(_path_value(item, "path_covered", "chain_graph_covered") for item in path_metric_items),
+            "path_hit_rate": _rate(_path_value(item, "path_hit", "chain_hit") for item in path_metric_items),
+            "chain_hit_rate": _rate(_path_value(item, "path_hit", "chain_hit") for item in path_metric_items),
+            "anchor_hit_rate": _rate(item.get("anchor_hit") for item in path_metric_items),
+            "root_hit_rate": _rate(item.get("root_hit") for item in path_metric_items),
+            "avg_path_node_recall": _avg(_path_value(item, "path_node_recall", "chain_node_recall") for item in path_metric_items),
+            "avg_chain_node_recall": _avg(_path_value(item, "path_node_recall", "chain_node_recall") for item in path_metric_items),
+            "avg_path_node_precision": _avg(_path_node_precision(item) for item in path_metric_items),
+            "avg_chain_node_precision": _avg(_path_node_precision(item) for item in path_metric_items),
+            "avg_path_node_f1": _avg(_path_node_f1(item) for item in path_metric_items),
+            "avg_chain_node_f1": _avg(_path_node_f1(item) for item in path_metric_items),
+            "avg_path_read_precision": _avg(
+                _path_value(item, "path_read_precision", "chain_read_precision") for item in path_metric_items
+            ),
+            "avg_chain_read_precision": _avg(
+                _path_value(item, "path_read_precision", "chain_read_precision") for item in path_metric_items
+            ),
+            "avg_first_anchor_step": _avg(item.get("first_anchor_step") for item in path_metric_items),
+            "avg_first_root_step": _avg(item.get("first_root_step") for item in path_metric_items),
+            "avg_steps_anchor_to_root": _avg(item.get("steps_anchor_to_root") for item in path_metric_items),
+            "anchor_before_root_rate": _rate(item.get("anchor_before_root") for item in path_metric_items),
             "avg_order_score": _avg(item.get("order_score") for item in order_items),
             "reverse_order_rate": _rate(_combined_reverse_marker(item) for item in order_metric_items),
             "miracle_rate": _rate(_combined_miracle_marker(item) for item in order_metric_items),
@@ -1749,18 +1817,18 @@ def _detail_model_metrics(details: list[dict[str, Any]]) -> list[dict[str, Any]]
                 None if item.get("block_miracle_step") is None else bool(item.get("block_miracle_step"))
                 for item in order_metric_items
             ),
-            "avg_block_efficiency": _avg(item.get("block_efficiency") for item in bonus_items),
-            "avg_blocks_per_trace": (total_blocks / len(bonus_items)) if bonus_items else None,
-            "block_achieve_rate": (_sum_int(bonus_items, "n_achieving_blocks") / scored_blocks) if scored_blocks else None,
-            "block_waste_rate": (_sum_int(bonus_items, "n_wasted_blocks") / scored_blocks) if scored_blocks else None,
-            "block_loop_rate": (_sum_int(bonus_items, "n_loop_blocks") / total_blocks) if total_blocks else None,
-            "achieving_block_step_share": (_sum_int(bonus_items, "n_achieving_block_steps") / scored_block_steps)
+            "avg_block_efficiency": _avg(item.get("block_efficiency") for item in path_metric_items),
+            "avg_blocks_per_trace": (total_blocks / len(path_metric_items)) if path_metric_items else None,
+            "block_achieve_rate": (_sum_int(path_metric_items, "n_achieving_blocks") / scored_blocks) if scored_blocks else None,
+            "block_waste_rate": (_sum_int(path_metric_items, "n_wasted_blocks") / scored_blocks) if scored_blocks else None,
+            "block_loop_rate": (_sum_int(path_metric_items, "n_loop_blocks") / total_blocks) if total_blocks else None,
+            "achieving_block_step_share": (_sum_int(path_metric_items, "n_achieving_block_steps") / scored_block_steps)
             if scored_block_steps
             else None,
-            "wasted_block_step_share": (_sum_int(bonus_items, "n_wasted_block_steps") / scored_block_steps)
+            "wasted_block_step_share": (_sum_int(path_metric_items, "n_wasted_block_steps") / scored_block_steps)
             if scored_block_steps
             else None,
-            "loop_block_step_share": (_sum_int(bonus_items, "n_loop_block_steps") / block_steps) if block_steps else None,
+            "loop_block_step_share": (_sum_int(path_metric_items, "n_loop_block_steps") / block_steps) if block_steps else None,
             "loop_trace_rate": _rate((item.get("bad_patterns") or {}).get("has_loop") for item in items),
             "error_spiral_rate": _rate((item.get("bad_patterns") or {}).get("error_spiral") for item in items),
             "avg_turns": _avg(item.get("turns") for item in items),
@@ -1774,10 +1842,15 @@ def _detail_model_metrics(details: list[dict[str, Any]]) -> list[dict[str, Any]]
             "total_cache_write_tokens": cache_write if cache_write else None,
             "total_cost": sum(float(item.get("cost") or 0) for item in items) if items else None,
             "not_chain_evaluable_reasons": _distribution(
-                [item for item in items if not item.get("chain_evaluable")],
+                [item for item in items if not _path_value(item, "path_evaluable", "chain_evaluable")],
                 "not_chain_evaluable_reason",
             ),
-            "chain_bad_patterns": _chain_bad_distribution(items),
+            "not_path_evaluable_reasons": _distribution(
+                [item for item in items if not _path_value(item, "path_evaluable", "chain_evaluable")],
+                "not_path_evaluable_reason",
+            ),
+            "path_pattern_flags": _path_pattern_distribution(items, PATH_PATTERN_KEYS),
+            "chain_bad_patterns": _path_pattern_distribution(items, CHAIN_BAD_PATTERN_KEYS),
         }
         rows.append(row)
     return rows
@@ -1800,6 +1873,18 @@ def _normalize_model_row(row: dict[str, Any]) -> dict[str, Any]:
         run_step=row.get("run_step"),
     )
     normalized = {**row, "source_kind": row.get("source_kind") or source_kind}
+    for legacy_key, path_key in (
+        ("avg_chain_node_recall", "avg_path_node_recall"),
+        ("avg_chain_node_precision", "avg_path_node_precision"),
+        ("avg_chain_node_f1", "avg_path_node_f1"),
+        ("avg_chain_read_precision", "avg_path_read_precision"),
+        ("chain_graph_coverage", "path_coverage"),
+        ("chain_hit_rate", "path_hit_rate"),
+    ):
+        if path_key not in normalized and legacy_key in normalized:
+            normalized[path_key] = normalized[legacy_key]
+        elif legacy_key not in normalized and path_key in normalized:
+            normalized[legacy_key] = normalized[path_key]
     normalized["experiment_key"] = row.get("experiment_key") or _experiment_key(normalized)
     normalized["eval_cell_key"] = row.get("eval_cell_key") or normalized["experiment_key"]
     return normalized
@@ -1848,8 +1933,9 @@ def _eval_cell_registry(model_metrics: list[dict[str, Any]], details: list[dict[
                 "trajectory_count": trace_counts.get(key, 0),
                 "resolved_rate": row.get("resolved_rate"),
                 "root_hit_rate": row.get("root_hit_rate") or row.get("ground_truth_hit_rate"),
+                "path_node_recall": row.get("avg_path_node_recall") or row.get("avg_node_recall"),
                 "chain_node_recall": row.get("avg_chain_node_recall") or row.get("avg_node_recall"),
-                "read_precision": row.get("avg_chain_read_precision") or row.get("avg_read_precision"),
+                "read_precision": row.get("avg_path_read_precision") or row.get("avg_read_precision"),
             }
         )
     return eval_cells
@@ -1961,8 +2047,8 @@ def build_dashboard_snapshot(request: DashboardRequest) -> dict[str, Any]:
 
     detail_model_metrics = _detail_model_metrics(details)
     model_metrics = _merge_model_metrics(base_model_metrics, detail_model_metrics)
-    dynamic_traceable_details = [detail for detail in details if _is_dynamic_traceable_detail(detail)]
-    dynamic_traceable_model_metrics = _detail_model_metrics(dynamic_traceable_details)
+    path_metric_details = [detail for detail in details if _is_path_metric_detail(detail)]
+    path_metric_model_metrics = _detail_model_metrics(path_metric_details)
     case_filter_model_metrics = _case_filter_model_metrics(details)
     eval_cells = _eval_cell_registry(model_metrics, details)
     distributions_by_dataset = _dataset_distributions(details)
@@ -1991,12 +2077,14 @@ def build_dashboard_snapshot(request: DashboardRequest) -> dict[str, Any]:
         "experiments": eval_cells,
         "summary": summary,
         "model_metrics": model_metrics,
-        "dynamic_traceable_model_metrics": dynamic_traceable_model_metrics,
+        "path_metric_model_metrics": path_metric_model_metrics,
+        "dynamic_traceable_model_metrics": path_metric_model_metrics,
         "case_filter_model_metrics": case_filter_model_metrics,
         "runs": sorted(deduped_runs.values(), key=lambda run: (str(run.get("status")), str(run.get("run_id")))),
         "details": details[: request.detail_limit],
         "detail_count": len(details),
-        "dynamic_traceable_detail_count": len(dynamic_traceable_details),
+        "path_metric_detail_count": len(path_metric_details),
+        "dynamic_traceable_detail_count": len(path_metric_details),
         "raw_record_count": len(raw_records),
     }
 

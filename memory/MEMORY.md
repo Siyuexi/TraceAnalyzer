@@ -33,7 +33,8 @@
   instrumentation/failing-test execution, **Path** for the issue
   symptom-to-root-cause subgraph/path, and **Trace** only for the model/agent
   execution trajectory. User-facing dashboard labels, legends, README text, and
-  proposal/report text should follow this Graph / Path / Trace split. Existing
-  code field names such as `hit_precision`, `hit_recall`, and
-  `chain_read_precision` are legacy/internal until a dedicated terminology
-  refactor.
+  proposal/report text must follow this Graph / Path / Trace split. Legacy
+  artifact keys such as `call_graph_*`, `chain_*`, `dynamic_traceable_*`, and
+  older instrumentation filenames are compatibility vocabulary only; new code,
+  comments, and UI copy should route those keys through explicit alias helpers
+  and should not promote them as public terminology.
