@@ -33,6 +33,7 @@ from p2a.third_party_eval import _instance_id, _load_rows, _select_rows, is_syst
 SUPPORTED_DATASETS = {"swebench-hard", "swebench-verified", "r2e-gym-subset"}
 REDACT_KEYS = ("api_key", "apikey", "token", "secret", "password", "authorization")
 SYSTEM_ERROR_STATUS = "system_error"
+DEFAULT_BATCH_MAX_TURNS = 100
 
 
 @dataclass(frozen=True)
@@ -165,7 +166,7 @@ def load_batch_config(path: Path) -> BatchConfig:
         stage=stage,
         limit=_parse_limit(experiment_cfg.get("limit"), default=500),
         offset=int(experiment_cfg.get("offset") or 0),
-        max_turns=int(experiment_cfg.get("max_turns") or 20),
+        max_turns=int(experiment_cfg.get("max_turns") or DEFAULT_BATCH_MAX_TURNS),
         run_timeout=str(experiment_cfg["run_timeout"]) if experiment_cfg.get("run_timeout") else None,
         per_model_concurrency=max(1, int(experiment_cfg.get("per_model_concurrency") or 1)),
         model_parallelism=max(1, int(experiment_cfg.get("model_parallelism") or len(models))),

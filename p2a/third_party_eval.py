@@ -28,43 +28,17 @@ from p2a.eval_fault_localization import (
 from p2a.precompute.uni_agent_sandbox import build_agent_env_config, extract_tools_kwargs
 
 
-DEFAULT_CONFIG = {
-    "model": {
-        "base_url_env": "P2A_THIRD_PARTY_BASE_URL",
-        "api_key_env": "P2A_THIRD_PARTY_API_KEY",
-        "model_name_env": "P2A_THIRD_PARTY_MODEL",
-        "base_url": "",
-        "model_name": "",
-        "timeout": 300,
-        "sampling_params": {
-            "temperature": 0.0,
-            "max_tokens": 4096,
-        },
-    },
-    "agent": {
-        "deployment": "arl",
-        "tool_parser": "qwen3_coder",
-        "tools": [
-            {"name": "str_replace_editor"},
-            {"name": "execute_bash"},
-            {"name": "submit"},
-        ],
-        "interaction": {
-            "action_timeout": 300,
-            "timeout_budget": 3,
-            "max_turns": 100,
-        },
-        "tool_install_timeout": 300,
-        "skip_tool_install_commands": [],
-        "reward_eval_timeout": 600,
-        "log_dir": "/tmp/p2a_third_party_eval",
-    },
-    "analysis": {
-        "tracking_mode": "view_and_bash",
-        "near_threshold": 0.5,
-        "m_max": 3.0,
-    },
+DEFAULT_MODEL_ENV = {
+    "base_url": "P2A_THIRD_PARTY_BASE_URL",
+    "api_key": "P2A_THIRD_PARTY_API_KEY",
+    "model_name": "P2A_THIRD_PARTY_MODEL",
 }
+DEFAULT_TOOLS = [
+    {"name": "str_replace_editor"},
+    {"name": "execute_bash"},
+    {"name": "submit"},
+]
+DEFAULT_TOOL_PARSER = "qwen3_coder"
 _REDACT_KEYS = ("api_key", "apikey", "token", "secret", "password", "authorization")
 SYSTEM_ERROR_KINDS = {
     "arl_config_missing",
@@ -100,16 +74,6 @@ def is_system_error_kind(kind: str | None) -> bool:
     return kind in SYSTEM_ERROR_KINDS
 
 
-def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
-    result = dict(base)
-    for key, value in overrides.items():
-        if isinstance(value, dict) and isinstance(result.get(key), dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
-
-
 def _redact_config(value: Any) -> Any:
     if isinstance(value, dict):
         redacted = {}
@@ -127,11 +91,11 @@ def _redact_config(value: Any) -> Any:
 
 def load_config(path: Path | None) -> dict[str, Any]:
     if path is None:
-        return copy.deepcopy(DEFAULT_CONFIG)
+        return {}
     payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(payload, dict):
         raise ValueError(f"{path} must contain a YAML mapping")
-    return _deep_merge(DEFAULT_CONFIG, payload)
+    return payload
 
 
 def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -165,8 +129,14 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dic
     return config
 
 
-def _env_or_value(config: dict[str, Any], key: str, env_key: str | None = None) -> str:
-    env_name = str(config.get(env_key or f"{key}_env") or "")
+def _env_or_value(
+    config: dict[str, Any],
+    key: str,
+    env_key: str | None = None,
+    *,
+    default_env: str | None = None,
+) -> str:
+    env_name = str(config.get(env_key or f"{key}_env") or default_env or "")
     if env_name:
         value = os.getenv(env_name)
         if value:
@@ -178,9 +148,21 @@ def _env_or_value(config: dict[str, Any], key: str, env_key: str | None = None) 
 def resolve_model_config(config: dict[str, Any]) -> dict[str, Any]:
     model_cfg = dict(config.get("model") or {})
     provider_cfg = normalize_provider_config(config.get("provider"))
-    base_url = _env_or_value(model_cfg, "base_url")
-    api_key = _env_or_value(model_cfg, "api_key")
-    model_name = _env_or_value(model_cfg, "model_name")
+    base_url = _env_or_value(
+        model_cfg,
+        "base_url",
+        default_env=DEFAULT_MODEL_ENV["base_url"],
+    )
+    api_key = _env_or_value(
+        model_cfg,
+        "api_key",
+        default_env=DEFAULT_MODEL_ENV["api_key"],
+    )
+    model_name = _env_or_value(
+        model_cfg,
+        "model_name",
+        default_env=DEFAULT_MODEL_ENV["model_name"],
+    )
     if provider_cfg["source"] == "openai_compatible" and not base_url:
         raise ValueError("model.base_url is required, either directly or via model.base_url_env")
     if provider_cfg["source"] == "openai_compatible" and not api_key:
@@ -361,8 +343,8 @@ def _make_tools(agent_cfg: dict[str, Any]):
 
     return ToolsManager(
         ToolsManagerConfig(
-            tools=agent_cfg.get("tools") or DEFAULT_CONFIG["agent"]["tools"],
-            parser=agent_cfg.get("tool_parser", "qwen3_coder"),
+            tools=agent_cfg.get("tools") or copy.deepcopy(DEFAULT_TOOLS),
+            parser=agent_cfg.get("tool_parser") or DEFAULT_TOOL_PARSER,
         )
     )
 

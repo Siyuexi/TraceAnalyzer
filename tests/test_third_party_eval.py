@@ -93,6 +93,25 @@ def test_resolve_model_config_uses_environment(monkeypatch):
     assert model_config["base_url"] == "https://example.test"
     assert model_config["api_key"] == "secret"
     assert model_config["model_name"] == "demo-model"
+    assert model_config["sampling_params"] == {}
+
+
+def test_load_config_does_not_inject_sampling_defaults(tmp_path):
+    config_path = tmp_path / "third_party.yaml"
+    config_path.write_text(
+        """
+provider:
+  source: internal_api
+model:
+  model_name: demo-model
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config["model"] == {"model_name": "demo-model"}
+    assert "sampling_params" not in config["model"]
 
 
 def test_apply_cli_overrides_bounds_smoke_run():

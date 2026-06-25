@@ -54,6 +54,15 @@ class Api:
     MODEL_CONFIGS = {
         "passthrough_models": ["deepseek-v4-flash-passthrough"],
         "passthrough_chat_completions_models": {"deepseek-v4-flash-passthrough"},
+        "passthrough_extra_body_map": {
+            "deepseek-v4-flash-passthrough": {
+                "thinking": {"type": "disabled"},
+                "max_completion_tokens": 4,
+            }
+        },
+        "passthrough_effort_map": {
+            "deepseek-v4-flash-passthrough": "low",
+        },
     }
 
     def __init__(self, host, user_name, user_token):
@@ -61,12 +70,21 @@ class Api:
         self.user_name = user_name
         self.user_token = user_token
         self.calls = []
+        self.requests = []
 
     def set_retry_config(self, **kwargs):
         self.retry_config = kwargs
 
     def _normalize_model_name(self, model_name):
         return model_name
+
+    def _make_request_with_retry(self, method, url, **kwargs):
+        self.requests.append({
+            "method": method,
+            "url": url,
+            "json": kwargs.get("json"),
+        })
+        return Response(len(self.calls))
 
     def call_data_eval(self, model_name, prompt, **kwargs):
         self.calls.append({
@@ -75,7 +93,15 @@ class Api:
             **kwargs,
             "save_id_snapshot": dict(kwargs.get("save_id") or {}),
         })
-        return Response(len(self.calls))
+        return self._make_request_with_retry(
+            "POST",
+            f"/{model_name}",
+            json={
+                "model": model_name,
+                "thinking": {"type": "disabled"},
+                "max_completion_tokens": 4,
+            },
+        )
 
 
 HOST = "http://internal.example"
@@ -174,6 +200,58 @@ def test_tracked_internal_api_adapter_queries_private_api_module(tmp_path, monke
     assert call["tools"] == [
         {"type": "function", "function": {"name": "str_replace_editor"}}
     ]
+
+
+def test_internal_api_adapter_applies_sampling_params_to_request_and_model_config(tmp_path, monkeypatch):
+    api_module = tmp_path / "internal_api_eval.py"
+    _write_fake_api_module(api_module)
+
+    async def call_now(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(internal_api_adapter.asyncio, "to_thread", call_now)
+    model = make_chat_model(
+        {
+            "model_name": "deepseek-v4-flash-passthrough",
+            "sampling_params": {
+                "max_completion_tokens": 384000,
+                "thinking": {"type": "enabled"},
+                "reasoning_effort": "max",
+                "top_p": 0.95,
+                "temperature": None,
+            },
+        },
+        {"source": "internal_api", "api_module": api_module.name},
+        repo_root=tmp_path,
+    )
+
+    async def _query():
+        cache = await model.prepare_rollout_cache(
+            [{"role": "user", "content": "Fix the bug."}]
+        )
+        return await model.query(
+            [{"role": "user", "content": "Fix the bug."}],
+            cache,
+        )
+
+    asyncio.run(_query())
+
+    request_body = model.inner.api.requests[0]["json"]
+    assert request_body["max_completion_tokens"] == 384000
+    assert request_body["thinking"] == {"type": "enabled"}
+    assert request_body["reasoning_effort"] == "max"
+    assert request_body["top_p"] == 0.95
+    assert "temperature" not in request_body
+
+    model_configs = model.inner.api.MODEL_CONFIGS
+    extra_body = model_configs["passthrough_extra_body_map"]["deepseek-v4-flash-passthrough"]
+    assert extra_body["max_completion_tokens"] == 384000
+    assert extra_body["thinking"] == {"type": "enabled"}
+    assert extra_body["reasoning_effort"] == "max"
+    assert model_configs["passthrough_effort_map"]["deepseek-v4-flash-passthrough"] == "max"
+    assert model.inner.api_module.Api.MODEL_CONFIGS["passthrough_effort_map"][
+        "deepseek-v4-flash-passthrough"
+    ] == "low"
 
 
 def test_internal_api_passes_save_id_on_follow_up_requests(tmp_path, monkeypatch):
