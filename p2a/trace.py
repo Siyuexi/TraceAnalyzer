@@ -1896,8 +1896,9 @@ def build_call_graph_from_traces(
                 frame dicts with keys: file_path, line_no, func_name, is_patched.
         modified_callables: Output of find_modified_callables_from_sources() —
                 list of dicts with keys: qualified_name, file_path, start_line, end_line.
-        issue_text: Optional task issue/problem text used to anchor the first
-                rewardable symptom frame.
+        issue_text: Optional task issue/problem text used to mark a diagnostic
+                symptom frame for Path visualization and metrics. Reward starts
+                at the first non-test frame after the test harness.
 
     Returns:
         Dict with keys:
@@ -1985,11 +1986,13 @@ def build_call_graph_from_traces(
         root_indices_by_trace: list[list[int]],
         *,
         include_reward_start_records: bool = False,
-    ) -> tuple[dict[str, dict], set[str], dict[str, set[str]], set[str], list[dict[str, Any]]]:
+    ) -> tuple[dict[str, dict], set[str], dict[str, set[str]], set[str], set[str], set[str], list[dict[str, Any]]]:
         collected_info: dict[str, dict] = {}
         collected_rewardable: set[str] = set()
         collected_excluded: dict[str, set[str]] = {}
         selected_anchor_keys: set[str] = set()
+        ground_truth_anchor_keys: set[str] = set()
+        test_adapter_keys: set[str] = set()
         reward_start_records: list[dict[str, Any]] = []
 
         def mark_excluded(node_key: str, reason: str) -> None:
@@ -2012,13 +2015,28 @@ def build_call_graph_from_traces(
                     selected_anchor_keys.add(selected_anchor_key)
                     reward_start_source = "issue_anchor"
 
+                ground_truth_anchor_idx: int | None = None
+                for candidate_idx in range(0, root_idx + 1):
+                    candidate_frame = trace[candidate_idx]
+                    if not _test_file_reason(str(candidate_frame.get("file_path") or "")):
+                        ground_truth_anchor_idx = candidate_idx
+                        ground_truth_anchor_keys.add(_frame_node_key(candidate_frame))
+                        break
+
                 if include_reward_start_records:
                     reward_start_records.append(
                         {
                             "trace_index": trace_idx,
                             "root_frame_index": root_idx,
                             "root_node_key": _frame_node_key(trace[root_idx]),
-                            "reward_start_source": reward_start_source,
+                            "reward_start_source": "first_non_test_after_test",
+                            "ground_truth_anchor_frame_index": ground_truth_anchor_idx,
+                            "ground_truth_anchor_node_key": (
+                                _frame_node_key(trace[ground_truth_anchor_idx])
+                                if ground_truth_anchor_idx is not None
+                                else None
+                            ),
+                            "issue_anchor_source": reward_start_source,
                             "selected_anchor_frame_index": reward_start_idx,
                             "selected_anchor_node_key": selected_anchor_key,
                             "matched_issue_anchor_candidates": [
@@ -2034,10 +2052,10 @@ def build_call_graph_from_traces(
                     test_reason = _test_file_reason(str(frame.get("file_path") or ""))
                     if test_reason:
                         mark_excluded(node_key, f"test_suite_or_harness:{test_reason}")
-                    elif reward_start_idx is not None and j < reward_start_idx:
-                        mark_excluded(node_key, "pre_symptom")
                     else:
                         mark_rewardable(node_key)
+                        if reward_start_idx is not None and j < reward_start_idx:
+                            test_adapter_keys.add(node_key)
 
                     if node_key not in collected_info:
                         collected_info[node_key] = {
@@ -2050,7 +2068,15 @@ def build_call_graph_from_traces(
                     else:
                         collected_info[node_key]["hop_distance"] = min(collected_info[node_key]["hop_distance"], hop)
                         collected_info[node_key]["observed_in_trace"] = True
-        return collected_info, collected_rewardable, collected_excluded, selected_anchor_keys, reward_start_records
+        return (
+            collected_info,
+            collected_rewardable,
+            collected_excluded,
+            selected_anchor_keys,
+            ground_truth_anchor_keys,
+            test_adapter_keys,
+            reward_start_records,
+        )
 
     def rewardable_keys_for(info_by_key: dict[str, dict], rewardable: set[str], excluded: dict[str, set[str]]) -> set[str]:
         return {
@@ -2068,7 +2094,7 @@ def build_call_graph_from_traces(
         [frame["frame_index"] for frame in item["patched_frames"]]
         for item in patched_frames_by_trace
     ]
-    legacy_info, legacy_rewardable, legacy_excluded, _, _ = collect_node_distances(legacy_root_indices_by_trace)
+    legacy_info, legacy_rewardable, legacy_excluded, _, _, _, _ = collect_node_distances(legacy_root_indices_by_trace)
     legacy_rewardable_keys = rewardable_keys_for(legacy_info, legacy_rewardable, legacy_excluded)
     legacy_zero_node_count = sum(
         1
@@ -2085,11 +2111,20 @@ def build_call_graph_from_traces(
         ]
         for item in patched_frames_by_trace
     ]
-    node_info, rewardable_seen, excluded_reasons, selected_anchor_keys, reward_start_records = collect_node_distances(
+    (
+        node_info,
+        rewardable_seen,
+        excluded_reasons,
+        selected_anchor_keys,
+        ground_truth_anchor_keys,
+        test_adapter_keys,
+        reward_start_records,
+    ) = collect_node_distances(
         root_indices_by_trace,
         include_reward_start_records=True,
     )
-    reward_start_source = "issue_anchor" if selected_anchor_keys else "test_filtered_fallback"
+    reward_start_source = "first_non_test_after_test"
+    issue_anchor_source = "issue_anchor" if selected_anchor_keys else "unmatched_issue_anchor"
     issue_anchor_candidate_dicts = [candidate.to_dict() for candidate in issue_anchor_candidates]
 
     if not node_info:
@@ -2112,16 +2147,22 @@ def build_call_graph_from_traces(
             "excluded_non_rewardable_node_count": 0,
             "excluded_test_harness_node_count": 0,
             "excluded_test_harness_nodes": [],
+            "excluded_test_adapter_node_count": 0,
+            "excluded_test_adapter_nodes": [],
             "excluded_pre_symptom_node_count": 0,
             "excluded_pre_symptom_nodes": [],
             "test_harness_file_patterns": [],
             "reward_start_source": reward_start_source,
+            "issue_anchor_source": issue_anchor_source,
             "reward_start_by_trace": reward_start_records,
+            "ground_truth_anchor_nodes": [],
             "selected_issue_anchor_nodes": [],
             "symptom_nodes": [],
+            "test_adapter_nodes": [],
             "root_cause_nodes": [],
             "reward_path_edges": [],
             "direct_symptom_to_root_cause_edges": [],
+            "fix_adapter_nodes": [],
             "call_graph_edge_metadata": [],
             "issue_anchor_candidates": issue_anchor_candidate_dicts,
             "patched_root_selection": patched_root_selection,
@@ -2145,14 +2186,18 @@ def build_call_graph_from_traces(
         if rewardable:
             if node_key in terminal_root_keys:
                 node_role = "root_cause"
+            elif node_key in upstream_adapter_patched_keys:
+                node_role = "fix_adapter"
             elif node_key in selected_anchor_keys:
                 node_role = "symptom"
+            elif node_key in test_adapter_keys:
+                node_role = "test_adapter"
             else:
                 node_role = "intermediate"
         elif any(reason.startswith("test_suite_or_harness:") for reason in reasons):
             node_role = "test_harness"
         else:
-            node_role = "pre_symptom"
+            node_role = "test_adapter"
         call_graph_nodes[node_key] = {
             "file_path": info["file_path"],
             "start_line": info["line_no"],
@@ -2165,6 +2210,11 @@ def build_call_graph_from_traces(
             "node_role": node_role,
             "excluded_from_hop_max": not rewardable,
         }
+        if node_key in observed_patched_keys:
+            call_graph_nodes[node_key]["patched_callable"] = True
+            call_graph_nodes[node_key]["patch_role"] = (
+                "root_cause" if node_key in terminal_root_keys else "fix_adapter"
+            )
         if reasons and not rewardable:
             call_graph_nodes[node_key]["exclusion_reason"] = ";".join(reasons)
 
@@ -2235,7 +2285,48 @@ def build_call_graph_from_traces(
         for key, node in call_graph_nodes.items()
         if node.get("node_role") == "root_cause"
     )
-    reward_path_roles = {"symptom", "intermediate", "root_cause"}
+    fix_adapter_nodes = sorted(
+        key
+        for key, node in call_graph_nodes.items()
+        if node.get("node_role") == "fix_adapter"
+    )
+    test_adapter_nodes = sorted(
+        key
+        for key, node in call_graph_nodes.items()
+        if node.get("node_role") == "test_adapter"
+    )
+    reward_path_roles = {"symptom", "intermediate", "fix_adapter", "root_cause"}
+    visual_path_nodes: set[str] = set()
+    if selected_anchor_keys and root_cause_nodes:
+        outgoing: dict[str, set[str]] = {}
+        incoming: dict[str, set[str]] = {}
+        for caller, callee in call_graph_edges:
+            outgoing.setdefault(caller, set()).add(callee)
+            incoming.setdefault(callee, set()).add(caller)
+
+        forward = set(selected_anchor_keys)
+        frontier = list(selected_anchor_keys)
+        while frontier:
+            current = frontier.pop()
+            for downstream in outgoing.get(current, ()):
+                if downstream not in forward:
+                    forward.add(downstream)
+                    frontier.append(downstream)
+
+        backward = set(root_cause_nodes)
+        frontier = list(root_cause_nodes)
+        while frontier:
+            current = frontier.pop()
+            for upstream in incoming.get(current, ()):
+                if upstream not in backward:
+                    backward.add(upstream)
+                    frontier.append(upstream)
+
+        visual_path_nodes = {
+            key
+            for key in forward & backward
+            if call_graph_nodes.get(key, {}).get("node_role") in reward_path_roles
+        }
     call_graph_edge_metadata: list[dict[str, Any]] = []
     reward_path_edges: list[list[str]] = []
     direct_symptom_to_root_cause_edges: list[list[str]] = []
@@ -2243,7 +2334,7 @@ def build_call_graph_from_traces(
         caller_role = call_graph_nodes[caller].get("node_role")
         callee_role = call_graph_nodes[callee].get("node_role")
         edge = [caller, callee]
-        reward_path_edge = caller_role in reward_path_roles and callee_role in reward_path_roles
+        reward_path_edge = caller in visual_path_nodes and callee in visual_path_nodes
         direct_symptom_to_root_cause = caller_role == "symptom" and callee_role == "root_cause"
         if reward_path_edge:
             reward_path_edges.append(edge)
@@ -2283,11 +2374,7 @@ def build_call_graph_from_traces(
         for key, node in call_graph_nodes.items()
         if node.get("node_role") == "test_harness"
     )
-    excluded_pre_symptom_nodes = sorted(
-        key
-        for key, node in call_graph_nodes.items()
-        if node.get("node_role") == "pre_symptom"
-    )
+    excluded_test_adapter_nodes: list[str] = []
 
     return {
         "call_graph_nodes": call_graph_nodes,
@@ -2298,8 +2385,10 @@ def build_call_graph_from_traces(
         "excluded_non_rewardable_node_count": len(excluded_nodes),
         "excluded_test_harness_node_count": len(excluded_test_nodes),
         "excluded_test_harness_nodes": excluded_test_nodes,
-        "excluded_pre_symptom_node_count": len(excluded_pre_symptom_nodes),
-        "excluded_pre_symptom_nodes": excluded_pre_symptom_nodes,
+        "excluded_test_adapter_node_count": len(excluded_test_adapter_nodes),
+        "excluded_test_adapter_nodes": excluded_test_adapter_nodes,
+        "excluded_pre_symptom_node_count": len(excluded_test_adapter_nodes),
+        "excluded_pre_symptom_nodes": excluded_test_adapter_nodes,
         "test_harness_file_patterns": sorted(
             {
                 reason.split(":", 1)[1]
@@ -2309,10 +2398,14 @@ def build_call_graph_from_traces(
             }
         ),
         "reward_start_source": reward_start_source,
+        "issue_anchor_source": issue_anchor_source,
         "reward_start_by_trace": reward_start_records,
+        "ground_truth_anchor_nodes": sorted(ground_truth_anchor_keys),
         "selected_issue_anchor_nodes": sorted(selected_anchor_keys),
         "symptom_nodes": symptom_nodes,
+        "test_adapter_nodes": test_adapter_nodes,
         "root_cause_nodes": root_cause_nodes,
+        "fix_adapter_nodes": fix_adapter_nodes,
         "reward_path_edges": reward_path_edges,
         "direct_symptom_to_root_cause_edges": direct_symptom_to_root_cause_edges,
         "call_graph_edge_metadata": call_graph_edge_metadata,

@@ -50,8 +50,11 @@ EXECUTION_ERROR_TEXT_PATTERN = re.compile(
 # dashboard now calls Path. New code should prefer the `path_*` aliases; the
 # legacy keys remain readable/writable for old DB rows and detail JSON files.
 PATH_CASE_TYPES = {"standard", "direct"}
-PATH_NODE_ROLES = {"symptom", "intermediate", "root_cause"}
-PATH_CONTEXT_ROLES = {"test_harness", "pre_symptom"}
+LEGACY_NODE_ROLE_ALIASES = {
+    "pre_symptom": "test_adapter",
+}
+PATH_NODE_ROLES = {"symptom", "intermediate", "fix_adapter", "root_cause"}
+PATH_CONTEXT_ROLES = {"test_harness", "test_adapter", "pre_symptom"}
 PATH_PATTERN_KEYS = (
     "missed_anchor",
     "missed_root_after_anchor",
@@ -581,7 +584,8 @@ def _miracle_stats(
     intermediate = {
         node_key: node
         for node_key, node in nodes.items()
-        if node.get("node_role") == "intermediate" or 0.0 < float(node.get("normalized_distance", -1.0)) < 1.0
+        if _node_role(node_key, nodes) in {"intermediate", "fix_adapter"}
+        or 0.0 < float(node.get("normalized_distance", -1.0)) < 1.0
     }
     root_candidates = set(root_nodes or [])
     if not root_candidates:
@@ -646,7 +650,9 @@ def _source_text(node: dict) -> str | None:
 
 def _node_role(node_key: str, nodes: dict[str, dict]) -> str | None:
     role = nodes.get(node_key, {}).get("node_role")
-    return str(role) if role is not None else None
+    if role is None:
+        return None
+    return LEGACY_NODE_ROLE_ALIASES.get(str(role), str(role))
 
 
 def _string_list(value: Any) -> list[str]:
@@ -797,7 +803,7 @@ def _path_projection(
         path_node_keys.update(
             key
             for key, node in nodes.items()
-            if node.get("node_role") in PATH_NODE_ROLES and (key in anchors or key in roots)
+            if _node_role(key, nodes) in PATH_NODE_ROLES and (key in anchors or key in roots)
         )
 
     call_edges = [(caller, callee) for caller, callee in _graph_edges(bonus_map) if caller in nodes and callee in nodes]
@@ -822,7 +828,7 @@ def _path_projection(
 
     def node_summary(node_key: str, *, group: str) -> dict[str, Any]:
         node = nodes.get(node_key, {})
-        role = node.get("node_role")
+        role = _node_role(node_key, nodes)
         summary = {
             "key": node_key,
             "file_path": node.get("file_path"),
@@ -839,7 +845,7 @@ def _path_projection(
             "hit": node_key in hit_nodes,
             "first_step": first_hits.get(node_key),
         }
-        if role in PATH_NODE_ROLES:
+        if role in PATH_NODE_ROLES or node.get("rewardable"):
             summary["source"] = _source_text(node)
             summary["source_preview"] = _source_preview(node)
         return summary
@@ -1008,7 +1014,7 @@ def _graph_topology(bonus_map: dict, hit_nodes: set[str], first_hits: dict[str, 
                 "end_line": node.get("end_line"),
                 "normalized_distance": node.get("normalized_distance"),
                 "rewardable": node.get("rewardable", True),
-                "node_role": node.get("node_role"),
+                "node_role": _node_role(node_key, nodes),
                 "excluded_from_hop_max": node.get("excluded_from_hop_max"),
                 "exclusion_reason": node.get("exclusion_reason"),
                 "hit": node_key in hit_nodes,
@@ -1034,7 +1040,7 @@ def _node_summaries(node_keys: Iterable[str], bonus_map: dict) -> list[dict]:
                 "end_line": node.get("end_line"),
                 "normalized_distance": node.get("normalized_distance"),
                 "rewardable": node.get("rewardable", True),
-                "node_role": node.get("node_role"),
+                "node_role": _node_role(node_key, nodes),
             }
         )
     return summaries
@@ -1062,7 +1068,7 @@ def _step_details(step_items: list[Any], step_reads: list[list[dict]], bonus_map
         trace = _normalized_trace(trace)
         reads = step_reads[step_idx] if step_idx < len(step_reads) else []
         writes = writes_from_step_trace(trace)
-        hit_nodes = _all_read_hit_nodes(reads, bonus_map)
+        hit_nodes = _all_read_hit_nodes(reads, bonus_map, rewardable_only=False)
         write_hit_nodes: set[str] = set()
         for write in writes:
             write_hit_nodes.update(_write_hit_nodes(write, bonus_map, rewardable_only=False))

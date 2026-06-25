@@ -114,10 +114,12 @@ const TRACE_LEGEND_GROUPS = [
   {
     title: "Read Step Colors",
     items: [
-      { sample: '<span class="legend-step root"><span class="legend-step-num">7</span><span>root cause</span></span>', text: "This step hit root cause." },
       { sample: '<span class="legend-step symptom"><span class="legend-step-num">3</span><span>symptom</span></span>', text: "This step hit symptom." },
-      { sample: '<span class="legend-step path"><span class="legend-step-num">5</span><span>Path hit</span></span>', text: "This step hit another Path node." },
-      { sample: '<span class="legend-step multi-hit" style="--step-bg: linear-gradient(90deg, #dcfce7 0 33.33%, #dbeafe 33.33% 66.67%, #fee2e2 66.67% 100%);"><span class="legend-step-num">3</span><span>split</span></span>', text: "One step hit multiple map roles." },
+      { sample: '<span class="legend-step test-adapter"><span class="legend-step-num">4</span><span>test-adapter</span></span>', text: "This step hit a bug-side adapter before the symptom." },
+      { sample: '<span class="legend-step intermediate"><span class="legend-step-num">5</span><span>intermediate</span></span>', text: "This step hit an intermediate Graph node." },
+      { sample: '<span class="legend-step fix-adapter"><span class="legend-step-num">6</span><span>fix-adapter</span></span>', text: "This step hit an upstream patched adapter." },
+      { sample: '<span class="legend-step root"><span class="legend-step-num">7</span><span>root cause</span></span>', text: "This step hit root cause." },
+      { sample: '<span class="legend-step multi-hit" style="--step-bg: linear-gradient(90deg, #dcfce7 0 20%, #fef3c7 20% 40%, #dbeafe 40% 60%, #fce7f3 60% 80%, #fee2e2 80% 100%);"><span class="legend-step-num">3</span><span>split</span></span>', text: "One step hit multiple node roles." },
       { sample: '<span class="legend-step offmap"><span class="legend-step-num">9</span><span>off Path</span></span>', text: "Parsed read outside the Path." },
     ],
   },
@@ -136,11 +138,12 @@ const GRAPH_LEGEND_GROUPS = [
   {
     title: "Nodes",
     items: [
-      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node symptom hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">7</text></g><text class="legend-graph-text" x="42" y="16">hit step</text><text class="legend-graph-sub" x="42" y="29">step 7</text></svg>', text: "Number is the first visited step." },
-      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node path miss" transform="translate(20,19)"><circle r="14"></circle></g><text class="legend-graph-text" x="42" y="16">Path node</text><text class="legend-graph-sub" x="42" y="29">not hit</text></svg>', text: "Faded node was not visited." },
-      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node path hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">4</text></g><text class="legend-graph-text" x="42" y="16">save x3</text><text class="legend-graph-sub" x="42" y="29">same span</text></svg>', text: "Multiple symbols share one source span." },
-      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><linearGradient id="graph-symptom-root-cause-fill" x1="0" y1="1" x2="1" y2="0"><stop offset="50%" stop-color="#dcfce7"></stop><stop offset="50%" stop-color="#fee2e2"></stop></linearGradient></defs><g class="graph-node symptom-root-cause hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">2</text></g><text class="legend-graph-text" x="42" y="16">S+RC</text><text class="legend-graph-sub" x="42" y="29">same callable</text></svg>', text: "Same callable has both roles." },
-      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node root hit edited" transform="translate(20,19)"><circle r="14"></circle><circle class="graph-edit-ring" r="18"></circle><text class="graph-step" y="4">8</text></g><text class="legend-graph-text" x="42" y="16">final edit</text><text class="legend-graph-sub" x="42" y="29">purple ring</text></svg>', text: "Last edit landed on this node." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node test" transform="translate(20,19)"><circle r="14"></circle></g><text class="legend-graph-text" x="42" y="16">test harness</text><text class="legend-graph-sub" x="42" y="29">non-rewardable</text></svg>', text: "Test files, runners, and fixtures." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node test-adapter" transform="translate(20,19)"><circle r="14"></circle></g><text class="legend-graph-text" x="42" y="16">test-adapter</text><text class="legend-graph-sub" x="42" y="29">before symptom</text></svg>', text: "Non-test frame before the symptom anchor." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node symptom" transform="translate(20,19)"><circle r="14"></circle></g><text class="legend-graph-text" x="42" y="16">symptom</text><text class="legend-graph-sub" x="42" y="29">issue anchor</text></svg>', text: "Deepest Graph frame matched by the issue description." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node path" transform="translate(20,19)"><circle r="14"></circle></g><text class="legend-graph-text" x="42" y="16">intermediate</text><text class="legend-graph-sub" x="42" y="29">rewardable</text></svg>', text: "Rewardable program frame between symptom and root cause." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node fix-adapter" transform="translate(20,19)"><circle r="14"></circle></g><text class="legend-graph-text" x="42" y="16">fix-adapter</text><text class="legend-graph-sub" x="42" y="29">patched upstream</text></svg>', text: "Patched callable upstream of the terminal root cause." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node root" transform="translate(20,19)"><circle r="14"></circle></g><text class="legend-graph-text" x="42" y="16">root cause</text><text class="legend-graph-sub" x="42" y="29">terminal patch</text></svg>', text: "Terminal patched callable or component." },
     ],
   },
   {
@@ -150,6 +153,16 @@ const GRAPH_LEGEND_GROUPS = [
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-context" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#667085"></path></marker></defs><path class="graph-edge context" d="M12 20 C42 32, 74 32, 108 20" marker-end="url(#legend-arrow-context)"></path></svg>', text: "Graph edge: fixed Graph edge outside the Path." },
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-trace" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#c2410c"></path></marker></defs><path class="graph-edge trace" d="M12 20 C42 6, 74 32, 108 20" marker-end="url(#legend-arrow-trace)"></path><text class="graph-trace-label" x="58" y="19">1</text></svg>', text: "Trace edge: observed jump between visited Graph nodes." },
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-order" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2563eb"></path></marker></defs><circle cx="16" cy="19" r="10" fill="#dcfce7" stroke="#15803d" stroke-width="2"></circle><path class="graph-edge path" d="M28 19 C48 19, 62 19, 82 19" marker-end="url(#legend-arrow-order)"></path><circle cx="98" cy="19" r="10" fill="#fee2e2" stroke="#b42318" stroke-width="2"></circle></svg>', text: "Dependency direction: symptom to root cause." },
+    ],
+  },
+  {
+    title: "Symbols",
+    items: [
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node symptom hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">7</text></g><text class="legend-graph-text" x="42" y="16">hit step</text><text class="legend-graph-sub" x="42" y="29">step 7</text></svg>', text: "Number is the first visited step." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node path miss" transform="translate(20,19)"><circle r="14"></circle></g><text class="legend-graph-text" x="42" y="16">not hit</text><text class="legend-graph-sub" x="42" y="29">faded</text></svg>', text: "Faded node was not visited." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node path hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">4</text></g><text class="legend-graph-text" x="42" y="16">save x3</text><text class="legend-graph-sub" x="42" y="29">same span</text></svg>', text: "Multiple symbols share one source span." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><linearGradient id="graph-symptom-root-cause-fill" x1="0" y1="1" x2="1" y2="0"><stop offset="50%" stop-color="#dcfce7"></stop><stop offset="50%" stop-color="#fee2e2"></stop></linearGradient></defs><g class="graph-node symptom-root-cause hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">2</text></g><text class="legend-graph-text" x="42" y="16">S+RC</text><text class="legend-graph-sub" x="42" y="29">same callable</text></svg>', text: "Same callable has both roles." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node root hit edited" transform="translate(20,19)"><circle r="14"></circle><circle class="graph-edit-ring" r="18"></circle><text class="graph-step" y="4">8</text></g><text class="legend-graph-text" x="42" y="16">final edit</text><text class="legend-graph-sub" x="42" y="29">purple ring</text></svg>', text: "Last edit landed on this node." },
     ],
   },
 ];
@@ -996,14 +1009,29 @@ function selectedDetail(snapshot) {
   return details.find((detail) => rowKey(detail) === state.selectedTraceKey) || details[0] || null;
 }
 
+function canonicalNodeRole(role) {
+  if (role === "pre_symptom") return "test_adapter";
+  return role || "";
+}
+
+const NODE_ROLE_LABELS = {
+  test_harness: "test harness",
+  test_adapter: "test-adapter",
+  symptom: "symptom",
+  intermediate: "intermediate",
+  fix_adapter: "fix-adapter",
+  root_cause: "root cause",
+};
+
 function roleTone(node) {
   if (isSymptomRootCauseNode(node)) return "symptom-root-cause";
-  const role = node?.node_role || "";
+  const role = canonicalNodeRole(node?.node_role);
   if (role === "test_harness") return "test";
-  if (role === "pre_symptom") return "pre";
+  if (role === "test_adapter") return "test-adapter";
   if (role === "root_cause") return "root";
   if (role === "symptom") return "symptom";
   if (role === "intermediate") return "path";
+  if (role === "fix_adapter") return "fix-adapter";
   return "context";
 }
 
@@ -1013,13 +1041,13 @@ function nodeDistance(node) {
 }
 
 function graphLayer(node) {
-  const role = node?.node_role || "";
+  const role = canonicalNodeRole(node?.node_role);
   const distance = nodeDistance(node);
   if (role === "test_harness") return 0;
-  if (role === "pre_symptom") return 1;
+  if (role === "test_adapter") return 1;
   if (role === "symptom") return 2;
   if (role === "root_cause") return 10;
-  if (role === "intermediate") {
+  if (role === "intermediate" || role === "fix_adapter") {
     if (distance === null) return 6;
     return Math.max(3, Math.min(9, 3 + Math.round((1 - distance) * 6)));
   }
@@ -1046,11 +1074,11 @@ function detailSymptomKeys(detail) {
 }
 
 function hitNodeIsRootCause(node, detail) {
-  return node?.node_role === "root_cause" || node?.root_cause === true || detailRootKeys(detail).has(node?.key);
+  return canonicalNodeRole(node?.node_role) === "root_cause" || node?.root_cause === true || detailRootKeys(detail).has(node?.key);
 }
 
 function hitNodeIsSymptom(node, detail) {
-  return node?.node_role === "symptom" || node?.selected_issue_anchor === true || node?.anchor === true || detailSymptomKeys(detail).has(node?.key);
+  return canonicalNodeRole(node?.node_role) === "symptom" || node?.selected_issue_anchor === true || node?.anchor === true || detailSymptomKeys(detail).has(node?.key);
 }
 
 function hitNodeIsSymptomRootCause(node, detail) {
@@ -1059,20 +1087,34 @@ function hitNodeIsSymptomRootCause(node, detail) {
 
 const STEP_ROLE_COLORS = {
   symptom: "#dcfce7",
-  path: "#dbeafe",
+  "test-adapter": "#fef3c7",
+  intermediate: "#dbeafe",
+  "fix-adapter": "#fce7f3",
   root: "#fee2e2",
 };
+
+function stepNodeSegment(node, detail) {
+  if (hitNodeIsSymptom(node, detail)) return "symptom";
+  if (hitNodeIsRootCause(node, detail)) return "root";
+  const role = canonicalNodeRole(node?.node_role);
+  if (role === "test_adapter") return "test-adapter";
+  if (role === "intermediate") return "intermediate";
+  if (role === "fix_adapter") return "fix-adapter";
+  return null;
+}
 
 function stepRoleSegments(step, detail) {
   const scored = step?.scored || step || {};
   const nodes = scored.hit_nodes || [];
   if (step?.edited_root_cause) return ["root-edit"];
   if (step?.action_family === "edit" || (step?.write_actions || []).length || (scored.writes || []).length) return ["edit"];
-  if (nodes.some((node) => hitNodeIsSymptomRootCause(node, detail))) return ["symptom-root-cause"];
   const roles = [];
-  if (nodes.some((node) => hitNodeIsSymptom(node, detail))) roles.push("symptom");
-  if (nodes.some((node) => !hitNodeIsSymptom(node, detail) && !hitNodeIsRootCause(node, detail))) roles.push("path");
-  if (nodes.some((node) => hitNodeIsRootCause(node, detail))) roles.push("root");
+  const present = new Set(nodes.map((node) => stepNodeSegment(node, detail)).filter(Boolean));
+  const onlySymptomRootCause = nodes.length > 0 && nodes.every((node) => hitNodeIsSymptomRootCause(node, detail));
+  if (onlySymptomRootCause) return ["symptom-root-cause"];
+  for (const role of ["symptom", "test-adapter", "intermediate", "fix-adapter", "root"]) {
+    if (present.has(role)) roles.push(role);
+  }
   if (roles.length) return roles;
   if ((scored.n_reads || 0) > 0 || (step?.recovered_reads || []).length || step?.action_family === "read") return ["offmap"];
   if (step?.action_family === "exec" || step?.action_family === "other" || scored.family === "exec" || scored.family === "other") return ["exec-other"];
@@ -1130,21 +1172,29 @@ function graphNodes(detail, { includeContext = state.showGraphContext } = {}) {
   const topologyByKey = new Map((detail?.graph_topology?.nodes || []).map((node) => [node?.key, node]));
   const annotateNode = (node) => {
     const topologyNode = topologyByKey.get(node?.key) || {};
+    const role = canonicalNodeRole(node?.node_role || topologyNode?.node_role);
     return ({
-    ...topologyNode,
-    ...node,
-    source: node?.source || topologyNode?.source,
-    source_preview: node?.source_preview || topologyNode?.source_preview,
-    selected_issue_anchor: Boolean(node?.selected_issue_anchor || anchors.has(node?.key)),
-    root_cause: Boolean(node?.root_cause || roots.has(node?.key) || node?.node_role === "root_cause"),
-    final_edit: Boolean(editedNodes.has(node?.key)),
-  });
+      ...topologyNode,
+      ...node,
+      node_role: role || node?.node_role || topologyNode?.node_role,
+      source: node?.source || topologyNode?.source,
+      source_preview: node?.source_preview || topologyNode?.source_preview,
+      selected_issue_anchor: Boolean(node?.selected_issue_anchor || anchors.has(node?.key)),
+      root_cause: Boolean(node?.root_cause || roots.has(node?.key) || role === "root_cause"),
+      final_edit: Boolean(editedNodes.has(node?.key)),
+    });
   };
   const topologyNodes = detail?.graph_topology?.nodes || [];
+  const nonTestTopologyNodes = topologyNodes.filter((node) => canonicalNodeRole(node?.node_role) !== "test_harness");
+  const nonTestProjectedNodes = [...contextNodes, ...currentPathNodes]
+    .filter((node) => canonicalNodeRole(node?.node_role) !== "test_harness");
   if (includeContext && topologyNodes.length) return topologyNodes.map((node) => annotateNode({ ...node, group: node.rewardable ? "path" : "context" }));
-  const projected = includeContext ? [...contextNodes, ...currentPathNodes] : currentPathNodes;
+  if (!includeContext && nonTestTopologyNodes.length) {
+    return nonTestTopologyNodes.map((node) => annotateNode({ ...node, group: node.rewardable ? "path" : "context" }));
+  }
+  const projected = includeContext ? [...contextNodes, ...currentPathNodes] : nonTestProjectedNodes;
   if (projected.length) return projected.map(annotateNode);
-  return topologyNodes.map((node) => annotateNode({ ...node, group: node.rewardable ? "path" : "context" }));
+  return nonTestTopologyNodes.map((node) => annotateNode({ ...node, group: node.rewardable ? "path" : "context" }));
 }
 
 function normalizeGraphEdge(edge, edgeType = "path") {
@@ -1180,7 +1230,7 @@ function graphGroupKey(node) {
   const filePath = node?.file_path || "";
   const start = node?.start_line ?? "";
   const end = node?.end_line ?? "";
-  const role = node?.node_role || node?.group || "";
+  const role = canonicalNodeRole(node?.node_role) || node?.group || "";
   if (!filePath || start === "" || end === "") return node?.key || "";
   return `${filePath}:${start}:${end}:${role}:${distance ?? ""}`;
 }
@@ -1322,7 +1372,8 @@ function isSymptomRootCauseNode(node) {
 
 function nodeRoleLabel(node) {
   if (isSymptomRootCauseNode(node)) return "symptom + root cause";
-  return node?.node_role || node?.group || "-";
+  const role = canonicalNodeRole(node?.node_role);
+  return NODE_ROLE_LABELS[role] || role || node?.group || "-";
 }
 
 function graphEdgeMarker(edge) {
@@ -1992,15 +2043,15 @@ function nodeLineRange(node) {
 function groupedStepHitNodes(step, detail) {
   const groups = [
     { key: "symptom", label: "symptom", nodes: [] },
-    { key: "path", label: "Path hit", nodes: [] },
+    { key: "test-adapter", label: "test-adapter", nodes: [] },
+    { key: "intermediate", label: "intermediate", nodes: [] },
+    { key: "fix-adapter", label: "fix-adapter", nodes: [] },
     { key: "root", label: "root cause", nodes: [] },
   ];
+  const byKey = new Map(groups.map((group) => [group.key, group]));
   for (const node of stepHitNodes(step)) {
-    const isSymptom = hitNodeIsSymptom(node, detail);
-    const isRoot = hitNodeIsRootCause(node, detail);
-    if (isSymptom) groups[0].nodes.push(node);
-    if (!isSymptom && !isRoot) groups[1].nodes.push(node);
-    if (isRoot) groups[2].nodes.push(node);
+    const segment = stepNodeSegment(node, detail);
+    if (segment && byKey.has(segment)) byKey.get(segment).nodes.push(node);
   }
   return groups;
 }

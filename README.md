@@ -3,10 +3,11 @@
 Program-Analysis-based Process Advantage (P2A) for SWE agentic RL, implemented on
 the **Uni-Agent** training stack with our **ARL** cluster as the sandbox backend.
 P2A reshapes the per-step RL advantage using a precomputed **bonus map**: a
-captured **Graph** from failing-test execution plus a rewardable **Path** from
-the issue symptom to the terminal patched root cause, with a test-filtered
-F2P→root-cause fallback when no issue symptom anchor can be matched. Steps whose
-agent actions land on this Path get a larger advantage.
+captured **Graph** from failing-test execution, a rewardable non-test Graph
+slice from the first post-test node to the terminal patched root cause, and a
+diagnostic **Path** from the issue symptom to that root cause when a symptom
+anchor can be matched. Steps whose agent actions land on rewardable Graph nodes
+get a larger advantage.
 
 Everything is **self-contained**: data comes from HuggingFace, images from the
 pair-diag mirror of the original R2E images. There is **no dependency on the old
@@ -14,13 +15,19 @@ pair-diag mirror of the original R2E images. There is **no dependency on the old
 
 ## Bonus-map anchors
 
-Dynamic bonus maps keep observed Graph nodes for diagnostics, but only the
-Path is rewardable. Target semantics are:
-`test_harness -> pre_symptom -> symptom -> intermediate -> root_cause`.
-`test_harness` and `pre_symptom` are excluded from `hop_max` and read matching;
-`symptom`, `intermediate`, and `root_cause` are rewardable. If no high-confidence
-issue symptom anchor matches the captured Graph, the fallback excludes only test harness
-frames and treats all remaining F2P→terminal-root frames as rewardable.
+Dynamic bonus maps keep observed Graph nodes, distances, roles, rewardability,
+and callable source as bonus-map data. Target semantics are:
+`test_harness -> test_adapter -> symptom -> intermediate/fix_adapter -> root_cause`.
+Only `test_harness` is excluded from `hop_max`, source capture, and read
+matching; every non-test node is rewardable. `test_adapter` names rewardable
+non-test frames before the selected issue symptom anchor;
+`fix_adapter` names golden-patch-modified callables that sit upstream of the
+terminal patched root cause. Legacy artifacts may still use `pre_symptom` as an
+alias for `test_adapter`. The training ground-truth anchor is the first
+non-test node after the test harness, not the issue symptom. The issue symptom
+anchor only defines the diagnostic Path and Path metrics; if no high-confidence
+issue symptom anchor matches the captured Graph, Path metrics are unavailable
+but Graph reward remains defined over all non-test F2P→terminal-root frames.
 
 > **ARL is the sandbox, not a "remote".** The `arl-env` SDK connects directly to the
 > ARL Gateway (`ARL_GATEWAY_URL`) to boot a per-instance container sandbox where tests

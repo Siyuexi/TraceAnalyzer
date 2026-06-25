@@ -207,6 +207,7 @@ def test_validation_metrics_use_schema_v5_path_projection(tmp_path):
     assert context_by_key["tests/test_issue.py::test_issue"]["hit"] is True
     assert context_by_key["tests/test_issue.py::test_issue"]["normalized_distance"] == 1.0
     assert "source_preview" not in context_by_key["tests/test_issue.py::test_issue"]
+    assert context_by_key["framework/request.py::dispatch"]["node_role"] == "test_adapter"
     path_by_key = {node["key"]: node for node in detail["path_projection"]["path_nodes"]}
     assert path_by_key["app/views.py::symptom"]["normalized_distance"] == 1.0
     assert path_by_key["app/root.py::patched_root"]["normalized_distance"] == 0.0

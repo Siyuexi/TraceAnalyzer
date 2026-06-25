@@ -59,6 +59,14 @@ is on `main`.
   should use Graph, Path, and Trace directly; when old keys are required for
   backward compatibility, isolate them behind explicit alias/normalization
   helpers and label them as legacy.
+- Use Graph node roles consistently. Only `test_harness` is non-rewardable.
+  `test_adapter` is the rewardable non-test frame before the selected issue
+  symptom anchor; legacy `pre_symptom` is only an artifact alias for
+  `test_adapter`. `fix_adapter` is a rewardable golden-patch-modified callable
+  upstream of the terminal patched root cause. `root_cause` is reserved for
+  terminal patched callables/components. The training ground-truth anchor is
+  the first non-test node after the test harness; the issue symptom anchor is a
+  diagnostic/visual Path anchor, not the reward boundary.
 - If a dashboard feature depends on read/write/error/root-cause semantics, add
   or reuse the corresponding parser/scorer fields in P2A source first, then
   render those fields in the frontend. Avoid frontend-only inference for

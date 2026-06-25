@@ -38,3 +38,11 @@
   older instrumentation filenames are compatibility vocabulary only; new code,
   comments, and UI copy should route those keys through explicit alias helpers
   and should not promote them as public terminology.
+- Graph node role policy: only `test_harness` is non-rewardable.
+  `test_adapter` is the rewardable non-test frame before the selected issue
+  symptom anchor; legacy `pre_symptom` is only an artifact alias for
+  `test_adapter`. `fix_adapter` is a rewardable golden-patch-modified callable
+  upstream of the terminal patched root cause. Reserve `root_cause` for terminal
+  patched callables/components. Training uses the first non-test node after the
+  test harness as the ground-truth anchor; the issue symptom anchor is only a
+  diagnostic/visual Path anchor.

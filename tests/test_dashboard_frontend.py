@@ -498,7 +498,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
               if (traceHtml.includes(needle)) throw new Error(`graph panel should not contain stale title or top legend fragment: ${needle}`);
             }
             const stepHtml = traceHtml;
-            for (const needle of ["trace-middle", "trace-right", "step-thumb root-edit", "step-thumb symptom is-error", "data-step-tone=", "data-step-roles=", "Purpose blocks", "Visited Graph nodes", "node-hit-group root", "pkg/root.py", "Reasoning", "Chat", "Tool calls", "str_replace_editor", "Action", "Observation", "Inline diff"]) {
+            for (const needle of ["trace-middle", "trace-right", "step-thumb root-edit", "step-thumb symptom is-error", "data-step-tone=", "data-step-roles=", "Purpose blocks", "Visited Graph nodes", "pkg/root.py", "Reasoning", "Chat", "Tool calls", "str_replace_editor", "Action", "Observation", "Inline diff"]) {
               if (!stepHtml.includes(needle)) throw new Error(`missing step panel fragment: ${needle}`);
             }
             if (stepHtml.indexOf("Visited Graph nodes") > stepHtml.indexOf("Tool calls")) {
@@ -512,6 +512,18 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             }
             for (const needle of ["trace-row is-selected is-resolved", "trace-status-icons", "trace-icon-symptom", "trace-icon-root", "trace-icon-root-edit", "hit symptom", "hit root cause", "edited root cause"]) {
               if (!traceHtml.includes(needle)) throw new Error(`missing compact trace status: ${needle}`);
+            }
+            if (run(`canonicalNodeRole("pre_symptom")`) !== "test_adapter") {
+              throw new Error("legacy pre_symptom role should normalize to test_adapter");
+            }
+            if (run(`roleTone({node_role: "test_adapter"})`) !== "test-adapter") {
+              throw new Error("test_adapter should use adapter graph tone");
+            }
+            if (run(`roleTone({node_role: "fix_adapter"})`) !== "fix-adapter") {
+              throw new Error("fix_adapter should use adapter graph tone");
+            }
+            if (run(`nodeRoleLabel({node_role: "fix_adapter"})`) !== "fix-adapter") {
+              throw new Error("fix_adapter should use public hyphenated label");
             }
             if (run("combinedMiracleMarker({miracle_step: false, block_miracle_step: true})") !== false) {
               throw new Error("primary miracle marker should use step-level semantics");
@@ -547,10 +559,12 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             }
             const splitRoles = run(`JSON.stringify(stepRoleSegments({scored: {hit_nodes: [
               {key: "pkg/symptom.py::symptom", node_role: "symptom"},
+              {key: "framework/request.py::dispatch", node_role: "test_adapter"},
               {key: "pkg/mid.py::mid", node_role: "intermediate"},
+              {key: "pkg/fix.py::adapter", node_role: "fix_adapter"},
               {key: "pkg/root.py::root", node_role: "root_cause"}
             ]}}, state.snapshot.details[0]))`);
-            if (splitRoles !== JSON.stringify(["symptom", "path", "root"])) {
+            if (splitRoles !== JSON.stringify(["symptom", "test-adapter", "intermediate", "fix-adapter", "root"])) {
               throw new Error(`unexpected split roles: ${splitRoles}`);
             }
             const dualNodeTone = run(`stepTone({scored: {hit_nodes: [
@@ -577,14 +591,16 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             }
             const nodeHitHtml = run(`renderStepNodeHits({scored: {hit_nodes: [
               {key: "pkg/symptom.py::Symptom.run", file_path: "pkg/symptom.py", start_line: 3, end_line: 8, node_role: "symptom"},
+              {key: "framework/request.py::dispatch", file_path: "framework/request.py", start_line: 4, end_line: 4, node_role: "test_adapter"},
               {key: "pkg/mid.py::Middle.step", file_path: "pkg/mid.py", start_line: 9, end_line: 9, node_role: "intermediate"},
+              {key: "pkg/fix.py::FixAdapter.wrap", file_path: "pkg/fix.py", start_line: 10, end_line: 12, node_role: "fix_adapter"},
               {key: "pkg/root.py::Root.fix", file_path: "pkg/root.py", start_line: 10, end_line: 20, node_role: "root_cause"}
             ]}}, state.snapshot.details[0])`);
-            for (const needle of ["node-hit-group symptom", "node-hit-group path", "node-hit-group root", "pkg/symptom.py", "Symptom.run", "pkg/mid.py", "Middle.step", "pkg/root.py", "Root.fix", ":10-20"]) {
+            for (const needle of ["node-hit-group symptom", "node-hit-group test-adapter", "node-hit-group intermediate", "node-hit-group fix-adapter", "node-hit-group root", "pkg/symptom.py", "Symptom.run", "framework/request.py", "dispatch", "pkg/mid.py", "Middle.step", "pkg/fix.py", "FixAdapter.wrap", "pkg/root.py", "Root.fix", ":10-20"]) {
               if (!nodeHitHtml.includes(needle)) throw new Error(`missing step node hit fragment: ${needle}`);
             }
-            if (!(nodeHitHtml.indexOf("node-hit-group symptom") < nodeHitHtml.indexOf("node-hit-group path") && nodeHitHtml.indexOf("node-hit-group path") < nodeHitHtml.indexOf("node-hit-group root"))) {
-              throw new Error("map hit group should render between symptom and root cause");
+            if (!(nodeHitHtml.indexOf("node-hit-group symptom") < nodeHitHtml.indexOf("node-hit-group test-adapter") && nodeHitHtml.indexOf("node-hit-group test-adapter") < nodeHitHtml.indexOf("node-hit-group intermediate") && nodeHitHtml.indexOf("node-hit-group intermediate") < nodeHitHtml.indexOf("node-hit-group fix-adapter") && nodeHitHtml.indexOf("node-hit-group fix-adapter") < nodeHitHtml.indexOf("node-hit-group root"))) {
+              throw new Error("node hit groups should render in Graph role order");
             }
             if (!stepHtml.includes('detail-toggle observation-toggle" open')) {
               throw new Error("observation toggle should default open");
@@ -623,8 +639,11 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
               if (stepHtml.includes(needle)) throw new Error(`stale inspector fragment: ${needle}`);
             }
             const legendHtml = elements.get("trace-legend").innerHTML;
-            for (const needle of ["Trace Patterns", "Read Step Colors", "Write / Execute / Other Step Colors", "legend-icon", "Hit symptom: observed failure signal", "Hit root cause: expected cause or fix target", "Edited root cause: a write landed on a root-cause node", "Loop: repeated purpose block", "Reverse: traversal goes against dependency order", "Write action modified root cause", "Write action did not hit root cause", "One step hit multiple map roles", "Tool or command execution failed", "Exec or other tool without a parsed read hit", "exec / other", "Parsed read outside the Path", "Graph", "Nodes", "Edges", "Number is the first visited step", "Last edit landed on this node", "Trace edge", "Faded node was not visited", "Path edge", "Graph edge", "Dependency direction", 'x1="0" y1="1" x2="1" y2="0"']) {
+            for (const needle of ["Trace Patterns", "Read Step Colors", "Write / Execute / Other Step Colors", "legend-icon", "Hit symptom: observed failure signal", "Hit root cause: expected cause or fix target", "Edited root cause: a write landed on a root-cause node", "Loop: repeated purpose block", "Reverse: traversal goes against dependency order", "Write action modified root cause", "Write action did not hit root cause", "One step hit multiple node roles", "Tool or command execution failed", "Exec or other tool without a parsed read hit", "exec / other", "Parsed read outside the Path", "Graph", "Nodes", "Edges", "Symbols", "test harness", "symptom", "intermediate", "Number is the first visited step", "test-adapter", "fix-adapter", "Last edit landed on this node", "Trace edge", "Faded node was not visited", "Path edge", "Graph edge", "Dependency direction", 'x1="0" y1="1" x2="1" y2="0"']) {
               if (!legendHtml.includes(needle)) throw new Error(`missing trajectory legend fragment: ${needle}`);
+            }
+            for (const needle of ["Path node", "Path hit"]) {
+              if (legendHtml.includes(needle)) throw new Error(`graph legend should not use stale generic node label: ${needle}`);
             }
             if (legendHtml.includes("Trajectory labels and colors")) {
               throw new Error("trajectory legend should not render a title");

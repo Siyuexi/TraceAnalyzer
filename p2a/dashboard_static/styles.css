@@ -368,6 +368,7 @@ tr.is-selected td {
 .legend-step.root-edit { background: #ede9fe; border-color: #a78bfa; color: #4c1d95; }
 .legend-step.edit { background: #ccfbf1; border-color: #5eead4; color: #134e4a; }
 .legend-step.symptom { background: #dcfce7; border-color: #86efac; color: #14532d; }
+.legend-step.test-adapter { background: #fef3c7; border-color: #fcd34d; color: #78350f; }
 .legend-step.symptom-root-cause {
   background: linear-gradient(135deg, #dcfce7 0 50%, #fee2e2 50% 100%);
   border-color: #64748b;
@@ -378,7 +379,9 @@ tr.is-selected td {
   border-color: #64748b;
   color: #111827;
 }
-.legend-step.path { background: #dbeafe; border-color: #93c5fd; color: #1e3a8a; }
+.legend-step.path,
+.legend-step.intermediate { background: #dbeafe; border-color: #93c5fd; color: #1e3a8a; }
+.legend-step.fix-adapter { background: #fce7f3; border-color: #f9a8d4; color: #831843; }
 .legend-step.offmap { background: #fef3c7; border-color: #fcd34d; color: #78350f; }
 .legend-step.neutral { background: #f8fafc; color: #475467; }
 .legend-step.exec-other { background: #f8fafc; border-color: var(--line); color: #475467; }
@@ -865,10 +868,12 @@ pre.log {
   stroke-width: 3;
 }
 .graph-node.test circle { fill: #f5f3ff; stroke: #7c3aed; }
-.graph-node.pre circle { fill: #fef3c7; stroke: #d97706; }
+.graph-node.pre circle,
+.graph-node.test-adapter circle { fill: #fef3c7; stroke: #d97706; }
 .graph-node.root circle { fill: #fee2e2; stroke: #b42318; }
 .graph-node.symptom circle { fill: #dcfce7; stroke: #15803d; }
 .graph-node.path circle { fill: #dbeafe; stroke: #2563eb; }
+.graph-node.fix-adapter circle { fill: #fce7f3; stroke: #be185d; }
 .graph-node.context circle { fill: #f2f4f7; stroke: #667085; }
 .graph-node.symptom-root-cause circle {
   fill: url(#graph-symptom-root-cause-fill);
@@ -896,6 +901,8 @@ pre.log {
 .graph-node.root circle.graph-edit-ring,
 .graph-node.symptom circle.graph-edit-ring,
 .graph-node.path circle.graph-edit-ring,
+.graph-node.fix-adapter circle.graph-edit-ring,
+.graph-node.test-adapter circle.graph-edit-ring,
 .graph-node.context circle.graph-edit-ring,
 .graph-node.symptom-root-cause circle.graph-edit-ring {
   fill: none;
@@ -1071,6 +1078,7 @@ pre.log {
 .step-thumb.root-edit { background: #ede9fe; border-color: #a78bfa; }
 .step-thumb.edit { background: #ccfbf1; border-color: #5eead4; }
 .step-thumb.symptom { background: #dcfce7; border-color: #86efac; }
+.step-thumb.test-adapter { background: #fef3c7; border-color: #fcd34d; }
 .step-thumb.symptom-root-cause {
   background: linear-gradient(135deg, #dcfce7 0 50%, #fee2e2 50% 100%);
   border-color: #64748b;
@@ -1079,7 +1087,9 @@ pre.log {
   background: var(--step-bg);
   border-color: #64748b;
 }
-.step-thumb.path { background: #dbeafe; border-color: #93c5fd; }
+.step-thumb.path,
+.step-thumb.intermediate { background: #dbeafe; border-color: #93c5fd; }
+.step-thumb.fix-adapter { background: #fce7f3; border-color: #f9a8d4; }
 .step-thumb.offmap { background: #fef3c7; border-color: #fcd34d; }
 .step-thumb.bad { background: #ffe4e6; border-color: #fb7185; }
 .step-thumb.neutral { background: #f8fafc; }
@@ -1169,13 +1179,22 @@ pre.log {
   border-left-color: #22c55e;
   background: #f0fdf4;
 }
+.node-hit-group.test-adapter {
+  border-left-color: #f59e0b;
+  background: #fffbeb;
+}
 .node-hit-group.root {
   border-left-color: #ef4444;
   background: #fff1f2;
 }
-.node-hit-group.path {
+.node-hit-group.path,
+.node-hit-group.intermediate {
   border-left-color: #3b82f6;
   background: #eff6ff;
+}
+.node-hit-group.fix-adapter {
+  border-left-color: #db2777;
+  background: #fdf2f8;
 }
 .node-hit-group-title {
   display: flex;
@@ -1194,8 +1213,11 @@ pre.log {
   background: #94a3b8;
 }
 .node-hit-group.symptom .node-hit-swatch { background: #22c55e; }
+.node-hit-group.test-adapter .node-hit-swatch { background: #f59e0b; }
 .node-hit-group.root .node-hit-swatch { background: #ef4444; }
-.node-hit-group.path .node-hit-swatch { background: #3b82f6; }
+.node-hit-group.path .node-hit-swatch,
+.node-hit-group.intermediate .node-hit-swatch { background: #3b82f6; }
+.node-hit-group.fix-adapter .node-hit-swatch { background: #db2777; }
 .node-hit-list {
   display: grid;
   gap: 5px;
