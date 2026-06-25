@@ -66,6 +66,38 @@ DEFAULT_CONFIG = {
     },
 }
 _REDACT_KEYS = ("api_key", "apikey", "token", "secret", "password", "authorization")
+SYSTEM_ERROR_KINDS = {
+    "arl_config_missing",
+    "arl_shell_forbidden",
+    "arl_shell_unavailable",
+    "arl_gateway_unreachable",
+    "network_error",
+    "runtime_timeout",
+}
+
+
+def classify_error(error: BaseException | str | None) -> str | None:
+    if error is None:
+        return None
+    text = str(error)
+    lowered = text.lower()
+    if "arl_gateway_url" in lowered:
+        return "arl_config_missing"
+    if "websocket" in lowered and ("403" in lowered or "forbidden" in lowered or "rejected" in lowered):
+        return "arl_shell_forbidden"
+    if "interactive shell" in lowered or "/shell" in lowered:
+        return "arl_shell_unavailable"
+    if "arl" in lowered and any(token in lowered for token in ("connection", "connect", "gateway", "timeout", "refused")):
+        return "arl_gateway_unreachable"
+    if any(token in lowered for token in ("network", "connection refused", "connection reset", "temporary failure")):
+        return "network_error"
+    if "timeout" in lowered or "timed out" in lowered:
+        return "runtime_timeout"
+    return "runtime_error"
+
+
+def is_system_error_kind(kind: str | None) -> bool:
+    return kind in SYSTEM_ERROR_KINDS
 
 
 def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
@@ -276,6 +308,7 @@ def _make_env(row: dict[str, Any], *, instance_id: str, deployment: str):
 
     env_dict = build_agent_env_config(row, instance_id=instance_id, deployment=deployment)
     if env_dict["deployment"].get("type") == "arl":
+        env_dict["deployment"]["require_interactive_shell"] = True
         env_config = make_env_config(
             env_dict["deployment"],
             env_variables=env_dict.get("env_variables"),
@@ -388,6 +421,8 @@ def build_dump_record(
     reward_score: Any,
     reward_details: Any,
     error: str | None = None,
+    error_kind: str | None = None,
+    error_stage: str | None = None,
 ) -> dict[str, Any]:
     instance_id = _instance_id(row)
     extra_info = _extra_info(row)
@@ -421,6 +456,9 @@ def build_dump_record(
         "token_usage": _as_jsonable((interaction_result or {}).get("rollout_cache", {}).get("token_usage", {})),
         "extra_info": extra_info,
         "error": error,
+        "error_kind": error_kind,
+        "error_stage": error_stage,
+        "system_error": is_system_error_kind(error_kind),
     }
 
 
@@ -464,17 +502,23 @@ async def run_one(
     reward_score = None
     reward_details = None
     error = None
+    error_kind = None
+    error_stage = None
     t0 = time.perf_counter()
 
     async def execute_rollout() -> None:
-        nonlocal env, interaction_result, reward_details, reward_score, run_id
+        nonlocal env, error_stage, interaction_result, reward_details, reward_score, run_id
         if not instance_id:
             raise ValueError("sample row does not carry instance_id")
+        error_stage = "env_config"
         env = _make_env(row, instance_id=instance_id, deployment=agent_cfg.get("deployment", "arl"))
         run_id = getattr(getattr(env, "deployment", None), "run_id", run_id)
+        error_stage = "tool_config"
         tools_manager = _make_tools(agent_cfg)
+        error_stage = "model_config"
         model = _make_model(model_cfg, provider_cfg)
         model.set_tools_schemas(tools_manager.tools_schemas)
+        error_stage = "interaction_config"
         interaction = _make_interaction(
             run_id=run_id,
             env=env,
@@ -483,22 +527,29 @@ async def run_one(
             messages=_prompt(row),
             agent_cfg=agent_cfg,
         )
+        error_stage = "reward_config"
         reward_spec = _make_reward(row, run_id=run_id, env=env, agent_cfg=agent_cfg)
+        error_stage = "env_start"
         await env.start()
+        error_stage = "tool_install"
         await _install_tools(
             env,
             tools_manager.tools,
             timeout=agent_cfg.get("tool_install_timeout", 300),
             skip_install_commands=agent_cfg.get("skip_tool_install_commands") or [],
         )
+        error_stage = "interaction"
         interaction_result = await interaction.run()
         if reward_spec is not None:
+            error_stage = "reward"
             reward_score, reward_details = await reward_spec.compute_reward(interaction_result=interaction_result)
+        error_stage = None
 
     try:
         await execute_rollout()
     except Exception as exc:  # noqa: BLE001 - dump errors per instance and keep the batch moving
         error = f"{type(exc).__name__}: {exc}"
+        error_kind = classify_error(exc)
     finally:
         if env is not None:
             try:
@@ -514,6 +565,8 @@ async def run_one(
         reward_score=reward_score,
         reward_details=reward_details,
         error=error,
+        error_kind=error_kind,
+        error_stage=error_stage,
     )
     record["wall_time"] = time.perf_counter() - t0
     return record

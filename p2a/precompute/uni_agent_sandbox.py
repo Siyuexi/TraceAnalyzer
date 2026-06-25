@@ -210,6 +210,13 @@ def _default_env_variables() -> dict[str, str]:
     }
 
 
+def _required_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise ValueError(f"{name} is required; set it or source .secrets/ips.sh.")
+    return value
+
+
 def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment: str | None = None) -> dict[str, Any]:
     """Build a Uni-Agent ``AgentEnvConfig`` dict from a dataset/sample row."""
     impl = (deployment or os.getenv("P2A_DEPLOYMENT") or os.getenv("DEPLOYMENT") or "vefaas").lower()
@@ -255,7 +262,7 @@ def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment
         deployment_config = {
             "type": "arl",
             "image": image,
-            "gateway_url": os.getenv("ARL_GATEWAY_URL", "http://118.145.201.106:80"),
+            "gateway_url": _required_env("ARL_GATEWAY_URL"),
             "namespace": os.getenv("ARL_NAMESPACE", "default"),
             "experiment_id": os.getenv("ARL_EXPERIMENT_ID", "p2a-uniagent-arl-precompute"),
             "timeout": float(os.getenv("ARL_TIMEOUT", "600")),
@@ -280,13 +287,33 @@ class UniAgentSandboxAdapter:
     repo_path = "/testbed"
     alt_path = "/root"
 
-    def __init__(self, agent_env, *, default_timeout: int = 300, swebench_verified: bool = False):
+    def __init__(
+        self,
+        agent_env,
+        *,
+        default_timeout: int = 300,
+        swebench_verified: bool = False,
+        startup_env_variables: dict[str, str] | None = None,
+        post_setup_cmd: str | None = None,
+    ):
         self.agent_env = agent_env
         self.default_timeout = default_timeout
         self.swebench_verified = swebench_verified
+        self.startup_env_variables = startup_env_variables or {}
+        self.post_setup_cmd = post_setup_cmd
 
     def start(self) -> None:
         self.agent_env.start()
+        setup_parts = [
+            f"export {key}={shlex.quote(str(value))}"
+            for key, value in sorted(self.startup_env_variables.items())
+        ]
+        if self.post_setup_cmd:
+            setup_parts.append(self.post_setup_cmd)
+        if setup_parts:
+            stdout, stderr, exit_code = self._execute_raw(" && ".join(setup_parts), timeout=300)
+            if exit_code != 0:
+                raise RuntimeError(f"sandbox post-setup failed exit={exit_code}: {(stderr or stdout)[-1000:]}")
 
     def close(self) -> None:
         self.agent_env.close()
@@ -417,13 +444,20 @@ def create_uni_agent_sandbox(task: dict[str, Any], *, instance_id: str) -> UniAg
 
         env_config = make_env_config(
             config["deployment"],
-            env_variables=config.get("env_variables"),
-            post_setup_cmd=config.get("post_setup_cmd"),
+            env_variables=None,
+            post_setup_cmd=None,
             tool_install_dir=config.get("tool_install_dir", "/usr/local/bin"),
         )
     else:
         env_config = AgentEnvConfig(**config)
     env = AgentEnv(run_id=f"p2a-bonus-{uuid.uuid4()}", env_config=env_config)
+    if config["deployment"].get("type") == "arl":
+        return UniAgentSandboxAdapter(
+            env,
+            swebench_verified=swebench_verified,
+            startup_env_variables=config.get("env_variables"),
+            post_setup_cmd=config.get("post_setup_cmd"),
+        )
     return UniAgentSandboxAdapter(env, swebench_verified=swebench_verified)
 
 

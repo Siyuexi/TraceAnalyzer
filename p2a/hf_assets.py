@@ -38,6 +38,14 @@ def shared_datasets_dir() -> Path:
     return shared_root() / "datasets"
 
 
+def shared_p2a_data_dir() -> Path:
+    """Return the shared TraceAnalyzer data directory used by shell setup."""
+    override = os.environ.get("DATA")
+    if override:
+        return _resolve_shared_relative(override)
+    return shared_datasets_dir() / "p2a"
+
+
 def shared_models_dir() -> Path:
     override = os.environ.get("P2A_MODELS_DIR")
     if override:

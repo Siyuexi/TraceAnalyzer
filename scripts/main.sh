@@ -5,6 +5,8 @@ set -euo pipefail
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
 SRC_ROOT="${SCRIPT_SRC_ROOT}"
+source "${SRC_ROOT}/scripts/load_local_env.sh"
+p2a_source_local_env "${SRC_ROOT}"
 source "${SRC_ROOT}/scripts/setup.sh"
 source "${SRC_ROOT}/scripts/stage_local_runtime.sh"
 cd "${SRC_ROOT}"
@@ -29,7 +31,7 @@ if [[ -z "${P2A_SYNC_DEPS+x}" ]]; then
 fi
 
 export RAY_DATA_HOME="${RAY_DATA_HOME:-${HOME}/verl}"
-export RAY_WORKER_HOSTS="${RAY_WORKER_HOSTS:-28.45.33.48 28.45.33.95 28.45.33.97}"
+export RAY_WORKER_HOSTS="${RAY_WORKER_HOSTS:-}"
 export RAY_GCS_PORT="${RAY_GCS_PORT:-6379}"
 export RAY_SSH_OPTS="${RAY_SSH_OPTS:--p 36000 -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8}"
 p2a_setup_init_data
@@ -38,8 +40,8 @@ if [[ -n "${MODEL:-}" ]]; then
 else
   export MODEL="$(default_model_path)"
 fi
-export ARL_GATEWAY_URL="${ARL_GATEWAY_URL:-http://118.145.201.106:80}"
-export RAY_API_SERVER_ADDRESS="${RAY_API_SERVER_ADDRESS:-http://127.0.0.1:8265}"
+p2a_require_env ARL_GATEWAY_URL
+export RAY_API_SERVER_ADDRESS="${RAY_API_SERVER_ADDRESS:-http://localhost:8265}"
 export NNODES_TRAIN="${NNODES_TRAIN:-2}"
 export NNODES_ROLLOUT="${NNODES_ROLLOUT:-2}"
 export NGPUS_PER_NODE="${NGPUS_PER_NODE:-8}"
@@ -80,7 +82,7 @@ restart_ray_cluster() {
   fi
 
   local head_ip
-  head_ip="${HEAD_IP:-${RAY_HEAD_IP:-${MASTER_IP:-28.45.32.245}}}"
+  head_ip="${HEAD_IP:-${RAY_HEAD_IP:-${MASTER_IP:-}}}"
   if [[ -z "${head_ip}" ]]; then
     head_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
   fi

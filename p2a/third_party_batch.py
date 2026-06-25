@@ -25,11 +25,14 @@ from p2a.eval_cache import (
     upsert_planned_cells,
     utc_now,
 )
-from p2a.third_party_eval import _instance_id, _load_rows, _select_rows, parse_limit_arg
+from p2a.eval_fault_localization import iter_records
+from p2a.hf_assets import shared_p2a_data_dir
+from p2a.third_party_eval import _instance_id, _load_rows, _select_rows, is_system_error_kind, parse_limit_arg
 
 
 SUPPORTED_DATASETS = {"swebench-hard", "swebench-verified", "r2e-gym-subset"}
 REDACT_KEYS = ("api_key", "apikey", "token", "secret", "password", "authorization")
+SYSTEM_ERROR_STATUS = "system_error"
 
 
 @dataclass(frozen=True)
@@ -151,7 +154,7 @@ def load_batch_config(path: Path) -> BatchConfig:
         overrides = {k: copy.deepcopy(v) for k, v in item.items() if k not in {"api_name", "model", "label"}}
         models.append(BatchModel(api_name=api_name, label=label, overrides=overrides))
 
-    artifacts_dir = Path(storage_cfg.get("artifacts_dir") or "data/third_party").expanduser()
+    artifacts_dir = _resolve_storage_path(storage_cfg.get("artifacts_dir"), default_relative="third_party")
     return BatchConfig(
         path=path,
         raw=payload,
@@ -166,10 +169,17 @@ def load_batch_config(path: Path) -> BatchConfig:
         run_timeout=str(experiment_cfg["run_timeout"]) if experiment_cfg.get("run_timeout") else None,
         per_model_concurrency=max(1, int(experiment_cfg.get("per_model_concurrency") or 1)),
         model_parallelism=max(1, int(experiment_cfg.get("model_parallelism") or len(models))),
-        db_path=Path(storage_cfg.get("db") or "data/evals/traces.sqlite").expanduser(),
+        db_path=_resolve_storage_path(storage_cfg.get("db"), default_relative="evals/traces.sqlite"),
         artifacts_dir=artifacts_dir,
         precompute_maps=bool(storage_cfg.get("precompute_maps", True)),
-        bonus_map_dir=Path(storage_cfg["bonus_map_dir"]).expanduser() if storage_cfg.get("bonus_map_dir") else None,
+        bonus_map_dir=(
+            _resolve_storage_path(
+                storage_cfg["bonus_map_dir"],
+                default_relative=f"eval_bonus_maps/{dataset_name}",
+            )
+            if storage_cfg.get("bonus_map_dir")
+            else None
+        ),
         models=models,
     )
 
@@ -198,6 +208,17 @@ def _safe_slug(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in slug)
 
 
+def _resolve_storage_path(value: Any, *, default_relative: str) -> Path:
+    raw = default_relative if value is None else str(value)
+    path = Path(raw).expanduser()
+    if path.is_absolute():
+        return path
+    parts = path.parts
+    if parts and parts[0] == "data":
+        path = Path(*parts[1:]) if len(parts) > 1 else Path(".")
+    return shared_p2a_data_dir() / path
+
+
 def _run_setup(args: list[str], *, env: dict[str, str]) -> str:
     import subprocess
 
@@ -223,11 +244,11 @@ def resolve_data_file(config: BatchConfig, *, env: dict[str, str]) -> Path:
 
 def resolve_bonus_map_dir(config: BatchConfig, data_file: Path, *, env: dict[str, str]) -> Path | None:
     if not config.precompute_maps:
-        return None
+        return config.bonus_map_dir
     if config.bonus_map_dir is not None:
         output_dir = config.bonus_map_dir
     else:
-        output_dir = config.artifacts_dir / config.experiment_id / "bonus_maps" / config.dataset_name
+        output_dir = shared_p2a_data_dir() / "eval_bonus_maps" / config.dataset_name
     setup_env = dict(env)
     if config.limit is not None:
         setup_env.setdefault("P2A_SETUP_BONUS_LIMIT", str(config.limit))
@@ -322,6 +343,38 @@ async def _run_subprocess(command: list[str], *, env: dict[str, str], timeout_s:
         stdout, _ = await proc.communicate()
         return 124, stdout.decode("utf-8", errors="replace")
     return proc.returncode or 0, stdout.decode("utf-8", errors="replace")
+
+
+def _system_error_summary(rollouts_path: Path) -> dict[str, Any] | None:
+    if not rollouts_path.exists():
+        return None
+    records = list(iter_records(rollouts_path))
+    if not records:
+        return None
+    error_records = [record for record in records if record.get("error")]
+    if len(error_records) != len(records):
+        return None
+    system_records = [
+        record
+        for record in error_records
+        if bool(record.get("system_error")) or is_system_error_kind(str(record.get("error_kind") or ""))
+    ]
+    if len(system_records) != len(records):
+        return None
+    kinds: dict[str, int] = {}
+    stages: dict[str, int] = {}
+    for record in system_records:
+        kind = str(record.get("error_kind") or "unknown")
+        stage = str(record.get("error_stage") or "unknown")
+        kinds[kind] = kinds.get(kind, 0) + 1
+        stages[stage] = stages.get(stage, 0) + 1
+    example = str(system_records[0].get("error") or "")
+    return {
+        "n_records": len(records),
+        "error_kinds": kinds,
+        "error_stages": stages,
+        "example_error": example[:500],
+    }
 
 
 def _mark_missing_error(
@@ -426,6 +479,8 @@ async def run_model_phase(
     model_env = dict(env)
     model_env["P2A_THIRD_PARTY_MODEL"] = model.api_name
 
+    rollouts_path = run_dir / "rollouts.jsonl"
+    details_path = run_dir / "details.jsonl"
     returncode, output = await _run_subprocess(command, env=model_env, timeout_s=_duration_seconds(config.run_timeout))
     log_path = run_dir / "run.log"
     log_path.write_text(output, encoding="utf-8")
@@ -454,10 +509,21 @@ async def run_model_phase(
             model_api_name=model.api_name,
             model_label=model.label,
             dataset=config.dataset_name,
-            rollouts_path=run_dir / "rollouts.jsonl",
-            details_path=run_dir / "details.jsonl",
+            rollouts_path=rollouts_path,
+            details_path=details_path,
         )
         conn.commit()
+    system_error = _system_error_summary(rollouts_path)
+    if system_error is not None:
+        return {
+            "model": model.label,
+            "phase": phase,
+            "status": SYSTEM_ERROR_STATUS,
+            "n_missing": len(missing_ids),
+            "n_ingested": n_ingested,
+            "run_dir": str(run_dir),
+            **system_error,
+        }
     return {
         "model": model.label,
         "phase": phase,
@@ -494,6 +560,9 @@ async def run_batch(config: BatchConfig, *, env: dict[str, str] | None = None) -
     for phase, limit in _phase_specs(config):
         phase_results = await asyncio.gather(*(guarded(model, phase, limit) for model in config.models))
         results.extend(phase_results)
+        if phase == "smoke" and any(result.get("status") == SYSTEM_ERROR_STATUS for result in phase_results):
+            print("[batch] smoke phase hit a system error; skipping later phases", flush=True)
+            break
     return results
 
 

@@ -52,7 +52,8 @@ Do not commit credentials or cluster-local endpoints. Provide them through the s
 environment or by editing the generated runtime env file under `$RAY_DATA_HOME`.
 
 ```bash
-export ARL_GATEWAY_URL="http://118.145.201.106:80"  # override if your ARL gateway differs
+source .secrets/ips.sh
+: "${ARL_GATEWAY_URL:?set ARL_GATEWAY_URL or create .secrets/ips.sh}"
 export ARL_NAMESPACE="default"
 export ARL_EXPERIMENT_ID="p2a-uniagent-arl"
 export UNI_AGENT_P2A_TRACE="1"  # optional process tracing; omit for pure baseline
@@ -169,7 +170,7 @@ migration path.
 
 - GPU dependencies and Ray cluster are not configured in this workspace yet.
 - `train_p2a.sh` submits a Ray job; Ray must be running on the GPU server.
-- The direct ARL SDK path requires `arl-env==0.3.1` in the ambient Uni-Agent
+- The direct ARL SDK path requires `arl-env==0.4.1` in the ambient Uni-Agent
   execution environment and in the training image/environment; this source tree
   currently does not own a `src/pyproject.toml`/`uv.lock`.
 

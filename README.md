@@ -2,13 +2,25 @@
 
 Program-Analysis-based Process Advantage (P2A) for SWE agentic RL, implemented on
 the **Uni-Agent** training stack with our **ARL** cluster as the sandbox backend.
-P2A reshapes the per-step RL advantage using a precomputed **bonus map** (the
-golden runtime call graph from failing test → patched callable): steps whose agent
-actions land on the fault-propagation path get a larger advantage.
+P2A reshapes the per-step RL advantage using a precomputed **bonus map**: a
+runtime fault-propagation graph from the issue symptom to the terminal patched
+root cause, with a test-filtered F2P→root-cause fallback when no issue symptom
+anchor can be matched. Steps whose agent actions land on this path get a larger
+advantage.
 
 Everything is **self-contained**: data comes from HuggingFace, images from the
 pair-diag mirror of the original R2E images. There is **no dependency on the old
 `src-backup` fork**.
+
+## Bonus-map anchors
+
+Dynamic bonus maps keep observed call-graph nodes for diagnostics, but only the
+bonus path is rewardable. Target semantics are:
+`test_harness -> pre_symptom -> symptom -> intermediate -> root_cause`.
+`test_harness` and `pre_symptom` are excluded from `hop_max` and read matching;
+`symptom`, `intermediate`, and `root_cause` are rewardable. If no high-confidence
+issue symptom anchor matches the trace, the fallback excludes only test harness
+frames and treats all remaining F2P→terminal-root frames as rewardable.
 
 > **ARL is the sandbox, not a "remote".** The `arl-env` SDK connects directly to the
 > ARL Gateway (`ARL_GATEWAY_URL`) to boot a per-instance container sandbox where tests
@@ -139,10 +151,11 @@ export PATH="$UV_PROJECT_ENVIRONMENT/bin:$PATH"
 export RAY_DATA_HOME="${RAY_DATA_HOME:-$HOME/verl}"
 export DATA="${DATA:-../../datasets/p2a}"
 export MODEL="${MODEL:-../../models/Qwen3-Coder-30B-A3B-Instruct}"
-# Usual ARL Gateway: http://118.145.201.106:80
-export ARL_GATEWAY_URL="${ARL_GATEWAY_URL:?set ARL_GATEWAY_URL}"
+# Private endpoints stay outside git.
+source .secrets/ips.sh
+: "${ARL_GATEWAY_URL:?set ARL_GATEWAY_URL or create .secrets/ips.sh}"
 # If submitting from the Ray head node, the local dashboard endpoint is enough.
-export RAY_API_SERVER_ADDRESS="${RAY_API_SERVER_ADDRESS:-http://127.0.0.1:8265}"
+export RAY_API_SERVER_ADDRESS="${RAY_API_SERVER_ADDRESS:-http://localhost:8265}"
 # Ray cluster ports. 6379 is Ray GCS; 8265 is Ray dashboard / Jobs.
 export RAY_GCS_PORT="${RAY_GCS_PORT:-6379}"
 export RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
@@ -284,8 +297,8 @@ bash scripts/ray_setup.sh "$HEAD_IP" smoke
 
 The `smoke` command does not restart Ray. It waits for the dashboard and submits
 a tiny Ray Jobs task. If you submit training from the head node,
-`RAY_API_SERVER_ADDRESS` can stay at `http://127.0.0.1:8265`; otherwise set it
-to `http://<HEAD_IP>:8265`.
+`RAY_API_SERVER_ADDRESS` can stay at `http://localhost:8265`; otherwise set it
+to the Ray head dashboard URL.
 
 ### Step 7. Submit a baseline or P2A run
 
@@ -299,10 +312,10 @@ bash scripts/main.sh
 `scripts/setup.sh` for idempotent dependency and data setup, restarts Ray through
 `scripts/ray_setup.sh`, and keeps default `DATA` / `MODEL` paths anchored at the
 shared checkout (`../../datasets/p2a` and `../../models/...`) instead of under
-`/tmp`. It defaults to the current GPU cluster
-(`HEAD_IP=28.45.32.245`, `RAY_WORKER_HOSTS="28.45.33.48 28.45.33.95 28.45.33.97"`,
-`RAY_GCS_PORT=6379`, `RAY_SSH_OPTS="-p 36000 ..."`). Override those env vars if
-the allocation changes. To submit to an already-running Ray cluster without a restart, set
+`/tmp`. It reads cluster-local endpoints from `.secrets/ips.sh` or existing
+environment variables (`HEAD_IP`/`RAY_HEAD_IP`, `RAY_WORKER_HOSTS`,
+`RAY_GCS_PORT`, `RAY_SSH_OPTS`). Override those env vars if the allocation
+changes. To submit to an already-running Ray cluster without a restart, set
 `P2A_RESTART_RAY=0`.
 
 Baseline:
@@ -391,13 +404,18 @@ tokens, and model lists stay ignored under `.secrets/internal_api_eval.py` (or
 the path set by `provider.api_module` / `P2A_INTERNAL_API_MODULE`). If that
 private module is missing, batch mode fails before launching cells.
 Batch results are upserted into the unified SQLite cache configured by
-`storage.db` (default `data/evals/traces.sqlite`) and can be watched live:
+`storage.db` (default `data/evals/traces.sqlite`, resolved under the shared
+`$DATA` root) and can be watched live:
 
 ```bash
 uv run python scripts/watch_third_party_batch.py \
-  --db data/evals/traces.sqlite \
+  --db $DATA/evals/traces.sqlite \
   --experiment-id public-swebench-hard-demo
 ```
+
+If the smoke phase records only system errors such as ARL gateway or interactive
+shell failures, batch mode stops before the full phase and reports the structured
+error kind in the rollout artifacts.
 
 Switch datasets with `THIRD_PARTY_DATASET=swebench-verified` or
 `THIRD_PARTY_DATASET=r2e-gym-subset`. Keep `P2A_THIRD_PARTY_LIMIT` small for
@@ -559,6 +577,14 @@ maps. The remaining residuals are 2 deterministic `all_pass` Django cases and 1
 | `instrumentation_failed` | 3 | Static callable extraction found candidates, but sandbox instrumentation produced no instrumented callable. |
 | `no_f2p` | 3 | F2P failures remain unaligned with traces after description-to-method recovery. |
 | `all_pass` | 2 | Buggy F2P tests exit 0 after checkout/test-selection verification, so the bug does not reproduce locally. |
+
+Trace parsing covers all captured tracer JSONL lines by default.  Set
+`P2A_TRACE_PARSE_MAX_LINES` only as an explicit debugging cap; bonus-map
+metadata records both `trace_parse_line_cap_reached` and
+`trace_event_cap_reached`.  The runtime tracer still keeps a finite
+`P2A_TRACE_MAX_EVENTS` guard, defaulting to `10000`; when a trace cap is
+reached before missing F2P evidence can be proven, the map is classified as
+`trace_cap_inconclusive` instead of a confident `no_f2p`.
 
 ## Training Smoke Check
 

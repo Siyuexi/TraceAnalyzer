@@ -9,6 +9,7 @@ ranges, the dedup, and the cross-path consistency.
 from p2a.core import (
     _parse_bash_read_commands,
     _parse_bash_read_commands_from_str,
+    match_reads_to_callgraph,
     normalize_action,
     parse_read_actions_from_tool_calls,
     segment_purpose_blocks,
@@ -64,3 +65,32 @@ def test_segments_purpose_blocks_by_family_and_target():
         {"family": "read", "target_path": "b.py", "step_indices": [3], "trace_indices": [2]},
         {"family": "edit", "target_path": "b.py", "step_indices": [4], "trace_indices": [3]},
     ]
+
+
+def test_match_reads_ignores_non_rewardable_call_graph_nodes():
+    reads = [{"file_path": "tests/test_demo.py", "start_line": 1, "end_line": 20}]
+    bonus_map = {
+        "call_graph_nodes": {
+            "tests/test_demo.py::test_demo": {
+                "file_path": "tests/test_demo.py",
+                "start_line": 1,
+                "end_line": 20,
+                "normalized_distance": 1.0,
+                "rewardable": False,
+                "node_role": "test_harness",
+            }
+        }
+    }
+
+    assert match_reads_to_callgraph(reads, bonus_map) == -1.0
+
+    bonus_map["call_graph_nodes"]["tests/test_demo.py::fixture_target"] = {
+        "file_path": "tests/test_demo.py",
+        "start_line": 5,
+        "end_line": 8,
+        "normalized_distance": 0.25,
+        "rewardable": True,
+        "node_role": "program",
+    }
+
+    assert match_reads_to_callgraph(reads, bonus_map) == 0.25

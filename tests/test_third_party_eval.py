@@ -12,6 +12,7 @@ from p2a.third_party_eval import (
     build_dump_record,
     build_step_traces,
     cache_rollouts,
+    classify_error,
     format_report,
     load_config,
     parse_limit_arg,
@@ -173,6 +174,10 @@ def test_build_step_traces_preserves_structured_tool_calls():
     ]
 
 
+def test_classify_error_marks_arl_websocket_forbidden_as_system_error():
+    assert classify_error("InvalidStatus: server rejected WebSocket connection: HTTP 403") == "arl_shell_forbidden"
+
+
 def test_dump_record_is_readable_by_fault_localization_scorer(tmp_path):
     bonus_dir = tmp_path / "bonus_maps"
     bonus_dir.mkdir()
@@ -182,12 +187,20 @@ def test_dump_record_is_readable_by_fault_localization_scorer(tmp_path):
                 "instance_id": "demo__abc123",
                 "case_type": "direct",
                 "traceable": True,
+                "selected_issue_anchor_nodes": ["pkg/demo.py::target"],
+                "symptom_nodes": [],
+                "root_cause_nodes": ["pkg/demo.py::target"],
+                "reward_path_edges": [],
+                "call_graph_edges": [],
                 "call_graph_nodes": {
                     "pkg/demo.py::target": {
                         "file_path": "pkg/demo.py",
                         "start_line": 1,
                         "end_line": 5,
                         "normalized_distance": 0.0,
+                        "rewardable": True,
+                        "node_role": "root_cause",
+                        "source": "def target():\n    return 1",
                     }
                 },
             }
@@ -218,6 +231,15 @@ def test_dump_record_is_readable_by_fault_localization_scorer(tmp_path):
     assert detail["has_step_traces"] is True
     assert detail["hit_call_graph"] is True
     assert detail["hit_ground_truth"] is True
+    assert detail["chain_evaluable"] is True
+    assert detail["chain_case_kind"] == "direct"
+    assert detail["anchor_hit"] is True
+    assert detail["root_hit"] is True
+    assert detail["chain_hit"] is True
+    assert detail["steps_anchor_to_root"] is None
+    assert detail["anchor_before_root"] is None
+    assert detail["chain_projection"]["anchors"] == ["pkg/demo.py::target"]
+    assert detail["chain_projection"]["roots"] == ["pkg/demo.py::target"]
 
 
 def test_format_report_contains_aggregate_and_instance_rows():

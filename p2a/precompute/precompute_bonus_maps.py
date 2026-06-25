@@ -20,6 +20,7 @@ Classification decision tree (evaluated top-to-bottom, first match wins):
       no_trace       – 0 traces captured after instrumentation (error=True)
       no_gt          – traces exist but none contain a GT callable (error=True)
       no_f2p         – GT traces exist, tests fail, but F2P filter removed all (error=True)
+      trace_cap_inconclusive – a trace cap was reached before no_f2p could be proven (error=True)
       standard       – F2P→GT call chain with intermediate nodes (traceable=True)
       direct         – F2P→GT call chain, test calls GT directly (traceable=True)
 
@@ -32,6 +33,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from datetime import UTC, datetime
 import gzip
 import json
 import os
@@ -69,8 +71,12 @@ _FIXTURE_NAMES = frozenset(
     }
 )
 
-BONUS_MAP_SCHEMA_VERSION = 3
+BONUS_MAP_SCHEMA_VERSION = 5
 TRACE_SIDECAR_FORMAT = "p2a_trace_sidecar_v1"
+FAILURE_MANIFEST_NAME = "precompute_failures.jsonl"
+DEFAULT_TRACE_MAX_EVENTS = 10_000
+DEFAULT_TRACE_MAX_FRAMES = 80
+DEFAULT_TRACE_PARSE_CHUNK_LINES = 1_000
 TEST_STDOUT_PATH = "/root/_p2a_swe_test_stdout.txt"
 TEST_STDERR_PATH = "/root/_p2a_swe_test_stderr.txt"
 TEST_EXIT_PATH = "/root/_p2a_swe_test_exit.txt"
@@ -78,6 +84,52 @@ TRACE_PARSE_PATH = "/root/_p2a_swe_fault_traces.parse.jsonl"
 
 
 _PRODUCER_METADATA: dict | None = None
+
+
+def _empty_graph_metadata() -> dict:
+    return {
+        "raw_hop_max": 0,
+        "rewardable_node_count": 0,
+        "excluded_non_rewardable_node_count": 0,
+        "excluded_test_harness_node_count": 0,
+        "excluded_test_harness_nodes": [],
+        "excluded_pre_symptom_node_count": 0,
+        "excluded_pre_symptom_nodes": [],
+        "test_harness_file_patterns": [],
+        "reward_start_source": "test_filtered_fallback",
+        "reward_start_by_trace": [],
+        "selected_issue_anchor_nodes": [],
+        "symptom_nodes": [],
+        "root_cause_nodes": [],
+        "reward_path_edges": [],
+        "direct_symptom_to_root_cause_edges": [],
+        "call_graph_edge_metadata": [],
+        "issue_anchor_candidates": [],
+    }
+
+
+def _task_issue_text(task: dict) -> str | None:
+    fields = (
+        "problem_statement",
+        "issue",
+        "issue_text",
+        "description",
+        "problem",
+        "title",
+    )
+    for field in fields:
+        value = task.get(field)
+        if isinstance(value, str) and value.strip():
+            return value
+
+    extra = task.get("extra_info")
+    if isinstance(extra, dict):
+        for field in fields:
+            value = extra.get(field)
+            if isinstance(value, str) and value.strip():
+                return value
+
+    return None
 
 
 def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
@@ -92,6 +144,20 @@ def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
     if minimum is not None and value < minimum:
         print(f"[WARN] ignoring {name}={value}; expected >= {minimum}, using {default}", file=sys.stderr)
         return default
+    return value
+
+
+def _env_positive_int_or_none(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"[WARN] ignoring invalid {name}={raw!r}; parsing all captured trace lines", file=sys.stderr)
+        return None
+    if value <= 0:
+        return None
     return value
 
 
@@ -244,6 +310,99 @@ def _tail_text(value: str | None, max_chars: int) -> str | None:
     if max_chars <= 0 or len(value) <= max_chars:
         return value
     return value[-max_chars:]
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _classify_precompute_exception(exc: BaseException) -> str:
+    text = str(exc)
+    if (
+        "gRPC Execute failed" in text
+        or "code = Unavailable" in text
+        or "transport: Error while dialing" in text
+        or "connection refused" in text.lower()
+    ):
+        return "arl_grpc_unavailable"
+    if "sandbox post-setup failed" in text:
+        return "sandbox_post_setup_failed"
+    return "exception"
+
+
+def _is_retryable_precompute_failure(data: dict | None) -> bool:
+    if not isinstance(data, dict):
+        return False
+    return bool(
+        data.get("precompute_failure")
+        or data.get("case_type") == "precompute_failed"
+        or data.get("reason_code") in {"exception", "precompute_exception"}
+    )
+
+
+def _existing_bonus_map_is_complete(path: str | os.PathLike[str]) -> bool:
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return not _is_retryable_precompute_failure(data)
+
+
+def _remove_retryable_bonus_map(path: str | os.PathLike[str]) -> None:
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return
+    if _is_retryable_precompute_failure(data):
+        os.remove(path)
+
+
+def _failure_record(
+    *,
+    idx,
+    instance_id: str,
+    output_path: str | None = None,
+    result: dict | None = None,
+    error: BaseException | str | None = None,
+) -> dict:
+    result = result or {}
+    message = result.get("exception_message")
+    error_type = result.get("exception_type")
+    traceback_tail = result.get("exception_traceback_tail")
+    failure_kind = result.get("failure_kind")
+    if error is not None:
+        message = str(error)
+        error_type = type(error).__name__ if isinstance(error, BaseException) else "Error"
+        if isinstance(error, BaseException):
+            failure_kind = _classify_precompute_exception(error)
+    return {
+        "timestamp": _utc_now_iso(),
+        "idx": str(idx),
+        "instance_id": instance_id,
+        "case_type": result.get("case_type") or "precompute_failed",
+        "reason_code": result.get("reason_code") or "precompute_exception",
+        "failure_kind": failure_kind or "exception",
+        "error_type": error_type,
+        "message": _tail_text(message, 2000),
+        "traceback_tail": _tail_text(traceback_tail, 8000),
+        "output_path": output_path,
+    }
+
+
+def _append_failure_manifest(path: str | os.PathLike[str], records: list[dict]) -> None:
+    if not records:
+        return
+    os.makedirs(os.path.dirname(os.fspath(path)), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, sort_keys=True))
+            f.write("\n")
 
 
 def _slice_traces(traces: list[list[dict]] | None, max_traces: int | None) -> tuple[list[list[dict]], bool]:
@@ -409,6 +568,35 @@ def _parse_pytest_status_lines(raw_output: str) -> dict[str, str]:
     return statuses
 
 
+def _r2e_fixed_passed_test_funcs(task: dict) -> set[str] | None:
+    """Return fixed-run passing R2E tests from ``expected_output_json``."""
+    expected_raw = task.get("expected_output_json")
+    if expected_raw is None:
+        return None
+
+    if isinstance(expected_raw, str):
+        try:
+            expected_status = json.loads(expected_raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    elif isinstance(expected_raw, dict):
+        expected_status = expected_raw
+    else:
+        return None
+
+    if not isinstance(expected_status, dict):
+        return None
+
+    passed_funcs: set[str] = set()
+    for name, status in expected_status.items():
+        if str(status or "").strip().upper() != "PASSED":
+            continue
+        bare = _normalize_test_func_name(str(name).split(" - ", 1)[0])
+        if bare:
+            passed_funcs.add(bare)
+    return passed_funcs
+
+
 def _looks_like_test_func(name: str) -> bool:
     return bool(name and (name.startswith("test") or name in _FIXTURE_NAMES))
 
@@ -442,7 +630,8 @@ def _get_f2p_test_funcs(task: dict, raw_output: str, swebench_verified: bool) ->
     F2P = tests that FAIL on buggy code and PASS after the developer's fix.
 
     For SWE-Bench Verified: uses the ``FAIL_TO_PASS`` field from the task.
-    For R2E-Gym: parses pytest output for FAILED tests on buggy code.
+    For R2E-Gym: intersects buggy pytest failures with fixed-run passes from
+    ``expected_output_json``.
 
     Returns:
         set[str]: bare test function names (may be empty if no tests failed).
@@ -451,6 +640,7 @@ def _get_f2p_test_funcs(task: dict, raw_output: str, swebench_verified: bool) ->
     Note: parametrize suffixes (``[param1-param2]``) are stripped so that
     ``test_foo[True]`` matches trace frames that only contain ``test_foo``.
     """
+    task = normalize_task(task)
     if swebench_verified:
         f2p_raw = task.get("FAIL_TO_PASS")
         if f2p_raw:
@@ -479,13 +669,16 @@ def _get_f2p_test_funcs(task: dict, raw_output: str, swebench_verified: bool) ->
             test_status = _parse_pytest_status_lines(raw_output)
         if not test_status:
             return None  # genuinely can't parse
+        fixed_passed_funcs = _r2e_fixed_passed_test_funcs(task)
+        if fixed_passed_funcs is None:
+            return None
         failed_funcs = set()
         for name, status in test_status.items():
-            if status in ("FAILED", "ERROR"):
-                bare = _normalize_test_func_name(name)
+            if str(status or "").strip().upper() in ("FAILED", "ERROR"):
+                bare = _normalize_test_func_name(str(name).split(" - ", 1)[0])
                 if bare:
                     failed_funcs.add(bare)
-        return failed_funcs  # empty set = parsed OK but no failures
+        return failed_funcs & fixed_passed_funcs  # empty set = parsed OK but no true F2P
 
 
 def _filter_traces_to_f2p(traces: list[list[dict]], f2p_test_funcs: set[str]) -> list[list[dict]]:
@@ -561,8 +754,8 @@ def _run_tests_with_file_capture(env, test_script: str, timeout: int = 300) -> t
     cmd = (
         "set +e; "
         "export PY_COLORS=0 NO_COLOR=1 TERM=dumb; "
-        'export P2A_TRACE_MAX_EVENTS="${P2A_TRACE_MAX_EVENTS:-2000}"; '
-        'export P2A_TRACE_MAX_FRAMES="${P2A_TRACE_MAX_FRAMES:-80}"; '
+        f'export P2A_TRACE_MAX_EVENTS="${{P2A_TRACE_MAX_EVENTS:-{DEFAULT_TRACE_MAX_EVENTS}}}"; '
+        f'export P2A_TRACE_MAX_FRAMES="${{P2A_TRACE_MAX_FRAMES:-{DEFAULT_TRACE_MAX_FRAMES}}}"; '
         'export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -rA --color=no -vv -W ignore::pytest.PytestWarning"; '
         f"bash {quoted_script} > {TEST_STDOUT_PATH} 2> {TEST_STDERR_PATH}; "
         f"code=$?; printf '%s\\n' \"$code\" > {TEST_EXIT_PATH}; true"
@@ -601,6 +794,55 @@ def _run_tests_with_file_capture(env, test_script: str, timeout: int = 300) -> t
         "trusted_test_exit": test_exit is not None and not all_three_read_failed,
     }
     return stdout, stderr, test_exit, capture
+
+
+def _parse_fault_traces_in_chunks(
+    env,
+    parse_fault_traces_from_file,
+    instrumented_callables: list[dict],
+    repo_path: str,
+    alt_path: str,
+    *,
+    trace_file_line_count: int,
+    line_cap: int | None,
+    chunk_lines: int,
+) -> list[list[dict]]:
+    """Parse captured trace JSONL without pre-dropping valid evidence.
+
+    The sandbox file reader returns a complete file as one string.  Keep each
+    host read bounded by slicing the sandbox JSONL file into deterministic
+    chunks first.  When ``P2A_TRACE_PARSE_MAX_LINES`` is unset, every captured
+    line is parsed.
+    """
+    if trace_file_line_count <= 0:
+        return []
+
+    parse_line_count = trace_file_line_count
+    if line_cap is not None:
+        parse_line_count = min(trace_file_line_count, line_cap)
+    if parse_line_count <= 0:
+        return []
+
+    traces: list[list[dict]] = []
+    for start in range(1, parse_line_count + 1, chunk_lines):
+        end = min(start + chunk_lines - 1, parse_line_count)
+        env._execute_raw(
+            f"sed -n '{start},{end}p' {TRACE_FILE_PATH} > {TRACE_PARSE_PATH}",
+            timeout=60,
+        )
+        traces.extend(
+            parse_fault_traces_from_file(
+                env,
+                instrumented_callables,
+                repo_path,
+                alt_path,
+                require_patched=False,
+                trace_file_path=TRACE_PARSE_PATH,
+            )
+        )
+
+    env._execute_raw(f"rm -f {TRACE_PARSE_PATH}", timeout=60)
+    return traces
 
 
 def _swebench_f2p_nodeids(task: dict) -> list[str]:
@@ -945,6 +1187,27 @@ def _all_pass_reason_code(
     return "buggy_version_passes"
 
 
+def _trace_cap_inconclusive_reason(diagnostics: dict, suffix: str) -> str | None:
+    if diagnostics.get("trace_event_cap_reached"):
+        return f"trace_event_cap_{suffix}_inconclusive"
+    if diagnostics.get("trace_parse_line_cap_reached"):
+        return f"trace_parse_line_cap_{suffix}_inconclusive"
+    return None
+
+
+def _mark_trace_cap_inconclusive(
+    diagnostics: dict,
+    *,
+    would_be_case_type: str,
+    would_be_reason_code: str,
+) -> dict:
+    updated = dict(diagnostics)
+    updated["trace_cap_inconclusive"] = True
+    updated["would_be_case_type"] = would_be_case_type
+    updated["would_be_reason_code"] = would_be_reason_code
+    return updated
+
+
 # ---------------------------------------------------------------------------
 # Static bonus map
 # ---------------------------------------------------------------------------
@@ -955,7 +1218,11 @@ def _clean_callables(callables: list[dict]) -> list[dict]:
 
 
 def compute_static_bonus_map(task: dict) -> dict:
-    """Compute a static bonus map (patched callables only, all d=0)."""
+    """Compute a static bonus map.
+
+    Without runtime traces there is no patched-to-patched reachability signal,
+    so static mode keeps every patched callable as a root.
+    """
     task = normalize_task(task)
     instance_id = make_instance_id(task)
     all_modified = find_modified_callables_from_task(task)
@@ -978,11 +1245,12 @@ def compute_static_bonus_map(task: dict) -> dict:
                 "call_graph_nodes": {},
                 "call_graph_edges": [],
                 "hop_max": 0,
+                **_empty_graph_metadata(),
             },
             reason_code=case_type,
         )
 
-    # Static mode: every patched callable is at d=0, no test info
+    # Static mode has no trace signal for terminal-root inference.
     call_graph_nodes = {}
     for mc in all_modified:
         node_key = f"{mc['file_path']}::{mc['qualified_name']}"
@@ -991,8 +1259,12 @@ def compute_static_bonus_map(task: dict) -> dict:
             "start_line": mc["start_line"],
             "end_line": mc["end_line"],
             "hop_distance": 0,
+            "raw_hop_distance": 0,
             "normalized_distance": 0.0,
             "observed_in_trace": False,
+            "rewardable": True,
+            "node_role": "root_cause",
+            "excluded_from_hop_max": False,
         }
         if isinstance(mc.get("source"), str) and mc["source"]:
             call_graph_nodes[node_key]["source"] = mc["source"]
@@ -1008,6 +1280,23 @@ def compute_static_bonus_map(task: dict) -> dict:
             "call_graph_nodes": call_graph_nodes,
             "call_graph_edges": [],
             "hop_max": 0,
+            "raw_hop_max": 0,
+            "rewardable_node_count": len(call_graph_nodes),
+            "excluded_non_rewardable_node_count": 0,
+            "excluded_test_harness_node_count": 0,
+            "excluded_test_harness_nodes": [],
+            "excluded_pre_symptom_node_count": 0,
+            "excluded_pre_symptom_nodes": [],
+            "test_harness_file_patterns": [],
+            "reward_start_source": "test_filtered_fallback",
+            "reward_start_by_trace": [],
+            "selected_issue_anchor_nodes": [],
+            "symptom_nodes": [],
+            "root_cause_nodes": sorted(call_graph_nodes),
+            "reward_path_edges": [],
+            "direct_symptom_to_root_cause_edges": [],
+            "call_graph_edge_metadata": [],
+            "issue_anchor_candidates": [],
         },
         reason_code="static_mode",
     )
@@ -1030,7 +1319,7 @@ def compute_dynamic_bonus_map(
 
     Implements the decision tree:
       1. newly_created / no_callable  (static layer)
-      2. instrumentation_failed → all_pass → no_trace → no_gt → no_f2p → standard / direct
+      2. instrumentation_failed → all_pass → no_trace → no_gt → no_f2p/trace_cap_inconclusive → standard / direct
     """
     from p2a.test_setup import parse_fixups, startup_fixup_command
     from p2a.trace import (
@@ -1186,26 +1475,6 @@ def compute_dynamic_bonus_map(
             test_exit = 1
 
         # ── Decision node: NO_TRACE ──────────────────────────────────
-        # Parse the raw tracer output once.  raw_traces_all is for diagnostics;
-        # raw_traces keeps the historical meaning: traces that entered GT.
-        trace_parse_line_cap = _env_int("P2A_TRACE_PARSE_MAX_LINES", 500, minimum=1)
-        env._execute_raw(
-            f"rm -f {TRACE_PARSE_PATH}; "
-            f"if [ -s {TRACE_FILE_PATH} ]; then head -n {trace_parse_line_cap} {TRACE_FILE_PATH} > {TRACE_PARSE_PATH}; fi",
-            timeout=60,
-        )
-        _debug_progress(instance_id, f"parse_traces cap={trace_parse_line_cap}")
-        raw_traces_all = parse_fault_traces_from_file(
-            env,
-            instrumented_callables,
-            env.repo_path,
-            env.alt_path,
-            require_patched=False,
-            trace_file_path=TRACE_PARSE_PATH,
-        )
-        _debug_progress(instance_id, f"parse_traces_done parsed={len(raw_traces_all)}")
-        raw_traces = [trace for trace in raw_traces_all if any(frame.get("is_patched") for frame in trace)]
-
         # Also check the raw trace file for total entry count (including
         # traces without GT) to distinguish no_trace from no_gt.
         trace_file_out, _, tf_exit = env._execute_raw(f"wc -l < {TRACE_FILE_PATH} 2>/dev/null || echo 0")
@@ -1213,6 +1482,35 @@ def compute_dynamic_bonus_map(
             trace_file_line_count = int(trace_file_out.strip())
         except (ValueError, AttributeError):
             trace_file_line_count = 0
+
+        # Parse captured trace lines in bounded chunks.  By default there is no
+        # parser cap; P2A_TRACE_PARSE_MAX_LINES is an explicit debugging knob.
+        trace_parse_line_cap = _env_positive_int_or_none("P2A_TRACE_PARSE_MAX_LINES")
+        trace_parse_chunk_lines = _env_int(
+            "P2A_TRACE_PARSE_CHUNK_LINES",
+            DEFAULT_TRACE_PARSE_CHUNK_LINES,
+            minimum=1,
+        )
+        parse_line_count = trace_file_line_count
+        if trace_parse_line_cap is not None:
+            parse_line_count = min(trace_file_line_count, trace_parse_line_cap)
+        _debug_progress(
+            instance_id,
+            f"parse_traces lines={parse_line_count}/{trace_file_line_count} "
+            f"cap={trace_parse_line_cap} chunk={trace_parse_chunk_lines}",
+        )
+        raw_traces_all = _parse_fault_traces_in_chunks(
+            env,
+            parse_fault_traces_from_file,
+            instrumented_callables,
+            env.repo_path,
+            env.alt_path,
+            trace_file_line_count=trace_file_line_count,
+            line_cap=trace_parse_line_cap,
+            chunk_lines=trace_parse_chunk_lines,
+        )
+        _debug_progress(instance_id, f"parse_traces_done parsed={len(raw_traces_all)}")
+        raw_traces = [trace for trace in raw_traces_all if any(frame.get("is_patched") for frame in trace)]
         parsed_trace_count = len(raw_traces_all)
         total_trace_entries = max(trace_file_line_count, parsed_trace_count)
         common_diag = _base_diagnostics(
@@ -1230,14 +1528,17 @@ def compute_dynamic_bonus_map(
         common_diag["swebench_targeted_f2p"] = bool(re.search(r"targeted_(pytest|django|sympy)=[1-9]", patch_stdout))
         common_diag["swebench_verified"] = env.swebench_verified
         common_diag["test_timeout"] = test_timeout
-        trace_event_cap = _env_int("P2A_TRACE_MAX_EVENTS", 2000, minimum=0)
-        trace_frame_cap = _env_int("P2A_TRACE_MAX_FRAMES", 80, minimum=0)
+        trace_event_cap = _env_int("P2A_TRACE_MAX_EVENTS", DEFAULT_TRACE_MAX_EVENTS, minimum=0)
+        trace_frame_cap = _env_int("P2A_TRACE_MAX_FRAMES", DEFAULT_TRACE_MAX_FRAMES, minimum=0)
         common_diag["trace_event_cap"] = trace_event_cap
         common_diag["trace_frame_cap"] = trace_frame_cap
         common_diag["trace_parse_line_cap"] = trace_parse_line_cap
+        common_diag["trace_parse_chunk_lines"] = trace_parse_chunk_lines
         common_diag["trace_file_line_count"] = trace_file_line_count
         common_diag["trace_event_cap_reached"] = trace_event_cap > 0 and trace_file_line_count >= trace_event_cap
-        common_diag["trace_parse_line_cap_reached"] = trace_file_line_count > trace_parse_line_cap
+        common_diag["trace_parse_line_cap_reached"] = (
+            trace_parse_line_cap is not None and trace_file_line_count > trace_parse_line_cap
+        )
         common_diag["test_output_capture_detail"] = capture_diag
         common_diag["parsed_trace_count"] = parsed_trace_count
         common_diag["swebench_f2p_failure_observed"] = swebench_f2p_failure_observed
@@ -1352,6 +1653,14 @@ def compute_dynamic_bonus_map(
             else:
                 case_type = "no_f2p"
                 reason_code = "f2p_parse_failed"
+            cap_reason = _trace_cap_inconclusive_reason(parse_diag, "f2p_parse")
+            if cap_reason:
+                case_type = "trace_cap_inconclusive"
+                parse_diag = _mark_trace_cap_inconclusive(
+                    parse_diag,
+                    would_be_case_type="no_f2p",
+                    would_be_reason_code=reason_code,
+                )
             print(f"  [{instance_id}] {case_type}: f2p_test_funcs=None (parse failed). Dropping all {len(raw_traces)} traces. test_exit={test_exit}")
             parse_diag.update(
                 _write_trace_sidecar(
@@ -1372,7 +1681,7 @@ def compute_dynamic_bonus_map(
                 all_modified,
                 newly_created,
                 error=True,
-                reason_code=reason_code,
+                reason_code=cap_reason or reason_code,
                 diagnostics=parse_diag,
             )
 
@@ -1385,6 +1694,14 @@ def compute_dynamic_bonus_map(
             else:
                 case_type = "no_f2p"
                 reason_code = "test_collection_error_no_failed_nodeids"
+            cap_reason = _trace_cap_inconclusive_reason(no_f2p_diag, "no_failed_nodeids")
+            if cap_reason:
+                case_type = "trace_cap_inconclusive"
+                no_f2p_diag = _mark_trace_cap_inconclusive(
+                    no_f2p_diag,
+                    would_be_case_type="no_f2p",
+                    would_be_reason_code=reason_code,
+                )
             print(f"  [{instance_id}] {case_type}: 0 parsed test failures. test_exit={test_exit}")
             no_f2p_diag.update(
                 _write_trace_sidecar(
@@ -1405,7 +1722,7 @@ def compute_dynamic_bonus_map(
                 all_modified,
                 newly_created,
                 error=True,
-                reason_code=reason_code,
+                reason_code=cap_reason or reason_code,
                 diagnostics=no_f2p_diag,
             )
 
@@ -1415,6 +1732,7 @@ def compute_dynamic_bonus_map(
         f2p_diag["f2p_trace_count"] = len(f2p_traces)
         f2p_diag["f2p_recovery_source"] = None
         f2p_diag["f2p_recovery_test_funcs"] = None
+        f2p_diag["raw_gt_test_funcs_before_f2p"] = f2p_diag.get("raw_gt_test_funcs", [])
         print(f"  [{instance_id}] F2P filter: {len(raw_traces)} → {len(f2p_traces)} (F2P funcs: {f2p_test_funcs})")
 
         if not f2p_traces and not env.swebench_verified:
@@ -1434,8 +1752,20 @@ def compute_dynamic_bonus_map(
             f2p_diag["f2p_recovery_source"] = "targeted_swebench_run"
             f2p_diag["f2p_recovery_test_funcs"] = sorted(f2p_test_funcs)
 
+        f2p_diag["raw_gt_test_funcs"] = _test_func_names_from_traces(f2p_traces)
+
         if not f2p_traces:
-            print(f"  [{instance_id}] no_f2p: F2P filter removed all traces")
+            case_type = "no_f2p"
+            reason_code = "f2p_filter_dropped"
+            cap_reason = _trace_cap_inconclusive_reason(f2p_diag, "no_f2p")
+            if cap_reason:
+                case_type = "trace_cap_inconclusive"
+                f2p_diag = _mark_trace_cap_inconclusive(
+                    f2p_diag,
+                    would_be_case_type="no_f2p",
+                    would_be_reason_code=reason_code,
+                )
+            print(f"  [{instance_id}] {case_type}: F2P filter removed all traces")
             f2p_diag.update(
                 _write_trace_sidecar(
                     instance_id=instance_id,
@@ -1452,11 +1782,11 @@ def compute_dynamic_bonus_map(
             )
             return _make_result(
                 instance_id,
-                "no_f2p",
+                case_type,
                 all_modified,
                 newly_created,
                 error=True,
-                reason_code="f2p_filter_dropped",
+                reason_code=cap_reason or reason_code,
                 diagnostics=f2p_diag,
             )
 
@@ -1469,14 +1799,22 @@ def compute_dynamic_bonus_map(
             content, exit_code = _read_sandbox_file(env, f"{env.repo_path}/{rel_path}")
             return content if exit_code == 0 else ""
 
-        result = build_call_graph_from_traces(traces, all_modified, file_reader=_read_file)
+        result = build_call_graph_from_traces(
+            traces,
+            all_modified,
+            file_reader=_read_file,
+            issue_text=_task_issue_text(task),
+        )
 
         # ── Decision node: STANDARD vs DIRECT ────────────────────────
         nodes = result.get("call_graph_nodes", {})
-        n_test_entries = sum(1 for v in nodes.values() if _is_test_file(v.get("file_path", "")))
-        n_intermediate = sum(1 for v in nodes.values() if not _is_test_file(v.get("file_path", "")) and v.get("normalized_distance", 0) > 0)
+        n_intermediate = sum(
+            1
+            for v in nodes.values()
+            if v.get("rewardable", True) and v.get("normalized_distance", 0) > 0
+        )
 
-        if n_test_entries > 0 and n_intermediate > 0:
+        if n_intermediate > 0:
             case_type = "standard"
         else:
             case_type = "direct"
@@ -1504,17 +1842,27 @@ def compute_dynamic_bonus_map(
         return _with_metadata(result, reason_code=case_type, diagnostics=f2p_diag)
 
     except Exception as e:
+        exception_traceback = traceback.format_exc()
         print(f"  [WARN] Dynamic tracing failed for {instance_id}: {e}")
-        traceback.print_exc()
+        print(exception_traceback, end="")
         exception_diag = _base_diagnostics()
         exception_diag.update(env_diag)
+        exception_diag.update(
+            {
+                "precompute_failure": True,
+                "failure_kind": _classify_precompute_exception(e),
+                "exception_type": type(e).__name__,
+                "exception_message": str(e),
+                "exception_traceback_tail": _tail_text(exception_traceback, 8000),
+            }
+        )
         return _make_result(
             instance_id,
-            "no_trace",
+            "precompute_failed",
             all_modified,
             newly_created,
             error=True,
-            reason_code="exception",
+            reason_code="precompute_exception",
             diagnostics=exception_diag,
         )
     finally:
@@ -1547,6 +1895,7 @@ def _make_result(
             "call_graph_nodes": {},
             "call_graph_edges": [],
             "hop_max": 0,
+            **_empty_graph_metadata(),
         },
         reason_code=reason_code or case_type,
         diagnostics=diagnostics,
@@ -1570,8 +1919,14 @@ def _process_one(args):
         max_sidecar_output_chars,
         sandbox_backend,
     ) = args
+    instance_id = "unknown"
+    output_path = None
     try:
         task = json.loads(task_json) if isinstance(task_json, str) else dict(task_json)
+        try:
+            instance_id = make_instance_id(normalize_task(task))
+        except Exception:
+            instance_id = "unknown"
 
         if mode == "static":
             result = compute_static_bonus_map(task)
@@ -1586,16 +1941,49 @@ def _process_one(args):
 
         instance_id = result["instance_id"]
         output_path = os.path.join(output_dir, f"{instance_id}.json")
+        case_type = result.get("case_type", "unknown")
+
+        if _is_retryable_precompute_failure(result):
+            _remove_retryable_bonus_map(output_path)
+            return {
+                "idx": idx,
+                "instance_id": instance_id,
+                "case_type": case_type,
+                "error": None,
+                "failure": _failure_record(
+                    idx=idx,
+                    instance_id=instance_id,
+                    output_path=output_path,
+                    result=result,
+                ),
+            }
+
         with open(output_path, "w") as f:
             json.dump(result, f, indent=2)
 
-        case_type = result.get("case_type", "unknown")
-        return idx, instance_id, case_type, None
+        return {
+            "idx": idx,
+            "instance_id": instance_id,
+            "case_type": case_type,
+            "error": None,
+            "failure": None,
+        }
     except Exception as e:
-        return idx, "unknown", "error", str(e)
+        return {
+            "idx": idx,
+            "instance_id": instance_id,
+            "case_type": "error",
+            "error": str(e),
+            "failure": _failure_record(
+                idx=idx,
+                instance_id=instance_id,
+                output_path=output_path,
+                error=e,
+            ),
+        }
 
 
-def main():
+def main() -> int:
     from p2a.hf_assets import shared_bonus_maps_dir
 
     parser = argparse.ArgumentParser(description="Precompute P2A bonus maps")
@@ -1690,6 +2078,8 @@ def main():
     n_skipped_bad = 0
 
     work_items = []
+    n_skipped_existing = 0
+    n_retryable_existing = 0
     for idx, row in df.iterrows():
         task_payload = row.to_dict()
         try:
@@ -1700,8 +2090,13 @@ def main():
             n_skipped_bad += 1
             continue
         if skip_existing:
-            if instance_id and os.path.exists(os.path.join(args.output_dir, f"{instance_id}.json")):
-                continue
+            if instance_id:
+                existing_path = os.path.join(args.output_dir, f"{instance_id}.json")
+                if os.path.exists(existing_path):
+                    if _existing_bonus_map_is_complete(existing_path):
+                        n_skipped_existing += 1
+                        continue
+                    n_retryable_existing += 1
         work_items.append(
             (
                 idx,
@@ -1716,24 +2111,35 @@ def main():
         )
 
     print(f"Excluded {n_skipped_bad} bad instances (skip registry); processing {len(work_items)} work items")
+    if skip_existing:
+        print(f"Skipped {n_skipped_existing} complete existing maps; retrying {n_retryable_existing} retryable/incomplete maps")
 
     if not work_items:
         print("No work items to process after applying offset/limit/skip_existing.")
         print(f"Bonus maps saved to: {args.output_dir}")
-        return
+        return 0
 
     from collections import Counter
 
     case_counts = Counter()
     error_count = 0
+    failure_records = []
+    failure_manifest_path = os.path.join(args.output_dir, FAILURE_MANIFEST_NAME)
     total = len(work_items)
 
     if args.n_parallel <= 1:
         for item in work_items:
-            idx, instance_id, case_type, error = _process_one(item)
+            outcome = _process_one(item)
+            idx = outcome["idx"]
+            case_type = outcome["case_type"]
+            error = outcome["error"]
+            failure = outcome["failure"]
             if error:
                 error_count += 1
                 print(f"  [{idx}] ERROR: {error}")
+            if failure:
+                failure_records.append(failure)
+                _append_failure_manifest(failure_manifest_path, [failure])
             case_counts[case_type] += 1
             done = sum(case_counts.values())
             if done % 100 == 0:
@@ -1744,10 +2150,16 @@ def main():
             futures = {executor.submit(_process_one, item): item for item in work_items}
             done_count = 0
             for future in as_completed(futures):
-                idx, instance_id, case_type, error = future.result()
+                outcome = future.result()
+                case_type = outcome["case_type"]
+                error = outcome["error"]
+                failure = outcome["failure"]
                 done_count += 1
                 if error:
                     error_count += 1
+                if failure:
+                    failure_records.append(failure)
+                    _append_failure_manifest(failure_manifest_path, [failure])
                 case_counts[case_type] += 1
                 if done_count % 100 == 0:
                     traceable = case_counts["direct"] + case_counts["standard"]
@@ -1777,12 +2189,30 @@ def main():
     print(f"  no_trace  (error)  {case_counts['no_trace']:5d}")
     print(f"  no_gt     (error)  {case_counts['no_gt']:5d}")
     print(f"  no_f2p    (error)  {case_counts['no_f2p']:5d}")
+    if case_counts["trace_cap_inconclusive"]:
+        print(f"  trace_cap_inconclusive (error) {case_counts['trace_cap_inconclusive']:5d}")
+    if case_counts["precompute_failed"]:
+        print(f"  precompute_failed (retryable) {case_counts['precompute_failed']:5d}")
 
     if error_count:
         print(f"\nprocess errors       {error_count:5d}")
+    if failure_records:
+        print(f"\nretryable precompute failures {len(failure_records):5d}")
+        print(f"  failure manifest: {failure_manifest_path}")
+        for record in failure_records[:20]:
+            message = record.get("message") or ""
+            if len(message) > 160:
+                message = message[-160:]
+            print(f"  - {record['instance_id']}: {record.get('failure_kind')} {message}")
+        if len(failure_records) > 20:
+            print(f"  ... {len(failure_records) - 20} more in manifest")
 
     print(f"\nBonus maps saved to: {args.output_dir}")
+    if failure_records or error_count:
+        print("Bonus map precompute incomplete; rerun after resolving retryable failures.", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

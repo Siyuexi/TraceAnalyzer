@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shlex
 import sys
 from pathlib import Path
 
@@ -76,7 +75,7 @@ def cmd_r2e(args) -> int:
         tools_kwargs = {
             "env": {
                 "deployment": {"image": f"{MIRROR}/{repo}_final:{fixed}"},
-                "post_setup_cmd": POST_SETUP_CMD.format(base_commit=shlex.quote(buggy)),
+                "post_setup_cmd": POST_SETUP_CMD,
             },
             "reward": {"name": "r2e_gym", "metadata": md},
         }

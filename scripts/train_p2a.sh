@@ -15,6 +15,8 @@ export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
 
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
+source "${SCRIPT_SRC_ROOT}/scripts/load_local_env.sh"
+p2a_source_local_env "${SCRIPT_SRC_ROOT}"
 source "${SCRIPT_SRC_ROOT}/scripts/stage_local_runtime.sh"
 P2A_VENV_DIR="$(p2a_runtime_venv_rel "${SCRIPT_SRC_ROOT}")"
 export P2A_VENV_DIR
@@ -74,12 +76,12 @@ if [[ ! -x "${PYTHON_BIN}" || ! -x "${RAY_BIN}" ]]; then
     echo "[P2A] Build the shared src/.venv first, then rerun this script." >&2
     exit 2
 fi
-RAY_API_URL="${RAY_API_SERVER_ADDRESS:-http://127.0.0.1:8265}"
+RAY_API_URL="${RAY_API_SERVER_ADDRESS:-http://localhost:8265}"
 export RAY_API_SERVER_ADDRESS="${RAY_API_URL}"
 RAY_API_HOST="${RAY_API_URL#*://}"
 RAY_API_HOST="${RAY_API_HOST%%/*}"
 RAY_API_HOST="${RAY_API_HOST%%:*}"
-RAY_NO_PROXY="localhost,127.0.0.1,::1"
+RAY_NO_PROXY="localhost,::1"
 if [[ -n "${RAY_API_HOST}" && "${RAY_API_HOST}" != "${RAY_API_URL}" ]]; then
     RAY_NO_PROXY="${RAY_NO_PROXY},${RAY_API_HOST}"
 fi
