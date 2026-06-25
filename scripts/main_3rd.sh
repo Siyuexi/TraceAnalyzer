@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_ROOT="${SCRIPT_SRC_ROOT}"
-source "${SRC_ROOT}/scripts/load_local_env.sh"
+source "${SRC_ROOT}/scripts/lib.sh"
 p2a_source_local_env "${SRC_ROOT}"
 source "${SRC_ROOT}/scripts/setup.sh"
 cd "${SRC_ROOT}"

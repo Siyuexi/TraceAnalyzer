@@ -31,7 +31,7 @@ if [[ $# -lt 1 ]]; then
 fi
 
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "${SCRIPT_SRC_ROOT}/scripts/load_local_env.sh"
+source "${SCRIPT_SRC_ROOT}/scripts/lib.sh"
 p2a_source_local_env "${SCRIPT_SRC_ROOT}"
 SHARED_SRC_ROOT="$(cd "${P2A_SHARED_SRC_ROOT:-${SCRIPT_SRC_ROOT}}" && pwd)"
 SRC_ROOT="${SHARED_SRC_ROOT}"
@@ -60,7 +60,6 @@ if [[ -n "${PORT:-}" && -z "${RAY_GCS_PORT:-}" && -z "${RAY_PORT:-}" ]]; then
 fi
 RAY_GCS_PORT="${RAY_GCS_PORT:-${RAY_PORT:-6379}}"
 P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
-source "${SHARED_SRC_ROOT}/scripts/stage_local_runtime.sh"
 NUM_GPUS="${NUM_GPUS:-8}"
 if [[ -z "${NUM_CPUS:-}" ]]; then
   if p2a_stage_enabled; then
