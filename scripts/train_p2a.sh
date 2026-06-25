@@ -15,9 +15,8 @@ export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
 
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
-source "${SCRIPT_SRC_ROOT}/scripts/load_local_env.sh"
+source "${SCRIPT_SRC_ROOT}/scripts/lib.sh"
 p2a_source_local_env "${SCRIPT_SRC_ROOT}"
-source "${SCRIPT_SRC_ROOT}/scripts/stage_local_runtime.sh"
 P2A_VENV_DIR="$(p2a_runtime_venv_rel "${SCRIPT_SRC_ROOT}")"
 export P2A_VENV_DIR
 export UV_PROJECT_ENVIRONMENT="${SCRIPT_SRC_ROOT}/${P2A_VENV_DIR}"
@@ -31,8 +30,6 @@ export UV_PROJECT_ENVIRONMENT
 export VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
 export PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
 p2a_source_runtime_profile "${UV_PROJECT_ENVIRONMENT}"
-source "${SRC_ROOT}/scripts/shared_hf.sh"
-
 UNI_AGENT_DIR="${SRC_ROOT}/uni-agent"
 cd "${SRC_ROOT}"
 

@@ -15,7 +15,7 @@ EOF
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_ROOT="${SRC_DIR}"
-source "${SRC_DIR}/scripts/shared_hf.sh"
+source "${SRC_DIR}/scripts/lib.sh"
 UNI_AGENT_DIR="${SRC_DIR}/uni-agent"
 RAY_DATA_HOME="${RAY_DATA_HOME:-${HOME}/verl}"
 DATA_DIR="${RAY_DATA_HOME}/data/swe_agent"

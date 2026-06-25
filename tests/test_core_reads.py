@@ -12,7 +12,10 @@ from p2a.core import (
     match_reads_to_callgraph,
     normalize_action,
     parse_read_actions_from_tool_calls,
+    parse_write_actions,
+    parse_write_actions_from_tool_calls,
     segment_purpose_blocks,
+    writes_from_step_trace,
 )
 
 
@@ -65,6 +68,52 @@ def test_segments_purpose_blocks_by_family_and_target():
         {"family": "read", "target_path": "b.py", "step_indices": [3], "trace_indices": [2]},
         {"family": "edit", "target_path": "b.py", "step_indices": [4], "trace_indices": [3]},
     ]
+
+
+def test_extracts_file_editor_and_bash_writes():
+    tool_calls = [
+        {"function": {"name": "str_replace_editor", "arguments": {"command": "str_replace", "path": "/testbed/pkg/root.py"}}},
+        {"function": {"name": "execute_bash", "arguments": {"command": "echo x > /testbed/pkg/a.py && sed -i '3,7s/x/y/' /testbed/pkg/b.py && cat patch | tee /testbed/pkg/c.py"}}},
+    ]
+
+    writes = parse_write_actions_from_tool_calls(tool_calls)
+    assert {"file_path": "pkg/root.py", "start_line": 1, "end_line": 999999, "command": "str_replace"} in writes
+    assert {"file_path": "pkg/a.py", "start_line": 1, "end_line": 999999, "command": "redirect"} in writes
+    assert {"file_path": "pkg/b.py", "start_line": 3, "end_line": 7, "command": "sed -i"} in writes
+    assert {"file_path": "pkg/c.py", "start_line": 1, "end_line": 999999, "command": "tee"} in writes
+
+
+def test_execute_bash_write_normalizes_as_edit():
+    trace = {"tool_calls": [{"function": {"name": "execute_bash", "arguments": {"command": "python -c \"open('/testbed/pkg/root.py', 'w').write('x')\""}}}]}
+
+    assert writes_from_step_trace(trace) == [
+        {"file_path": "pkg/root.py", "start_line": 1, "end_line": 999999, "command": "python open"}
+    ]
+    assert normalize_action(trace) == {"family": "edit", "target_path": "pkg/root.py"}
+
+
+def test_execute_bash_common_sed_i_write_normalizes_as_edit():
+    trace = {"tool_calls": [{"function": {"name": "execute_bash", "arguments": {"command": "sed -i 's/foo/bar/' /testbed/pkg/root.py"}}}]}
+
+    assert writes_from_step_trace(trace) == [
+        {"file_path": "pkg/root.py", "start_line": 1, "end_line": 999999, "command": "sed -i"}
+    ]
+    assert normalize_action(trace) == {"family": "edit", "target_path": "pkg/root.py"}
+
+
+def test_raw_xml_and_text_write_actions_are_recovered():
+    text = """
+    <function=file_editor>
+    <parameter=command>str_replace</parameter>
+    <parameter=path>/testbed/pkg/root.py</parameter>
+    </function>
+    str_replace_editor(command="create", path="/testbed/pkg/new.py")
+    """
+
+    writes = parse_write_actions(text)
+    assert {"file_path": "pkg/root.py", "start_line": 1, "end_line": 999999, "command": "str_replace"} in writes
+    assert {"file_path": "pkg/new.py", "start_line": 1, "end_line": 999999, "command": "create"} in writes
+    assert writes_from_step_trace({"response_text": text}) == writes
 
 
 def test_match_reads_ignores_non_rewardable_call_graph_nodes():

@@ -1,0 +1,784 @@
+import json
+import subprocess
+import textwrap
+from pathlib import Path
+
+
+def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
+    app_path = Path(__file__).resolve().parents[1] / "p2a" / "dashboard_static" / "app.js"
+    css_path = app_path.with_name("styles.css")
+    css = css_path.read_text(encoding="utf-8")
+    assert ".node-source-code" in css
+    assert ".node-source-code {\n  flex: 1 1 auto;" in css
+    assert "background: #101827;" in css[css.index(".node-source-code") : css.index(".node-source-code .code-view")]
+    assert ".node-source-code .code-view" in css
+    assert "max-height: none;" in css[css.index(".node-source-code .code-view") :]
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr));" in css
+    assert ".graph-content.has-source" in css
+    assert ".metric-group-filter" in css
+    assert ".kpi-table th.metric-group-graph" in css
+    assert ".kpi-table th.metric-group-path" in css
+    snapshot = {
+        "schema_version": "p2a_unified_dashboard_v1",
+        "sources": [{"kind": "db", "path": "demo.sqlite"}],
+        "summary": {
+            "counts": {"n_records": 2, "n_not_chain_evaluable": 0},
+            "rates": {"anchor_hit_rate": 1.0, "root_hit_rate": 1.0, "chain_node_recall": 1.0},
+            "averages": {},
+            "distributions": {},
+            "distributions_by_dataset": {
+                "swebench-hard": {
+                    "dataset": "swebench-hard",
+                    "n_instances": 2,
+                    "distributions": {
+                        "case_types": {"direct": 2},
+                        "not_path_evaluable_reasons": {},
+                        "not_chain_evaluable_reasons": {},
+                        "availability": {"with_bonus_map": 2, "with_call_graph": 2, "path_evaluable": 2, "chain_evaluable": 2, "not_path_evaluable": 0, "not_chain_evaluable": 0},
+                    },
+                }
+            },
+            "by_case_type": {},
+            "trends": [],
+        },
+        "datasets": [
+            {
+                "dataset": "swebench-hard",
+                "n_instances": 2,
+                "n_eval_cells": 2,
+                "n_trajectories": 2,
+                "models": ["model-a", "model-b"],
+                "source_kinds": ["third_party_api"],
+            }
+        ],
+        "eval_cells": [
+            {
+                "eval_cell_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
+                "experiment_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
+                "source_kind": "third_party_api",
+                "experiment_id": "exp-a",
+                "provider_source": "internal_api",
+                "dataset": "swebench-hard",
+                "model_api_name": "model-a",
+                "model_label": "model-a",
+                "target": 1,
+                "done": 1,
+                "trajectory_count": 1,
+                "resolved_rate": 0.0,
+                "root_hit_rate": 1.0,
+                "path_node_recall": 1.0,
+                "chain_node_recall": 1.0,
+                "read_precision": 1.0,
+            },
+            {
+                "eval_cell_key": "third_party_api::exp-b::internal_api::swebench-hard::model-b::model-b",
+                "experiment_key": "third_party_api::exp-b::internal_api::swebench-hard::model-b::model-b",
+                "source_kind": "third_party_api",
+                "experiment_id": "exp-b",
+                "provider_source": "internal_api",
+                "dataset": "swebench-hard",
+                "model_api_name": "model-b",
+                "model_label": "model-b",
+                "target": 1,
+                "done": 1,
+                "trajectory_count": 1,
+            },
+        ],
+        "experiments": [],
+        "model_metrics": [
+            {
+                "eval_cell_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
+                "experiment_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
+                "source_kind": "third_party_api",
+                "experiment_id": "exp-a",
+                "provider_source": "internal_api",
+                "dataset": "swebench-hard",
+                "model_api_name": "model-a",
+                "model_label": "model-a",
+                "target": 1,
+                "done": 1,
+                "avg_path_read_precision": 1.0,
+                "avg_chain_read_precision": 1.0,
+            },
+            {
+                "eval_cell_key": "third_party_api::exp-b::internal_api::swebench-hard::model-b::model-b",
+                "experiment_key": "third_party_api::exp-b::internal_api::swebench-hard::model-b::model-b",
+                "source_kind": "third_party_api",
+                "experiment_id": "exp-b",
+                "provider_source": "internal_api",
+                "dataset": "swebench-hard",
+                "model_api_name": "model-b",
+                "model_label": "model-b",
+                "target": 1,
+                "done": 1,
+                "avg_path_read_precision": 0.0,
+                "avg_chain_read_precision": 0.0,
+            },
+        ],
+        "path_metric_model_metrics": [
+            {
+                "eval_cell_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
+                "experiment_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
+                "source_kind": "third_party_api",
+                "experiment_id": "exp-a",
+                "provider_source": "internal_api",
+                "dataset": "swebench-hard",
+                "model_api_name": "model-a",
+                "model_label": "model-a",
+                "target": 1,
+                "done": 1,
+                "avg_path_read_precision": 1.0,
+            }
+        ],
+        "dynamic_traceable_model_metrics": [
+            {
+                "eval_cell_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
+                "experiment_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
+                "source_kind": "third_party_api",
+                "experiment_id": "exp-a",
+                "provider_source": "internal_api",
+                "dataset": "swebench-hard",
+                "model_api_name": "model-a",
+                "model_label": "model-a",
+                "target": 1,
+                "done": 1,
+                "avg_path_read_precision": 1.0,
+                "avg_chain_read_precision": 1.0,
+            }
+        ],
+        "case_filter_model_metrics": {
+            "others": [
+                {
+                    "eval_cell_key": "third_party_api::exp-b::internal_api::swebench-hard::model-b::model-b",
+                    "experiment_key": "third_party_api::exp-b::internal_api::swebench-hard::model-b::model-b",
+                    "source_kind": "third_party_api",
+                    "experiment_id": "exp-b",
+                    "provider_source": "internal_api",
+                    "dataset": "swebench-hard",
+                    "model_api_name": "model-b",
+                    "model_label": "model-b",
+                    "target": 99,
+                    "done": 99,
+                }
+            ]
+        },
+        "path_metric_detail_count": 1,
+        "dynamic_traceable_detail_count": 1,
+        "runs": [],
+        "details": [
+            {
+                "experiment_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
+                "eval_cell_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
+                "experiment_id": "exp-a",
+                "source_kind": "third_party_api",
+                "provider_source": "internal_api",
+                "dataset": "swebench-hard",
+                "model_label": "model-a",
+                "instance_id": "case-a",
+                "record_index": 0,
+                "run_id": "run-a",
+                "issue_description": "## Original issue body\n\n- with **details**\n\n```python\nprint('issue')\n```",
+                "golden_patch": "diff --git a/pkg/root.py b/pkg/root.py\n--- a/pkg/root.py\n+++ b/pkg/root.py\n@@ -1 +1 @@\n-return bad\n+return good\n",
+                "bonus_case_type": "direct",
+                "resolved": True,
+                "turns": 3.5,
+                "tool_calls": 4.5,
+                "wall_time": 5.5,
+                "input_tokens": 1000,
+                "output_tokens": 200,
+                "reasoning_tokens": 50,
+                "cache_hit_tokens": 500,
+                "cost": 1.25,
+                "root_hit": True,
+                "anchor_hit": True,
+                "path_hit": True,
+                "chain_hit": True,
+                "order_score": -1.0,
+                "order_defined": True,
+                "miracle_step": True,
+                "block_order_score": -1.0,
+                "block_order_defined": True,
+                "block_miracle_step": True,
+                "path_evaluable": True,
+                "chain_evaluable": True,
+                "path_case_kind": "direct",
+                "chain_case_kind": "direct",
+                "path_node_recall": 1.0,
+                "chain_node_recall": 1.0,
+                "path_read_precision": 1.0,
+                "chain_read_precision": 1.0,
+                "edited_root_cause": True,
+                "bad_patterns": {"has_loop": False, "error_spiral": False},
+                "path_pattern_flags": {},
+                "chain_bad_patterns": {},
+                "path_projection": {
+                    "anchors": ["pkg/symptom.py::symptom"],
+                    "roots": ["pkg/root.py::root"],
+                    "graph_context_nodes": [
+                        {
+                            "key": "tests/test_demo.py::test_demo",
+                            "file_path": "tests/test_demo.py",
+                            "start_line": 1,
+                            "end_line": 10,
+                            "normalized_distance": 1.0,
+                            "node_role": "test_harness",
+                            "hit": False,
+                            "first_step": None,
+                        }
+                    ],
+                    "path_nodes": [
+                        {
+                            "key": "pkg/symptom.py::symptom",
+                            "file_path": "pkg/symptom.py",
+                            "start_line": 1,
+                            "end_line": 10,
+                            "normalized_distance": 1.0,
+                            "node_role": "symptom",
+                            "hit": True,
+                            "first_step": 0,
+                        },
+                        {
+                            "key": "pkg/root.py::root",
+                            "file_path": "pkg/root.py",
+                            "start_line": 1,
+                            "end_line": 10,
+                            "normalized_distance": 0.0,
+                            "node_role": "root_cause",
+                            "hit": True,
+                            "first_step": 1,
+                            "source_preview": "def root(self, obj):\n    self.value = obj.good\n    return self.value",
+                        },
+                    ],
+                    "path_edges": [],
+                    "graph_context_edges": [
+                        {"caller": "tests/test_demo.py::test_demo", "callee": "pkg/symptom.py::symptom"}
+                    ],
+                    "context_nodes": [
+                        {
+                            "key": "tests/test_demo.py::test_demo",
+                            "file_path": "tests/test_demo.py",
+                            "start_line": 1,
+                            "end_line": 10,
+                            "normalized_distance": 1.0,
+                            "node_role": "test_harness",
+                            "hit": False,
+                            "first_step": None,
+                        }
+                    ],
+                    "context_edges": [
+                        {"caller": "tests/test_demo.py::test_demo", "callee": "pkg/symptom.py::symptom"}
+                    ],
+                },
+                "chain_projection": {
+                    "anchors": ["pkg/symptom.py::symptom"],
+                    "roots": ["pkg/root.py::root"],
+                    "context_nodes": [
+                        {
+                            "key": "tests/test_demo.py::test_demo",
+                            "file_path": "tests/test_demo.py",
+                            "start_line": 1,
+                            "end_line": 10,
+                            "normalized_distance": 1.0,
+                            "node_role": "test_harness",
+                            "hit": False,
+                            "first_step": None,
+                        }
+                    ],
+                    "chain_nodes": [
+                        {
+                            "key": "pkg/symptom.py::symptom",
+                            "file_path": "pkg/symptom.py",
+                            "start_line": 1,
+                            "end_line": 10,
+                            "normalized_distance": 1.0,
+                            "node_role": "symptom",
+                            "hit": True,
+                            "first_step": 0,
+                        },
+                        {
+                            "key": "pkg/root.py::root",
+                            "file_path": "pkg/root.py",
+                            "start_line": 1,
+                            "end_line": 10,
+                            "normalized_distance": 0.0,
+                            "node_role": "root_cause",
+                            "hit": True,
+                            "first_step": 1,
+                            "source_preview": "def root(self, obj):\n    self.value = obj.good\n    return self.value",
+                        },
+                    ],
+                    "chain_edges": [],
+                    "context_edges": [
+                        {"caller": "tests/test_demo.py::test_demo", "callee": "pkg/symptom.py::symptom"}
+                    ],
+                },
+                "graph_topology": {
+                    "edges": [
+                        {"source": "pkg/symptom.py::symptom", "target": "pkg/root.py::root"},
+                        {"source": "tests/test_demo.py::test_demo", "target": "pkg/symptom.py::symptom"},
+                    ]
+                },
+                "purpose_blocks": [
+                    {
+                        "block_index": 0,
+                        "family": "read",
+                        "target_path": "pkg/root.py",
+                        "step_indices": [1, 2],
+                        "trace_indices": [0, 1],
+                        "achieved": True,
+                        "wasted": False,
+                        "loop": False,
+                    }
+                ],
+                "step_inspection": [
+                    {
+                        "trace_index": 0,
+                        "step_index": 0,
+                        "tool_names": ["str_replace_editor"],
+                        "tool_name": "str_replace_editor",
+                        "action_family": "read",
+                        "command": "view",
+                        "path": "/testbed/pkg/symptom.py",
+                        "view_range": [1, 10],
+                        "thought": "inspect symptom",
+                        "response_text": "view symptom",
+                        "tool_args": [{"command": "view", "path": "/testbed/pkg/symptom.py", "view_range": [1, 10]}],
+                        "tool_calls": [{"function": {"name": "str_replace_editor", "arguments": {"command": "view", "path": "/testbed/pkg/symptom.py", "view_range": [1, 10]}}}],
+                        "tool_results": [{"observation": "symptom body"}],
+                        "observation": "symptom body",
+                        "execution_error": True,
+                        "status": "error",
+                        "recovered_reads": [{"file_path": "pkg/symptom.py", "start_line": 1, "end_line": 10}],
+                        "scored": {
+                            "trace_index": 0,
+                            "step_index": 0,
+                            "target_path": "pkg/symptom.py",
+                            "n_reads": 1,
+                            "reads": [{"file_path": "pkg/symptom.py", "start_line": 1, "end_line": 10}],
+                            "hit_nodes": [{"key": "pkg/symptom.py::symptom", "node_role": "symptom"}],
+                        },
+                    },
+                    {
+                        "trace_index": 1,
+                        "step_index": 1,
+                        "tool_names": ["str_replace_editor"],
+                        "tool_name": "str_replace_editor",
+                        "action_family": "edit",
+                        "command": "str_replace",
+                        "path": "/testbed/pkg/root.py",
+                        "old_str": "return bad",
+                        "new_str": "return good",
+                        "reasoning_text": "reason about root",
+                        "chat_text": "view root",
+                        "parsed_tool_calls": [
+                            {
+                                "name": "str_replace_editor",
+                                "arguments": [
+                                    {"key": "command", "value": "str_replace"},
+                                    {"key": "path", "value": "/testbed/pkg/root.py"},
+                                ],
+                            }
+                        ],
+                        "thought": "inspect root",
+                        "response_text": "view root",
+                        "tool_args": [{"command": "str_replace", "path": "/testbed/pkg/root.py", "old_str": "return bad", "new_str": "return good"}],
+                        "tool_calls": [{"function": {"name": "str_replace_editor", "arguments": {"command": "str_replace", "path": "/testbed/pkg/root.py"}}}],
+                        "tool_results": [{"observation": "root body"}],
+                        "observation": "root body",
+                        "write_actions": [{"file_path": "pkg/root.py", "start_line": 1, "end_line": 999999, "command": "str_replace"}],
+                        "edited_root_cause": True,
+                        "recovered_reads": [{"file_path": "pkg/root.py", "start_line": 1, "end_line": 10}],
+                        "scored": {
+                            "trace_index": 1,
+                            "step_index": 1,
+                            "target_path": "pkg/root.py",
+                            "n_reads": 1,
+                            "reads": [{"file_path": "pkg/root.py", "start_line": 1, "end_line": 10}],
+                            "hit_nodes": [{"key": "pkg/root.py::root", "node_role": "root_cause", "selected_issue_anchor": True}],
+                            "write_hit_nodes": [{"key": "pkg/root.py::root", "node_role": "root_cause"}],
+                        },
+                    },
+                ],
+            },
+            {
+                "experiment_key": "third_party_api::exp-b::internal_api::swebench-hard::model-b::model-b",
+                "eval_cell_key": "third_party_api::exp-b::internal_api::swebench-hard::model-b::model-b",
+                "experiment_id": "exp-b",
+                "source_kind": "third_party_api",
+                "provider_source": "internal_api",
+                "dataset": "swebench-hard",
+                "model_label": "model-b",
+                "instance_id": "case-b",
+                "record_index": 1,
+                "bonus_case_type": "missing_bonus_map",
+                "chain_evaluable": False,
+                "step_inspection": [],
+            },
+        ],
+    }
+    snapshot_path = tmp_path / "snapshot.json"
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    harness = tmp_path / "frontend_smoke.cjs"
+    harness.write_text(
+        textwrap.dedent(
+            """
+            const fs = require("fs");
+            const vm = require("vm");
+            const appPath = process.argv[2];
+            const snapshot = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+            class Element {
+              constructor(id) {
+                this.id = id;
+                this.innerHTML = "";
+                this.textContent = "";
+                this.dataset = {};
+                this.classList = { toggle() {}, add() {}, remove() {}, contains() { return false; } };
+              }
+              addEventListener() {}
+            }
+            const elements = new Map();
+            const document = {
+              getElementById(id) {
+                if (!elements.has(id)) elements.set(id, new Element(id));
+                return elements.get(id);
+              },
+              querySelectorAll() { return []; },
+            };
+            const context = {
+              window: { __P2A_DASHBOARD_SNAPSHOT__: snapshot },
+              document,
+              console,
+              fetch: async () => { throw new Error("network disabled"); },
+              setInterval: () => 1,
+              clearInterval: () => {},
+            };
+            vm.createContext(context);
+            vm.runInContext(fs.readFileSync(appPath, "utf8"), context);
+            function run(expr) { return vm.runInContext(expr, context); }
+            if (run("state.caseFilters.direct") !== true || run("state.caseFilters.standard") !== true || run("state.caseFilters.others") !== false) {
+              throw new Error("default case filter should include direct/standard and exclude others");
+            }
+            if (run("state.selectedDataset") !== "swebench-hard") {
+              throw new Error("single dataset should be auto-selected");
+            }
+            if (run("state.selectedEvalCellKey") !== null || run("state.selectedExperimentKey") !== null) {
+              throw new Error("multi-cell dataset must require explicit model/cell selection");
+            }
+            const escapedAttr = run(`esc('\\" onmouseover=\\"alert(1)')`);
+            if (escapedAttr.includes('"') || !escapedAttr.includes("&quot;")) {
+              throw new Error("esc should escape quotes for attribute contexts");
+            }
+            const expHtml = elements.get("experiment-table").innerHTML;
+            if (!expHtml.includes("Datasets") || !expHtml.includes("Eval cells") || !expHtml.includes("exp-a") || !expHtml.includes("exp-b")) {
+              throw new Error("dataset/eval-cell registry did not render");
+            }
+            const firstCell = snapshot.eval_cells[0].eval_cell_key;
+            run(`state.selectedEvalCellKey = ${JSON.stringify("PLACEHOLDER")};
+                 state.selectedExperimentKey = ${JSON.stringify("PLACEHOLDER")};
+                 state.selectedTraceKey = ${JSON.stringify("TRACEKEY")};
+                 state.selectedStepIndex = 1;
+                 render();`.replaceAll("PLACEHOLDER", firstCell).replaceAll("TRACEKEY", `${firstCell}::case-a`));
+            const traceHtml = elements.get("trace-inspector").innerHTML;
+            if (run("state.tracePanelOpen.graph") !== false || run("state.tracePanelOpen.steps") !== true || run("state.activeTracePanel") !== "steps") {
+              throw new Error("trace workspace should default to graph collapsed and trace expanded");
+            }
+            for (const needle of ["trace-left", "trace-title-card", "trace-section", 'id="trace-graph-section"', 'id="trace-step-section"', "<summary>Graph</summary>", "<summary>Trace</summary>", "Instance overview", "Issue description", "markdown-body", "<strong>details</strong>", "language-python", "print", "Golden patch", "patch-view", "diff-meta", "diff-file", "diff-hunk", "diff-del", "diff-add", "diff --git", "<svg", "Show full Graph", "Edges", "Path edges", "Graph edges", "Trace edges", "case-a", "model-a · run-a", "1 context/harness nodes", "Showing edges: Path edges, Trace edges", "graph-trace-edge", "graph-edit-ring", "data-node-key"]) {
+              if (!traceHtml.includes(needle)) throw new Error(`missing inspector fragment: ${needle}`);
+            }
+            if (traceHtml.includes('id="trace-graph-section" class="trace-section trace-graph-section" data-trace-panel="graph" open')) {
+              throw new Error("graph section should be collapsed by default");
+            }
+            if (!traceHtml.includes('id="trace-step-section" class="trace-section trace-step-section" data-trace-panel="steps" open')) {
+              throw new Error("trace section should be expanded by default");
+            }
+            for (const needle of ["trace-panel-tabs", ">Graph</button>", ">Trace</button>", "Node Source", "Click a graph node to inspect its source"]) {
+              if (traceHtml.includes(needle)) throw new Error(`inspector should not render old panel/source fragment: ${needle}`);
+            }
+            for (const needle of ["Graph + Node Source", "Purpose Blocks + Step Detail", "Number is the first visited step", "Last edit landed on this node", "Faded node was not visited"]) {
+              if (traceHtml.includes(needle)) throw new Error(`graph panel should not contain stale title or top legend fragment: ${needle}`);
+            }
+            const stepHtml = traceHtml;
+            for (const needle of ["trace-middle", "trace-right", "step-thumb root-edit", "step-thumb symptom is-error", "data-step-tone=", "data-step-roles=", "Purpose blocks", "Visited Graph nodes", "pkg/root.py", "Reasoning", "Chat", "Tool calls", "str_replace_editor", "Action", "Observation", "Inline diff"]) {
+              if (!stepHtml.includes(needle)) throw new Error(`missing step panel fragment: ${needle}`);
+            }
+            if (stepHtml.indexOf("Visited Graph nodes") > stepHtml.indexOf("Tool calls")) {
+              throw new Error("step node hit summary should render above parsed tool calls");
+            }
+            for (const needle of ["Reward path", "Call graph", "Agent path", "Dependency-path edges", "Other call edges", "Agent-traversal edges", "dependency-path edges", "other call edges", "agent-traversal edges", "Dependency-path edge", "Other call edge", "Agent-traversal edge", "reward-path", "call-graph", "agent-path"]) {
+              if (traceHtml.includes(needle)) throw new Error(`graph edge UI should not use stale wording: ${needle}`);
+            }
+            if (traceHtml.includes("trace-title-line")) {
+              throw new Error("selected trace card should live in the graph header");
+            }
+            for (const needle of ["trace-row is-selected is-resolved", "trace-status-icons", "trace-icon-symptom", "trace-icon-root", "trace-icon-root-edit", "hit symptom", "hit root cause", "edited root cause"]) {
+              if (!traceHtml.includes(needle)) throw new Error(`missing compact trace status: ${needle}`);
+            }
+            if (run(`canonicalNodeRole("pre_symptom")`) !== "test_adapter") {
+              throw new Error("legacy pre_symptom role should normalize to test_adapter");
+            }
+            if (run(`roleTone({node_role: "test_adapter"})`) !== "test-adapter") {
+              throw new Error("test_adapter should use adapter graph tone");
+            }
+            if (run(`roleTone({node_role: "fix_adapter"})`) !== "fix-adapter") {
+              throw new Error("fix_adapter should use adapter graph tone");
+            }
+            if (run(`nodeRoleLabel({node_role: "fix_adapter"})`) !== "fix-adapter") {
+              throw new Error("fix_adapter should use public hyphenated label");
+            }
+            const blockedGraphRoute = run(`graphEdgeRouteOffset(
+              {caller: "manager", callee: "update"},
+              {x: 80, y: 55},
+              {x: 540, y: 55},
+              [{key: "manager"}, {key: "annotate"}, {key: "update"}],
+              new Map([["manager", {x: 80, y: 55}], ["annotate", {x: 310, y: 55}], ["update", {x: 540, y: 55}]])
+            )`);
+            if (blockedGraphRoute <= 0) {
+              throw new Error("long Graph edge should route around an intervening node");
+            }
+            const adjacentGraphRoute = run(`graphEdgeRouteOffset(
+              {caller: "manager", callee: "annotate"},
+              {x: 80, y: 55},
+              {x: 310, y: 55},
+              [{key: "manager"}, {key: "annotate"}, {key: "update"}],
+              new Map([["manager", {x: 80, y: 55}], ["annotate", {x: 310, y: 55}], ["update", {x: 540, y: 55}]])
+            )`);
+            if (adjacentGraphRoute !== 0) {
+              throw new Error("adjacent Graph edge should not be rerouted");
+            }
+            const routedGraphEdge = run(`graphEdgePath({x: 80, y: 55}, {x: 540, y: 55}, "context", ${blockedGraphRoute})`);
+            const straightGraphEdge = run(`graphEdgePath({x: 80, y: 55}, {x: 540, y: 55}, "context", 0)`);
+            if (routedGraphEdge === straightGraphEdge || !routedGraphEdge.includes("131.0")) {
+              throw new Error(`routed Graph edge should bend away from covered node: ${routedGraphEdge}`);
+            }
+            const backwardTopEdge = run(`graphEdgePath({x: 540, y: 55}, {x: 80, y: 55}, "context", ${blockedGraphRoute})`);
+            if (!backwardTopEdge.includes("131.0") || backwardTopEdge.includes("-21.0")) {
+              throw new Error(`backward top-row Graph edge should route downward inside the SVG: ${backwardTopEdge}`);
+            }
+            const bottomGraphRoute = run(`graphEdgeRouteOffset(
+              {caller: "manager", callee: "update"},
+              {x: 80, y: 200},
+              {x: 540, y: 200},
+              [{key: "manager"}, {key: "annotate"}, {key: "update"}],
+              new Map([["manager", {x: 80, y: 200}], ["annotate", {x: 310, y: 200}], ["update", {x: 540, y: 200}]])
+            )`);
+            if (bottomGraphRoute >= 0) {
+              throw new Error("bottom-row Graph edge should route upward");
+            }
+            const backwardBottomEdge = run(`graphEdgePath({x: 540, y: 200}, {x: 80, y: 200}, "context", ${bottomGraphRoute})`);
+            if (!backwardBottomEdge.includes("124.0") || backwardBottomEdge.includes("276.0")) {
+              throw new Error(`backward bottom-row Graph edge should route upward inside the SVG: ${backwardBottomEdge}`);
+            }
+            if (run("combinedMiracleMarker({miracle_step: false, block_miracle_step: true})") !== false) {
+              throw new Error("primary miracle marker should use step-level semantics");
+            }
+            if (run("combinedReverseMarker({order_score: 1, block_order_score: -1})") !== false) {
+              throw new Error("primary reverse marker should use step-level semantics");
+            }
+            const blockOnlyPatternHtml = run(`traceStatusIcons({
+              bonus_case_type: "standard",
+              chain_case_kind: "standard",
+              chain_evaluable: true,
+              chain_projection: {anchors: ["a"], roots: ["b"], chain_edges: [{caller: "a", callee: "b"}]},
+              purpose_blocks: [],
+              anchor_hit: false,
+              root_hit: false,
+              miracle_step: false,
+              block_miracle_step: true,
+              order_score: 1,
+              block_order_score: -1
+            })`);
+            if (blockOnlyPatternHtml.includes("trace-icon-miracle") || blockOnlyPatternHtml.includes("trace-icon-reverse")) {
+              throw new Error("left trace icons should not promote block-level order diagnostics");
+            }
+            const separatedHitsTone = run(`stepTone({scored: {hit_nodes: [
+              {key: "pkg/symptom.py::symptom", node_role: "symptom"},
+              {key: "pkg/root.py::root", node_role: "root_cause"}
+            ]}}, state.snapshot.details[0])`);
+            if (separatedHitsTone === "symptom-root-cause") {
+              throw new Error("separate symptom/root hits in one step should not use dual-node tone");
+            }
+            if (separatedHitsTone !== "multi-hit") {
+              throw new Error("step that hits multiple roles should use split tone");
+            }
+            const splitRoles = run(`JSON.stringify(stepRoleSegments({scored: {hit_nodes: [
+              {key: "pkg/symptom.py::symptom", node_role: "symptom"},
+              {key: "framework/request.py::dispatch", node_role: "test_adapter"},
+              {key: "pkg/mid.py::mid", node_role: "intermediate"},
+              {key: "pkg/fix.py::adapter", node_role: "fix_adapter"},
+              {key: "pkg/root.py::root", node_role: "root_cause"}
+            ]}}, state.snapshot.details[0]))`);
+            if (splitRoles !== JSON.stringify(["symptom", "test-adapter", "intermediate", "fix-adapter", "root"])) {
+              throw new Error(`unexpected split roles: ${splitRoles}`);
+            }
+            const dualNodeTone = run(`stepTone({scored: {hit_nodes: [
+              {key: "pkg/root.py::root", node_role: "root_cause", selected_issue_anchor: true}
+            ]}}, state.snapshot.details[0])`);
+            if (dualNodeTone !== "symptom-root-cause") {
+              throw new Error("same callable with symptom and root-cause roles should use dual-node tone");
+            }
+            const editTone = run(`stepTone({action_family: "edit", write_actions: [{file_path: "pkg/other.py"}]}, state.snapshot.details[0])`);
+            if (editTone !== "edit") {
+              throw new Error("non-root write step should use edit tone");
+            }
+            const execWriteTone = run(`stepTone({action_family: "exec", write_actions: [{file_path: "pkg/other.py"}]}, state.snapshot.details[0])`);
+            if (execWriteTone !== "edit") {
+              throw new Error("exec shell with parsed write semantics should use edit tone");
+            }
+            const execReadTone = run(`stepTone({action_family: "exec", scored: {hit_nodes: [{key: "pkg/root.py::root", node_role: "root_cause"}]}}, state.snapshot.details[0])`);
+            if (execReadTone !== "root") {
+              throw new Error("exec shell with parsed read hit should use map-hit tone");
+            }
+            const execOtherTone = run(`stepTone({action_family: "exec", scored: {n_reads: 0, hit_nodes: []}}, state.snapshot.details[0])`);
+            if (execOtherTone !== "exec-other") {
+              throw new Error("exec shell without parsed read/write semantics should use exec-other tone");
+            }
+            const nodeHitHtml = run(`renderStepNodeHits({scored: {hit_nodes: [
+              {key: "pkg/symptom.py::Symptom.run", file_path: "pkg/symptom.py", start_line: 3, end_line: 8, node_role: "symptom"},
+              {key: "framework/request.py::dispatch", file_path: "framework/request.py", start_line: 4, end_line: 4, node_role: "test_adapter"},
+              {key: "pkg/mid.py::Middle.step", file_path: "pkg/mid.py", start_line: 9, end_line: 9, node_role: "intermediate"},
+              {key: "pkg/fix.py::FixAdapter.wrap", file_path: "pkg/fix.py", start_line: 10, end_line: 12, node_role: "fix_adapter"},
+              {key: "pkg/root.py::Root.fix", file_path: "pkg/root.py", start_line: 10, end_line: 20, node_role: "root_cause"}
+            ]}}, state.snapshot.details[0])`);
+            for (const needle of ["node-hit-group symptom", "node-hit-group test-adapter", "node-hit-group intermediate", "node-hit-group fix-adapter", "node-hit-group root", "pkg/symptom.py", "Symptom.run", "framework/request.py", "dispatch", "pkg/mid.py", "Middle.step", "pkg/fix.py", "FixAdapter.wrap", "pkg/root.py", "Root.fix", ":10-20"]) {
+              if (!nodeHitHtml.includes(needle)) throw new Error(`missing step node hit fragment: ${needle}`);
+            }
+            if (!(nodeHitHtml.indexOf("node-hit-group symptom") < nodeHitHtml.indexOf("node-hit-group test-adapter") && nodeHitHtml.indexOf("node-hit-group test-adapter") < nodeHitHtml.indexOf("node-hit-group intermediate") && nodeHitHtml.indexOf("node-hit-group intermediate") < nodeHitHtml.indexOf("node-hit-group fix-adapter") && nodeHitHtml.indexOf("node-hit-group fix-adapter") < nodeHitHtml.indexOf("node-hit-group root"))) {
+              throw new Error("node hit groups should render in Graph role order");
+            }
+            if (!stepHtml.includes('detail-toggle observation-toggle" open')) {
+              throw new Error("observation toggle should default open");
+            }
+            const diffHtml = run(`renderDiff("old one\\\\nold two", "new one\\\\nnew two")`);
+            if (!(diffHtml.indexOf("old one") < diffHtml.indexOf("old two") && diffHtml.indexOf("old two") < diffHtml.indexOf("new one") && diffHtml.indexOf("new one") < diffHtml.indexOf("new two"))) {
+              throw new Error("inline diff should group delete lines before add lines for block replacements");
+            }
+            for (const needle of ['<span class="badge ok">symptom</span>', '<span class="badge ok">root cause</span>', '<span class="badge ok">chain</span>']) {
+              if (traceHtml.includes(needle)) throw new Error(`left trace status should not use old badge: ${needle}`);
+            }
+            for (const needle of ['<span class="badge warn">miracle</span>', '<span class="badge warn">reverse</span>']) {
+              if (traceHtml.includes(needle)) throw new Error(`edge-less graph should suppress badge: ${needle}`);
+            }
+            run("setTracePanelOpen('graph', true); renderTraceInspector(state.snapshot);");
+            run("state.graphEdgeFilters.trace = false; renderTraceInspector(state.snapshot);");
+            const noTraceHtml = elements.get("trace-inspector").innerHTML;
+            if (noTraceHtml.includes("graph-trace-edge")) {
+              throw new Error("Trace edge filter did not hide Trace arrows");
+            }
+            run("state.graphEdgeFilters.trace = true; renderTraceInspector(state.snapshot);");
+            run("state.showGraphContext = false; state.graphEdgeFilters.graph = true; renderTraceInspector(state.snapshot);");
+            const callGraphHtml = elements.get("trace-inspector").innerHTML;
+            if (!callGraphHtml.includes("Core Path") || !callGraphHtml.includes("graph-edge context")) {
+              throw new Error("graph filter should reveal in-scope Graph edges without full graph toggle");
+            }
+            for (const needle of ["tests/test_demo.py::test_demo", "test_harness"]) {
+              if (callGraphHtml.includes(needle)) throw new Error(`call graph filter leaked full-graph node: ${needle}`);
+            }
+            run("state.graphEdgeFilters.graph = false; setGraphContext(true); renderTraceInspector(state.snapshot);");
+            const fullGraphHtml = elements.get("trace-inspector").innerHTML;
+            if (run("state.graphEdgeFilters.graph") !== true || !fullGraphHtml.includes("Showing edges: Path edges, Graph edges, Trace edges")) {
+              throw new Error("full graph toggle should reveal Graph arrows");
+            }
+            for (const needle of ["Tool summary", "Recovered reads", "Matched bonus-map nodes"]) {
+              if (stepHtml.includes(needle)) throw new Error(`stale inspector fragment: ${needle}`);
+            }
+            const legendHtml = elements.get("trace-legend").innerHTML;
+            for (const needle of ["Trace Patterns", "Read Step Colors", "Write / Execute / Other Step Colors", "legend-icon", "Hit symptom: observed failure signal", "Hit root cause: expected cause or fix target", "Edited root cause: a write landed on a root-cause node", "Loop: repeated purpose block", "Reverse: traversal goes against dependency order", "Write action modified root cause", "Write action did not hit root cause", "One step hit multiple node roles", "Tool or command execution failed", "Exec or other tool without a parsed read hit", "exec / other", "Parsed read outside the Path", "Graph", "Nodes", "Edges", "Symbols", "test harness", "symptom", "intermediate", "Number is the first visited step", "test-adapter", "fix-adapter", "Last edit landed on this node", "Trace edge", "Faded node was not visited", "Path edge", "Graph edge", "Dependency direction", 'x1="0" y1="1" x2="1" y2="0"']) {
+              if (!legendHtml.includes(needle)) throw new Error(`missing trajectory legend fragment: ${needle}`);
+            }
+            for (const needle of ["Path node", "Path hit"]) {
+              if (legendHtml.includes(needle)) throw new Error(`graph legend should not use stale generic node label: ${needle}`);
+            }
+            if (legendHtml.includes("Trajectory labels and colors")) {
+              throw new Error("trajectory legend should not render a title");
+            }
+            if (legendHtml.includes("This step hit both symptom and root cause")) {
+              throw new Error("dual-node step legend should not occupy trajectory legend space");
+            }
+            for (const needle of ["Icons", "legend-block"]) {
+              if (legendHtml.includes(needle)) throw new Error(`trajectory legend should not include deleted block/loop legend: ${needle}`);
+            }
+            for (const needle of ['<span class="badge ok">symptom</span>', '<span class="badge ok">root cause</span>', '<span class="badge ok">chain</span>']) {
+              if (legendHtml.includes(needle)) throw new Error(`trajectory legend should not use old badge sample: ${needle}`);
+            }
+            for (const needle of ["The number is the first trajectory step", "Selected issue/symptom", "Precomputed root-cause"]) {
+              if (legendHtml.includes(needle)) throw new Error(`trajectory legend should not include long prose: ${needle}`);
+            }
+            const modelHtml = elements.get("model-table").innerHTML;
+            for (const needle of ["KPI groups", "metric-group-checkbox", "metric-group-graph", "metric-group-path", "Metric definitions", "Graph", "Outcome", "Path", "Pattern", "Purpose Blocks", "Efficiency and Cost", "Graph P.", "Graph R.", "Graph F1", "Path P.", "Path R.", "Path F1", "Symptom hit", "Root cause hit", "Evaluator-resolved pass rate", "Completed cases over planned cases"]) {
+              if (!modelHtml.includes(needle)) throw new Error(`missing macro glossary fragment: ${needle}`);
+            }
+            for (const needle of ["Effect and Evidence", "Graph Hits", "Dependency Path", "Exploration Behavior", "Path-read hit ratio", "Trace P.", "Trace R.", "Trace F1", "Trace precision", "Trace recall", "Path node precision", "Path node recall", "Path read precision", "Path hit ratio", "Graph hit ratio", "Read recall", "Not defined: no canonical required-read set", "Scored read actions that hit useful"]) {
+              if (modelHtml.includes(needle)) throw new Error(`metric glossary should use short prose: ${needle}`);
+            }
+            const allColumnHeaders = run("kpiColumns(false).map((column) => column.header).join('|')");
+            if (!allColumnHeaders.includes("Graph P.") || !allColumnHeaders.includes("Path P.") || !allColumnHeaders.includes("Path F1")) {
+              throw new Error("default KPI columns should include all metric groups");
+            }
+            const expectedOrder = [
+              "Done",
+              "Graph P.", "Graph R.", "Graph F1",
+              "Task success", "Symptom hit", "Root cause hit", "First symptom", "First root cause",
+              "Path P.", "Path R.", "Path F1",
+              "Order score", "Reverse rate", "Miracle rate", "Loop trace", "Error spiral",
+              "Blocks", "Achieved", "Wasted", "Loop blocks",
+              "Turns"
+            ].join("|");
+            if (!allColumnHeaders.includes(expectedOrder)) {
+              throw new Error(`KPI columns are not grouped by class: ${allColumnHeaders}`);
+            }
+            const pathP = run("kpiColumns(false).find((column) => column.header === 'Path P.').value({avg_path_node_precision: 0.25, avg_path_read_precision: 1.0, avg_path_node_recall: 0.5})");
+            const pathF1 = run("kpiColumns(false).find((column) => column.header === 'Path F1').value({avg_path_node_precision: 0.25, avg_path_read_precision: 1.0, avg_path_node_recall: 0.5})");
+            if (pathP !== "25.0%" || pathF1 !== "33.3%") {
+              throw new Error(`Path P/F1 should use deduplicated node precision, got ${pathP}/${pathF1}`);
+            }
+            run("state.metricGroupFilters.graph = false;");
+            const filteredColumnHeaders = run("kpiColumns(false).map((column) => column.header).join('|')");
+            if (filteredColumnHeaders.includes("Graph P.") || filteredColumnHeaders.includes("Graph R.") || filteredColumnHeaders.includes("Graph F1")) {
+              throw new Error("graph KPI group filter did not hide graph columns");
+            }
+            if (!filteredColumnHeaders.includes("Task success") || !filteredColumnHeaders.includes("Path P.")) {
+              throw new Error("graph filter should not hide other KPI groups");
+            }
+            run("state.metricGroupFilters.graph = true;");
+            run("state.selectedGraphNodeKey = 'pkg/root.py::root'; setTracePanelOpen('graph', true); renderTraceInspector(state.snapshot);");
+            const sourceHtml = elements.get("trace-inspector").innerHTML;
+            for (const needle of ["code-view language-python", "tok-keyword", "tok-symbol", "tok-lhs", "tok-dot", "tok-property", "def", "self", "value", "obj", "good", "pkg/root.py:1-10"]) {
+              if (!sourceHtml.includes(needle)) throw new Error(`missing graph source fragment: ${needle}`);
+            }
+            run("state.selectedGraphNodeKey = null; renderTraceInspector(state.snapshot);");
+            const collapsedSourceHtml = elements.get("trace-inspector").innerHTML;
+            if (collapsedSourceHtml.includes("Node Source") || collapsedSourceHtml.includes("pkg/root.py:1-10")) {
+              throw new Error("graph source panel should disappear after node selection is cleared");
+            }
+            run("state.caseFilters.direct = false; state.caseFilters.standard = false; state.caseFilters.others = true; render();");
+            const othersModelHtml = elements.get("model-table").innerHTML;
+            if (!othersModelHtml.includes("model-b") || othersModelHtml.includes("model-a")) {
+              throw new Error("others case filter did not use backend filtered model rows");
+            }
+            if (!othersModelHtml.includes("99")) {
+              throw new Error("others case filter should use full-population backend metrics");
+            }
+            if (!othersModelHtml.includes("case types: others")) {
+              throw new Error("case filter scope note missing");
+            }
+            run("state.caseFilters.direct = true; state.caseFilters.standard = true; state.caseFilters.others = false; render();");
+            const filteredModelHtml = elements.get("model-table").innerHTML;
+            if (!filteredModelHtml.includes("model-a") || filteredModelHtml.includes("model-b")) {
+              throw new Error("direct/standard case filter did not use filtered model rows");
+            }
+            for (const needle of ["3.5", "4.5", "5.5", "1.0k", "$1.2500"]) {
+              if (!filteredModelHtml.includes(needle)) throw new Error(`filtered metrics missing efficiency fallback: ${needle}`);
+            }
+            run("state.caseFilters.direct = true; state.caseFilters.standard = true; state.caseFilters.others = true; render();");
+            const stepThumbs = (stepHtml.match(/step-thumb/g) || []).length;
+            if (stepThumbs < 2) throw new Error("purpose block timeline did not render trace-indexed steps");
+            const before = run("state.selectedTraceKey + '|' + state.selectedStepIndex");
+            run("render();");
+            const after = run("state.selectedTraceKey + '|' + state.selectedStepIndex");
+            if (before !== after) throw new Error("refresh render did not preserve selected trace/step");
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(["node", str(harness), str(app_path), str(snapshot_path)], check=True)

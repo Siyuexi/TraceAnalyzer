@@ -5,10 +5,9 @@ set -euo pipefail
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
 SRC_ROOT="${SCRIPT_SRC_ROOT}"
-source "${SRC_ROOT}/scripts/load_local_env.sh"
+source "${SRC_ROOT}/scripts/lib.sh"
 p2a_source_local_env "${SRC_ROOT}"
 source "${SRC_ROOT}/scripts/setup.sh"
-source "${SRC_ROOT}/scripts/stage_local_runtime.sh"
 cd "${SRC_ROOT}"
 
 unset PYTHONPATH PYTHONHOME
@@ -120,8 +119,7 @@ MODEL_PATH="${MODEL}" \
 bash scripts/train_p2a.sh
 
 # Later, for validation graph metrics:
-# TEST_FILE="${DATA}/swe_bench_verified_hard.parquet" \
-#   P2A_EVAL_BONUS_MAP_DIR="${DATA}/eval_bonus_maps" bash scripts/precompute_eval_bonus_maps.sh
+# TEST_FILE="${DATA}/swe_bench_verified_hard.parquet" bash scripts/precompute_eval_bonus_maps.sh
 #
 # Later, for P2A training, add:
-# P2A_BONUS_MAP_DIR=../../p2a/bonus_maps P2A_M_MAX=3.0 P2A_CREDIT_GRANULARITY=step
+# P2A_BONUS_MAP_DIR=data/bonus_maps/r2e-gym-subset P2A_M_MAX=3.0 P2A_CREDIT_GRANULARITY=step

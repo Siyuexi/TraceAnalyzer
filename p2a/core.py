@@ -1,14 +1,15 @@
 """
 P2A (Process-to-Advantage) core module.
 
-Implements the V2 multiplicative advantage reshaping based on call-graph distance:
+Implements the V2 multiplicative advantage reshaping based on Graph distance:
   A_token = A_seq * m(d)^sign(A)
   where m(d) = m_max^(1-d), d = normalized hop distance in [0,1].
 
 Components:
   - BonusMapStore: loads precomputed bonus maps (per instance_id)
   - parse_read_actions: extracts file viewing actions from agent responses
-  - match_reads_to_callgraph: matches Read actions to call graph nodes
+  - parse_write_actions_from_tool_calls: extracts file writing/editing actions
+  - match_reads_to_graph: matches Read actions to Graph nodes
   - compute_p2a_multiplier: V2 multiply/divide formula
 
 Tracking modes:
@@ -19,6 +20,7 @@ Tracking modes:
 import json
 import os
 import re
+import shlex
 from typing import Any
 
 
@@ -106,6 +108,20 @@ _FILE_EDITOR_XML_EQ_PATTERN = re.compile(
     r"<function=file_editor>.*?<parameter=command>view</parameter>"
     r".*?<parameter=path>([^<]+)</parameter>"
     r"(?:.*?<parameter=view_range>\[(\d+),\s*(\d+)\]</parameter>)?",
+    re.DOTALL,
+)
+_EDITOR_WRITE_JSON_PATTERN = re.compile(
+    r"<function=(?:file_editor|str_replace_editor)>\s*(\{.*?\})",
+    re.DOTALL,
+)
+_EDITOR_WRITE_XML_PATTERN = re.compile(
+    r"<function=(?:file_editor|str_replace_editor)>.*?<parameter\s*(?:name=)?\"?command\"?>([^<]+)</parameter>"
+    r".*?<parameter\s*(?:name=)?\"?path\"?>([^<]+)</parameter>",
+    re.DOTALL,
+)
+_EDITOR_WRITE_XML_EQ_PATTERN = re.compile(
+    r"<function=(?:file_editor|str_replace_editor)>.*?<parameter=command>([^<]+)</parameter>"
+    r".*?<parameter=path>([^<]+)</parameter>",
     re.DOTALL,
 )
 
@@ -210,6 +226,22 @@ _GREP_PATTERN = re.compile(
     r"([^\s|><;`$&]+\.py\b)",  # file path
 )
 
+_REDIRECT_WRITE_PATTERN = re.compile(r"(?<![0-9])(?:>>|>)\s*([^\s|;&]+\.py\b)")
+_TEE_WRITE_PATTERN = re.compile(r"\btee\s+(?:-[A-Za-z]+\s+)*([^\s|;&]+\.py\b)")
+_SED_I_WRITE_PATTERN = re.compile(
+    r"\bsed\s+(?:-[A-Za-z]*i[A-Za-z]*\s+)+(?:['\"]?(\d+),(\d+)[^'\"]*['\"]?\s+)?"
+    r"([^\s|;&]+\.py\b)"
+)
+_SED_EXPR_RANGE_PATTERN = re.compile(r"^\s*(\d+)\s*,\s*(\d+)")
+_SHELL_BOUNDARY_TOKENS = {";", "&&", "||", "|"}
+_PERL_PI_WRITE_PATTERN = re.compile(
+    r"\bperl\s+(?:-[A-Za-z]*p[A-Za-z]*i[A-Za-z]*|-[A-Za-z]*i[A-Za-z]*p[A-Za-z]*)"
+    r"(?:\s+-e\s+['\"][^'\"]*['\"])?\s+([^\s|;&]+\.py\b)"
+)
+_PYTHON_OPEN_WRITE_PATTERN = re.compile(
+    r"\bopen\(\s*['\"]([^'\"]+\.py)['\"]\s*,\s*['\"][^'\"]*[wa][^'\"]*['\"]"
+)
+
 # python -c "..." is NOT a file view → skip
 # awk/python scripts that read files are too complex → skip
 
@@ -303,6 +335,11 @@ _STR_REPLACE_EDITOR_TEXT = re.compile(
     r'(?:.*?view_range\s*=\s*\[(\d+)\s*,\s*(-?\d+)\])?',
     re.DOTALL,
 )
+_STR_REPLACE_EDITOR_WRITE_TEXT = re.compile(
+    r'str_replace_editor\s*\(\s*command\s*=\s*["\']([^"\']+)["\']'
+    r'.*?path\s*=\s*["\']([^"\']+)["\']',
+    re.DOTALL,
+)
 
 
 def _parse_sweagent_views(text: str) -> list[dict]:
@@ -391,6 +428,158 @@ def _tool_call_function(tool_call: Any) -> tuple[str, dict]:
     return name, args_raw if isinstance(args_raw, dict) else {}
 
 
+def _write_action(file_path: str, *, start_line: int = 1, end_line: int = 999999, command: str | None = None) -> dict:
+    return {
+        "file_path": _normalize_path(file_path),
+        "start_line": int(start_line),
+        "end_line": int(end_line),
+        "command": command or "write",
+    }
+
+
+def _shell_tokens(cmd: str) -> list[str]:
+    lexer = shlex.shlex(cmd, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    return list(lexer)
+
+
+def _sed_expression_range(expr: str) -> tuple[int, int] | None:
+    match = _SED_EXPR_RANGE_PATTERN.match(expr)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _extract_sed_i_write_matches(cmd: str) -> list[tuple[str, int, int]]:
+    try:
+        tokens = _shell_tokens(cmd)
+    except ValueError:
+        return []
+
+    writes: list[tuple[str, int, int]] = []
+    index = 0
+    while index < len(tokens):
+        if tokens[index] != "sed":
+            index += 1
+            continue
+
+        cursor = index + 1
+        in_place = False
+        active_range: tuple[int, int] | None = None
+        while cursor < len(tokens) and tokens[cursor] not in _SHELL_BOUNDARY_TOKENS:
+            token = tokens[cursor]
+            if token in {"-e", "--expression"}:
+                if cursor + 1 < len(tokens) and tokens[cursor + 1] not in _SHELL_BOUNDARY_TOKENS:
+                    active_range = _sed_expression_range(tokens[cursor + 1]) or active_range
+                    cursor += 2
+                    continue
+            if token in {"-f", "--file"}:
+                cursor += 2
+                continue
+            if token.startswith("--in-place"):
+                in_place = True
+                cursor += 1
+                continue
+            if token.startswith("-") and token != "-" and not token.endswith(".py"):
+                if "i" in token[1:]:
+                    in_place = True
+                cursor += 1
+                continue
+            if token == "":
+                cursor += 1
+                continue
+
+            if in_place and token.endswith(".py"):
+                start_line, end_line = active_range or (1, 999999)
+                writes.append((token, start_line, end_line))
+            elif in_place:
+                active_range = _sed_expression_range(token) or active_range
+            cursor += 1
+        index = max(cursor, index + 1)
+    return writes
+
+
+def _extract_writes_from_command(cmd: str) -> list[dict]:
+    writes: list[dict] = []
+    seen: set[tuple[str, int, int, str]] = set()
+
+    def add(file_path: str, start_line: int = 1, end_line: int = 999999, command: str = "write") -> None:
+        action = _write_action(file_path, start_line=start_line, end_line=end_line, command=command)
+        key = (action["file_path"], action["start_line"], action["end_line"], action["command"])
+        if key in seen:
+            return
+        seen.add(key)
+        writes.append(action)
+
+    for match in _REDIRECT_WRITE_PATTERN.finditer(cmd):
+        add(match.group(1), command="redirect")
+    for match in _TEE_WRITE_PATTERN.finditer(cmd):
+        add(match.group(1), command="tee")
+    for file_path, start_line, end_line in _extract_sed_i_write_matches(cmd):
+        add(file_path, start_line, end_line, "sed -i")
+    for match in _SED_I_WRITE_PATTERN.finditer(cmd):
+        if match.group(1) and match.group(2):
+            add(match.group(3), int(match.group(1)), int(match.group(2)), "sed -i")
+        else:
+            add(match.group(3), command="sed -i")
+    for match in _PERL_PI_WRITE_PATTERN.finditer(cmd):
+        add(match.group(1), command="perl -pi")
+    for match in _PYTHON_OPEN_WRITE_PATTERN.finditer(cmd):
+        add(match.group(1), command="python open")
+    return writes
+
+
+def _parse_editor_write_actions(text: str) -> list[dict]:
+    writes: list[dict] = []
+    for match in _EDITOR_WRITE_JSON_PATTERN.finditer(text):
+        try:
+            payload = json.loads(match.group(1))
+        except (json.JSONDecodeError, ValueError):
+            continue
+        command = str(payload.get("command", "") or "")
+        path = payload.get("path") or payload.get("file")
+        if command and command != "view" and isinstance(path, str) and path:
+            writes.append(_write_action(path, command=command))
+    for match in _EDITOR_WRITE_XML_PATTERN.finditer(text):
+        command = match.group(1).strip()
+        if command and command != "view":
+            writes.append(_write_action(match.group(2), command=command))
+    for match in _EDITOR_WRITE_XML_EQ_PATTERN.finditer(text):
+        command = match.group(1).strip()
+        if command and command != "view":
+            writes.append(_write_action(match.group(2), command=command))
+    for match in _STR_REPLACE_EDITOR_WRITE_TEXT.finditer(text):
+        command = match.group(1).strip()
+        if command and command != "view":
+            writes.append(_write_action(match.group(2), command=command))
+    return writes
+
+
+def parse_write_actions(response_text: str) -> list[dict]:
+    """Parse file writing/editing actions from raw tool-call text."""
+    writes = _parse_editor_write_actions(response_text)
+    writes.extend(_extract_writes_from_command(response_text))
+    return writes
+
+
+def parse_write_actions_from_tool_calls(tool_calls: list[dict]) -> list[dict]:
+    """Parse write/edit actions from structured tool calls."""
+    writes: list[dict] = []
+    for tc in tool_calls:
+        name, args = _tool_call_function(tc)
+        command = str(args.get("command", "") or "")
+        if name in {"str_replace_editor", "file_editor"} and command and command != "view":
+            path = args.get("path") or args.get("file")
+            if isinstance(path, str) and path:
+                writes.append(_write_action(path, command=command))
+        elif name == "execute_bash":
+            cmd = args.get("command", "")
+            if isinstance(cmd, str) and cmd:
+                writes.extend(_extract_writes_from_command(cmd))
+    return writes
+
+
 def _primary_tool_call(step_trace: dict) -> dict | None:
     tool_calls = step_trace.get("tool_calls") or []
     if not isinstance(tool_calls, list) or not tool_calls:
@@ -408,6 +597,17 @@ def reads_from_step_trace(step_trace: dict, tracking_mode: str = "view_and_bash"
     if isinstance(response_text, str) and response_text:
         reads.extend(parse_read_actions(response_text, tracking_mode=tracking_mode))
     return reads
+
+
+def writes_from_step_trace(step_trace: dict) -> list[dict]:
+    writes: list[dict] = []
+    tool_calls = step_trace.get("tool_calls") or []
+    if isinstance(tool_calls, list) and tool_calls:
+        writes.extend(parse_write_actions_from_tool_calls(tool_calls))
+    response_text = step_trace.get("response_text") or step_trace.get("response") or step_trace.get("assistant_response")
+    if isinstance(response_text, str) and response_text:
+        writes.extend(parse_write_actions(response_text))
+    return writes
 
 
 def normalize_action(step_trace: dict, tracking_mode: str = "view_and_bash") -> dict:
@@ -434,6 +634,10 @@ def normalize_action(step_trace: dict, tracking_mode: str = "view_and_bash") -> 
             return {"family": "edit", "target_path": target_path}
 
     if name == "execute_bash":
+        writes = parse_write_actions_from_tool_calls([tool_call])
+        if writes:
+            targets = {write["file_path"] for write in writes}
+            return {"family": "edit", "target_path": sorted(targets)[0] if len(targets) == 1 else None}
         reads = parse_read_actions_from_tool_calls([tool_call]) if tracking_mode == "view_and_bash" else []
         if reads:
             targets = {read["file_path"] for read in reads}
@@ -510,25 +714,25 @@ def parse_read_actions(response_text: str, tracking_mode: str = "view_only") -> 
 
 
 # ---------------------------------------------------------------------------
-# Call graph matching
+# Graph matching
 # ---------------------------------------------------------------------------
 
 
-def is_rewardable_call_graph_node(node: dict) -> bool:
-    """Whether a call-graph node participates in P2A reward matching."""
+def is_rewardable_graph_node(node: dict) -> bool:
+    """Whether a Graph node participates in P2A reward matching."""
     return bool(node.get("rewardable", True))
 
 
-def match_reads_to_callgraph(reads: list[dict], bonus_map: dict) -> float:
-    """Match Read actions against call graph nodes.
+def match_reads_to_graph(reads: list[dict], bonus_map: dict) -> float:
+    """Match Read actions against captured Graph nodes.
 
     For each read action, check if its file_path and line range overlap with any
-    call graph node. Among all matches, return the minimum normalized distance
+    Graph node. Among all matches, return the minimum normalized distance
     (i.e., max bonus).
 
     Args:
         reads: List of read actions from parse_read_actions().
-        bonus_map: A bonus map dict with "call_graph_nodes" key.
+        bonus_map: A bonus map dict with legacy "call_graph_nodes" storage key.
 
     Returns:
         Minimum normalized distance in [0, 1] if any match found, -1.0 otherwise.
@@ -548,7 +752,7 @@ def match_reads_to_callgraph(reads: list[dict], bonus_map: dict) -> float:
         read_end = read["end_line"]
 
         for _node_key, node in nodes.items():
-            if not is_rewardable_call_graph_node(node):
+            if not is_rewardable_graph_node(node):
                 continue
             node_path = node["file_path"]
             node_start = node["start_line"]
@@ -567,6 +771,16 @@ def match_reads_to_callgraph(reads: list[dict], bonus_map: dict) -> float:
         return -1.0
 
     return min_distance
+
+
+def is_rewardable_call_graph_node(node: dict) -> bool:
+    """Compatibility alias for the legacy call-graph storage vocabulary."""
+    return is_rewardable_graph_node(node)
+
+
+def match_reads_to_callgraph(reads: list[dict], bonus_map: dict) -> float:
+    """Compatibility alias for legacy callers; new code should use Graph."""
+    return match_reads_to_graph(reads, bonus_map)
 
 
 # ---------------------------------------------------------------------------

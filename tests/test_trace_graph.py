@@ -179,11 +179,11 @@ def test_shallow_src_callers_remain_rewardable():
     assert helper["normalized_distance"] == 1.0
     assert test_node["rewardable"] is False
     assert test_node["node_role"] == "test_harness"
-    assert result["reward_start_source"] == "test_filtered_fallback"
+    assert result["reward_start_source"] == "first_non_test_after_test"
     assert result["selected_issue_anchor_nodes"] == []
     assert result["symptom_nodes"] == []
     assert result["root_cause_nodes"] == ["src/target.py::target"]
-    assert result["reward_path_edges"] == [["src/helper.py::helper", "src/target.py::target"]]
+    assert result["reward_path_edges"] == []
     assert result["direct_symptom_to_root_cause_edges"] == []
 
 
@@ -289,7 +289,7 @@ def test_django_test_client_prefix_does_not_determine_hop_max():
     assert result["excluded_test_harness_node_count"] == 2
     assert result["excluded_pre_symptom_node_count"] == 0
     assert result["test_harness_file_patterns"] == ["django/test/**", "tests/**"]
-    assert result["reward_start_source"] == "test_filtered_fallback"
+    assert result["reward_start_source"] == "first_non_test_after_test"
 
     test_node = result["call_graph_nodes"]["django/test/client.py::Client.get"]
     assert test_node["rewardable"] is False
@@ -314,7 +314,7 @@ def test_django_test_client_prefix_does_not_determine_hop_max():
     assert patched["normalized_distance"] == 0.0
 
 
-def test_issue_anchor_marks_pre_symptom_frames_non_rewardable():
+def test_issue_anchor_marks_test_adapter_frames_rewardable_but_outside_visual_path():
     traces = [
         [
             _frame("tests/test_issue.py", "test_issue", 1),
@@ -337,9 +337,12 @@ def test_issue_anchor_marks_pre_symptom_frames_non_rewardable():
     intermediate = result["call_graph_nodes"]["app/service.py::intermediate"]
     root = result["call_graph_nodes"]["app/root.py::patched_root"]
 
-    assert result["reward_start_source"] == "issue_anchor"
+    assert result["reward_start_source"] == "first_non_test_after_test"
+    assert result["issue_anchor_source"] == "issue_anchor"
+    assert result["ground_truth_anchor_nodes"] == ["framework/request.py::dispatch"]
     assert result["selected_issue_anchor_nodes"] == ["app/views.py::symptom"]
     assert result["symptom_nodes"] == ["app/views.py::symptom"]
+    assert result["test_adapter_nodes"] == ["framework/request.py::dispatch"]
     assert result["root_cause_nodes"] == ["app/root.py::patched_root"]
     assert result["direct_symptom_to_root_cause_edges"] == []
     assert result["reward_path_edges"] == [
@@ -368,9 +371,9 @@ def test_issue_anchor_marks_pre_symptom_frames_non_rewardable():
         {
             "caller": "framework/request.py::dispatch",
             "callee": "app/views.py::symptom",
-            "caller_role": "pre_symptom",
+            "caller_role": "test_adapter",
             "callee_role": "symptom",
-            "role_transition": "pre_symptom->symptom",
+            "role_transition": "test_adapter->symptom",
             "reward_path_edge": False,
             "direct_symptom_to_root_cause": False,
         },
@@ -378,21 +381,22 @@ def test_issue_anchor_marks_pre_symptom_frames_non_rewardable():
             "caller": "tests/test_issue.py::test_issue",
             "callee": "framework/request.py::dispatch",
             "caller_role": "test_harness",
-            "callee_role": "pre_symptom",
-            "role_transition": "test_harness->pre_symptom",
+            "callee_role": "test_adapter",
+            "role_transition": "test_harness->test_adapter",
             "reward_path_edge": False,
             "direct_symptom_to_root_cause": False,
         },
     ]
-    assert result["excluded_pre_symptom_nodes"] == ["framework/request.py::dispatch"]
-    assert framework["rewardable"] is False
-    assert framework["node_role"] == "pre_symptom"
-    assert framework["excluded_from_hop_max"] is True
+    assert result["excluded_test_adapter_nodes"] == []
+    assert result["excluded_pre_symptom_nodes"] == []
+    assert framework["rewardable"] is True
+    assert framework["node_role"] == "test_adapter"
+    assert framework["excluded_from_hop_max"] is False
     assert symptom["rewardable"] is True
     assert symptom["node_role"] == "symptom"
     assert intermediate["node_role"] == "intermediate"
     assert root["node_role"] == "root_cause"
-    assert result["hop_max"] == 2
+    assert result["hop_max"] == 3
 
 
 def test_issue_anchor_uses_deepest_matching_symptom_candidate():
@@ -415,8 +419,8 @@ def test_issue_anchor_uses_deepest_matching_symptom_candidate():
     outer = result["call_graph_nodes"]["pkg/outer.py::outer"]
     inner = result["call_graph_nodes"]["pkg/inner.py::inner_symptom"]
     assert result["selected_issue_anchor_nodes"] == ["pkg/inner.py::inner_symptom"]
-    assert outer["rewardable"] is False
-    assert outer["node_role"] == "pre_symptom"
+    assert outer["rewardable"] is True
+    assert outer["node_role"] == "test_adapter"
     assert inner["rewardable"] is True
     assert inner["node_role"] == "symptom"
 
@@ -440,7 +444,7 @@ def test_generic_issue_anchor_names_do_not_anchor_without_context():
         issue_text="The issue mentions `inner`, `wrapper`, get(), `__new__`, and `__call__` generically.",
     )
 
-    assert result["reward_start_source"] == "test_filtered_fallback"
+    assert result["reward_start_source"] == "first_non_test_after_test"
     assert result["selected_issue_anchor_nodes"] == []
     assert result["excluded_pre_symptom_nodes"] == []
     for key, node in result["call_graph_nodes"].items():
@@ -464,7 +468,7 @@ def test_bare_file_issue_anchor_does_not_match_every_same_basename():
         issue_text="pytest tries to collect random `__init__.py` files.",
     )
 
-    assert result["reward_start_source"] == "test_filtered_fallback"
+    assert result["reward_start_source"] == "first_non_test_after_test"
     assert result["selected_issue_anchor_nodes"] == []
 
 
@@ -484,7 +488,8 @@ def test_issue_anchor_matches_module_qualified_function_by_leaf():
         issue_text="Allow `django.utils.autoreload.get_child_arguments` to handle module execution.",
     )
 
-    assert result["reward_start_source"] == "issue_anchor"
+    assert result["reward_start_source"] == "first_non_test_after_test"
+    assert result["issue_anchor_source"] == "issue_anchor"
     assert result["selected_issue_anchor_nodes"] == ["django/utils/autoreload.py::get_child_arguments"]
 
 
@@ -567,14 +572,15 @@ def test_disambiguated_generic_issue_anchor_can_match():
         issue_text="Traceback points at `View.get`.",
     )
 
-    assert result["reward_start_source"] == "issue_anchor"
+    assert result["reward_start_source"] == "first_non_test_after_test"
+    assert result["issue_anchor_source"] == "issue_anchor"
     assert result["selected_issue_anchor_nodes"] == ["pkg/views.py::View.get"]
     assert result["symptom_nodes"] == ["pkg/views.py::View.get"]
     assert result["root_cause_nodes"] == ["pkg/root.py::patched_root"]
     assert result["direct_symptom_to_root_cause_edges"] == [
         ["pkg/views.py::View.get", "pkg/root.py::patched_root"]
     ]
-    assert result["call_graph_nodes"]["framework/router.py::dispatch"]["node_role"] == "pre_symptom"
+    assert result["call_graph_nodes"]["framework/router.py::dispatch"]["node_role"] == "test_adapter"
     assert result["call_graph_nodes"]["pkg/views.py::View.get"]["node_role"] == "symptom"
 
 
@@ -599,7 +605,10 @@ def test_upstream_patched_callable_gets_positive_distance_from_deeper_root():
     assert foo2["hop_distance"] == 0
     assert foo2["normalized_distance"] == 0.0
     assert foo1["rewardable"] is True
+    assert foo1["node_role"] == "fix_adapter"
+    assert foo1["patch_role"] == "fix_adapter"
     assert foo1["hop_distance"] > 0
+    assert result["fix_adapter_nodes"] == ["pkg/foo.py::foo1"]
     assert result["patched_root_selection"]["terminal_root_seeds"] == ["pkg/foo.py::foo2"]
     assert result["patched_root_selection"]["upstream_adapter_patched_callables"] == ["pkg/foo.py::foo1"]
     assert result["patched_root_selection"]["legacy_distance_zero_node_count"] == 2

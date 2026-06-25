@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_ROOT="${SCRIPT_SRC_ROOT}"
-source "${SRC_ROOT}/scripts/load_local_env.sh"
+source "${SRC_ROOT}/scripts/lib.sh"
 p2a_source_local_env "${SRC_ROOT}"
 source "${SRC_ROOT}/scripts/setup.sh"
 cd "${SRC_ROOT}"
@@ -34,10 +34,10 @@ Common overrides:
   P2A_THIRD_PARTY_EXPERIMENT_ID=third-party-smoke
 
 Outputs:
-  $DATA/third_party/<dataset>/<model>/rollouts.jsonl
-  $DATA/third_party/<dataset>/<model>/summary.json
-  $DATA/third_party/<dataset>/<model>/details.jsonl
-  $DATA/third_party/<dataset>/<model>/report.md
+  data/third_party/<dataset>/<model>/rollouts.jsonl
+  data/third_party/<dataset>/<model>/summary.json
+  data/third_party/<dataset>/<model>/details.jsonl
+  data/third_party/<dataset>/<model>/report.md
   data/evals/traces.sqlite (unless P2A_THIRD_PARTY_DB=0)
 
 Batch outputs:
@@ -91,7 +91,8 @@ P2A_THIRD_PARTY_BONUS_N_PARALLEL="${P2A_THIRD_PARTY_BONUS_N_PARALLEL:-4}"
 P2A_THIRD_PARTY_BONUS_LIMIT="${P2A_THIRD_PARTY_BONUS_LIMIT:-${P2A_THIRD_PARTY_LIMIT}}"
 P2A_THIRD_PARTY_BONUS_OFFSET="${P2A_THIRD_PARTY_BONUS_OFFSET:-${P2A_THIRD_PARTY_OFFSET}}"
 P2A_THIRD_PARTY_RUN_TIMEOUT="${P2A_THIRD_PARTY_RUN_TIMEOUT:-15m}"
-P2A_THIRD_PARTY_DB="${P2A_THIRD_PARTY_DB:-data/evals/traces.sqlite}"
+ARTIFACTS_DIR="$(project_artifacts_dir)"
+P2A_THIRD_PARTY_DB="${P2A_THIRD_PARTY_DB:-${ARTIFACTS_DIR}/evals/traces.sqlite}"
 
 p2a_setup_select_dataset "${THIRD_PARTY_DATASET}" "${THIRD_PARTY_DATA_FILE:-}"
 
@@ -106,8 +107,8 @@ DATA_FILE="${P2A_SETUP_DATA_FILE}"
 MODEL_SLUG="${P2A_THIRD_PARTY_MODEL:-deepseek-v4-flash}"
 MODEL_SLUG="${MODEL_SLUG//\//_}"
 MODEL_SLUG="${MODEL_SLUG//:/_}"
-RUN_DIR="${P2A_THIRD_PARTY_RUN_DIR:-${DATA}/third_party/${DATASET_SLUG}/${MODEL_SLUG}}"
-BONUS_MAP_DIR="${P2A_THIRD_PARTY_BONUS_MAP_DIR:-${RUN_DIR}/bonus_maps}"
+RUN_DIR="${P2A_THIRD_PARTY_RUN_DIR:-${ARTIFACTS_DIR}/third_party/${DATASET_SLUG}/${MODEL_SLUG}}"
+BONUS_MAP_DIR="${P2A_THIRD_PARTY_BONUS_MAP_DIR:-${ARTIFACTS_DIR}/bonus_maps/${DATASET_SLUG}}"
 ROLLOUT_OUT="${P2A_THIRD_PARTY_OUT:-${RUN_DIR}/rollouts.jsonl}"
 SUMMARY_OUT="${P2A_THIRD_PARTY_SUMMARY_OUT:-${RUN_DIR}/summary.json}"
 DETAILS_OUT="${P2A_THIRD_PARTY_DETAILS_OUT:-${RUN_DIR}/details.jsonl}"

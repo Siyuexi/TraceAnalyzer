@@ -3,7 +3,7 @@ P2A Trainer — subclasses verl's FullyAsyncTrainer to inject advantage reshapin
 
 After verl's compute_advantage() produces uniform A_seq per trajectory,
 this trainer modifies advantages per-span based on whether the agent's
-read actions intersect the precomputed bonus map call graph.
+read actions intersect the precomputed Graph.
 
 Integration point: override _fit_compute_advantage() — no verl fork needed.
 """
@@ -17,7 +17,7 @@ import torch
 from p2a.core import (
     BonusMapStore,
     compute_p2a_multiplier,
-    match_reads_to_callgraph,
+    match_reads_to_graph,
     parse_read_actions,
     parse_read_actions_from_tool_calls,
     reads_from_step_trace,
@@ -38,7 +38,7 @@ def apply_p2a_reshape(
     1. Look up the instance's bonus map
     2. Decode the response tokens to text
     3. Parse read actions from the text
-    4. Match reads against call graph nodes to get min distance
+    4. Match reads against Graph nodes to get min distance
     5. Compute multiplier m(d)^sign(A)
     6. Multiply the advantage tensor for this trajectory
 
@@ -123,7 +123,7 @@ def apply_p2a_reshape(
         if not reads:
             continue
 
-        distance = match_reads_to_callgraph(reads, bonus_map)
+        distance = match_reads_to_graph(reads, bonus_map)
         if distance < 0:
             continue
 
@@ -251,7 +251,7 @@ def _reshape_step_spans(
         if not reads:
             continue
 
-        distance = match_reads_to_callgraph(reads, bonus_map)
+        distance = match_reads_to_graph(reads, bonus_map)
         if distance < 0:
             continue
 
@@ -309,7 +309,7 @@ def _reshape_purpose_blocks(
         reads = []
         for trace in traces:
             reads.extend(reads_from_step_trace(trace, tracking_mode=tracking_mode))
-        distance = match_reads_to_callgraph(reads, bonus_map)
+        distance = match_reads_to_graph(reads, bonus_map)
         if distance < 0:
             stats["n_wasted_blocks"] += 1
             continue

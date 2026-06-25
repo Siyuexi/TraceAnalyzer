@@ -12,6 +12,20 @@ is on `main`.
 - `scripts/` - local launch helpers for preparing data/config and running Uni-Agent baseline checks.
 - `UNI_AGENT_MIGRATION.md` - current migration notes and tomorrow's baseline commands.
 
+## Asset and artifact paths
+
+- Shared datasets live outside this checkout under `../../datasets` by default.
+  Generated P2A parquets use `DATA`, conventionally `../../datasets/p2a`.
+- Shared model checkpoints live outside this checkout under `../../models` by
+  default. Use `MODEL_PATH`, `MODEL`, or `P2A_MODELS_DIR` to override.
+- Project artifacts live inside this checkout under `data/` by default. This
+  includes bonus maps, validation details, SQLite eval caches, rollout dumps,
+  analysis reports, and dashboard snapshots. Use `P2A_ARTIFACTS_DIR` only when
+  the whole artifact root must move.
+- Do not put public/reusable datasets or model checkpoints under `src/data`.
+  Do not put TraceAnalyzer-specific run artifacts under `../../datasets` or
+  `../../models` by default.
+
 ## Research concept docs
 
 - The root `proposal.md` is the proposal source of truth, root
@@ -28,6 +42,56 @@ is on `main`.
   semantics, experiment definitions, or public terminology, update root
   `proposal.md`, `proposal.html`, and `report/proposal.html` in the same unit.
 
+## Semantic consistency rules
+
+- Do not let dashboard-only terminology drift from P2A functionality. Trace
+  labels, KPI names, legend text, reports, and README explanations must use the
+  same semantics as `p2a/core.py`, `p2a/eval_fault_localization.py`, and
+  `p2a/dashboard_adapter.py`.
+- Use Graph / Path / Trace terminology consistently. **Graph** means the real
+  dependency graph captured from instrumentation/failing-test execution.
+  **Path** means the issue symptom-to-root-cause subgraph/path. **Trace** means
+  the model/agent execution trajectory. Do not use "Trace" for the captured
+  dependency graph in user-facing labels or research text.
+- Treat `call_graph_*`, `chain_*`, `dynamic_traceable_*`, and historical
+  instrumentation filenames as legacy storage/API vocabulary. New helpers,
+  variables, comments, UI labels, README/proposal text, and issue descriptions
+  should use Graph, Path, and Trace directly; when old keys are required for
+  backward compatibility, isolate them behind explicit alias/normalization
+  helpers and label them as legacy.
+- Use Graph node roles consistently. Only `test_harness` is non-rewardable.
+  `test_adapter` is the rewardable non-test frame before the selected issue
+  symptom anchor; legacy `pre_symptom` is only an artifact alias for
+  `test_adapter`. `fix_adapter` is a rewardable golden-patch-modified callable
+  upstream of the terminal patched root cause. `root_cause` is reserved for
+  terminal patched callables/components. The training ground-truth anchor is
+  the first non-test node after the test harness; the issue symptom anchor is a
+  diagnostic/visual Path anchor, not the reward boundary.
+- If a dashboard feature depends on read/write/error/root-cause semantics, add
+  or reuse the corresponding parser/scorer fields in P2A source first, then
+  render those fields in the frontend. Avoid frontend-only inference for
+  metrics or trace status unless it is a compatibility fallback for old
+  artifacts.
+- Treat the SQLite eval cache as a raw capture and run-status store by default.
+  Dashboard metrics and trace pattern states must be computed from raw rollout
+  content plus bonus maps in dashboard/scorer code, not trusted from stale DB
+  score fields. New collection paths should store basic facts such as resolved
+  state, token usage, runtime, artifacts, and raw rollout content, but should
+  not populate localization score columns, `metrics_json.detail`, or pattern
+  flags. If dashboard-computed scores are persisted later, the write path is
+  one-way dashboard -> DB and the default read path still recomputes.
+- Treat node source code as bonus-map data. Dashboard Node Source must read full
+  callable source from the inferred or explicit P2A bonus-map directory; DB
+  `source_preview` fields are only compatibility fallbacks for old artifacts.
+- Execution failure must be inferred from structured tool/runtime signals such
+  as `status`, `error`, nonzero exit code, or traceback/command-failure output,
+  not from broad keyword scans over source code or successful read observations.
+- Keep the unified dashboard compatible with local training, local inference,
+  and third-party API inference artifacts. New trace fields should degrade
+  cleanly when older artifacts do not contain them.
+- When public-facing semantics change, update the README and, where research
+  claims are affected, keep the proposal/report documents synchronized.
+
 ## ARL is a sandbox, not a VRC remote
 
 ARL is the containerized compute backend. The `arl-env` SDK connects directly to the
@@ -37,6 +101,16 @@ and it is reachable directly from CPU hosts. This has nothing to do with VRC's `
 facility: `vrc remote` is the debug proxy that targets the **GPU server** when the local
 host has no GPU. An ARL gateway being reachable or not is independent of `vrc remote
 health` — do not infer one from the other.
+
+## Dashboard service deployment
+
+- This environment is a server. Do not present dashboard preview URLs bound to
+  `127.0.0.1` or `localhost` as user-accessible links.
+- For user-accessible dashboard services, bind the server to `0.0.0.0` and give
+  the user the server public IP plus port, for example
+  `http://<server-public-ip>:8770`.
+- When the user says they will manage the service themselves, provide the exact
+  start/stop commands only; do not start or keep the service running for them.
 
 ## Python Rules
 
@@ -74,3 +148,7 @@ https://uni-agent.readthedocs.io/en/latest/index.html
 - `src/` is a git repo with a GitHub remote (`origin` = `git@github.com:Siyuexi/TraceAnalyzer.git`). Open PRs against `main`; the controller merges. Never self-merge.
 - `uni-agent/` is a nested submodule pointing at the pristine fork mirror `git@github.com:Siyuexi/uni-agent.git`.
 - Do not modify `uni-agent/`; put P2A behavior in `p2a/`, `env/`, `scripts/`, or `config/`.
+- Treat GitHub read access, git-over-SSH push access, and authenticated
+  issue/PR comment writes as separate capabilities. Do not infer a valid `gh`
+  token from successful GitHub reads or `git push`; before claiming GitHub
+  synchronization is blocked, identify the exact operation and access path.

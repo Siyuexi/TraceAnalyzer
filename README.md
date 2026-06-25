@@ -3,10 +3,11 @@
 Program-Analysis-based Process Advantage (P2A) for SWE agentic RL, implemented on
 the **Uni-Agent** training stack with our **ARL** cluster as the sandbox backend.
 P2A reshapes the per-step RL advantage using a precomputed **bonus map**: a
-runtime fault-propagation graph from the issue symptom to the terminal patched
-root cause, with a test-filtered F2P→root-cause fallback when no issue symptom
-anchor can be matched. Steps whose agent actions land on this path get a larger
-advantage.
+captured **Graph** from failing-test execution, a rewardable non-test Graph
+slice from the first post-test node to the terminal patched root cause, and a
+diagnostic **Path** from the issue symptom to that root cause when a symptom
+anchor can be matched. Steps whose agent actions land on rewardable Graph nodes
+get a larger advantage.
 
 Everything is **self-contained**: data comes from HuggingFace, images from the
 pair-diag mirror of the original R2E images. There is **no dependency on the old
@@ -14,13 +15,19 @@ pair-diag mirror of the original R2E images. There is **no dependency on the old
 
 ## Bonus-map anchors
 
-Dynamic bonus maps keep observed call-graph nodes for diagnostics, but only the
-bonus path is rewardable. Target semantics are:
-`test_harness -> pre_symptom -> symptom -> intermediate -> root_cause`.
-`test_harness` and `pre_symptom` are excluded from `hop_max` and read matching;
-`symptom`, `intermediate`, and `root_cause` are rewardable. If no high-confidence
-issue symptom anchor matches the trace, the fallback excludes only test harness
-frames and treats all remaining F2P→terminal-root frames as rewardable.
+Dynamic bonus maps keep observed Graph nodes, distances, roles, rewardability,
+and callable source as bonus-map data. Target semantics are:
+`test_harness -> test_adapter -> symptom -> intermediate/fix_adapter -> root_cause`.
+Only `test_harness` is excluded from `hop_max`, source capture, and read
+matching; every non-test node is rewardable. `test_adapter` names rewardable
+non-test frames before the selected issue symptom anchor;
+`fix_adapter` names golden-patch-modified callables that sit upstream of the
+terminal patched root cause. Legacy artifacts may still use `pre_symptom` as an
+alias for `test_adapter`. The training ground-truth anchor is the first
+non-test node after the test harness, not the issue symptom. The issue symptom
+anchor only defines the diagnostic Path and Path metrics; if no high-confidence
+issue symptom anchor matches the captured Graph, Path metrics are unavailable
+but Graph reward remains defined over all non-test F2P→terminal-root frames.
 
 > **ARL is the sandbox, not a "remote".** The `arl-env` SDK connects directly to the
 > ARL Gateway (`ARL_GATEWAY_URL`) to boot a per-instance container sandbox where tests
@@ -29,17 +36,19 @@ frames and treats all remaining F2P→terminal-root frames as rewardable.
 > the **GPU server** for command debugging — ARL gateway reachability is independent of
 > `vrc remote`.
 
-Default HuggingFace assets are shared across sibling projects:
+Default HuggingFace datasets and models are shared across sibling projects.
+TraceAnalyzer-generated artifacts stay inside this checkout under `data/`.
 
 | Asset | Default location from `src/` | Override |
 |---|---|---|
 | Models | `../../models/<repo-name>` | `MODEL_PATH` / `P2A_MODELS_DIR` / `P2A_MODEL_REPO` |
-| Datasets | `../../datasets/<repo-name>/<split>` | `P2A_DATASETS_DIR` |
-| Generated P2A data | `../../datasets/p2a` | `DATA` / `P2A_SHARED_ROOT` |
+| Datasets and generated parquets | `../../datasets`, with P2A parquets in `../../datasets/p2a` | `P2A_DATASETS_DIR` / `DATA` / `P2A_SHARED_ROOT` |
+| Project artifacts | `data/` | `P2A_ARTIFACTS_DIR` |
 
-If a dataset/model is already present there, scripts read it directly. If it is
-missing, the script downloads it from HuggingFace and saves it under that shared
-location.
+If a dataset/model is already present in the shared location, scripts read it
+directly. If it is missing, the script downloads it from HuggingFace and saves
+it there. Bonus maps, SQLite caches, rollout dumps, analysis reports, eval
+details, and dashboard snapshots are project artifacts and default to `data/`.
 
 ## Current capabilities
 
@@ -70,7 +79,7 @@ src/
     uni_agent_arl.sh          # prepare/data/smoke/debug launcher (ARL config)
     setup.sh                  # idempotent data/dependency/eval-map setup helpers
     ray_setup.sh              # bring up Ray and smoke-check Ray Jobs
-    stage_local_runtime.sh    # copy checkout/venv to node-local runtime storage
+    lib.sh                    # sourced helpers: HF/path resolution, local-env, node-local staging
     main.sh                   # one-shot baseline launcher
     main_3rd.sh               # one-shot third-party OpenAI-compatible rollout baseline
     train_p2a.sh              # training launcher (baseline OR P2A)
@@ -79,14 +88,14 @@ src/
     check_deps_cpu.sh         # CPU dependency/import smoke check
     check_uni_agent_runtime.py # GPU/runtime import smoke check
   p2a/
-    core.py                   # bonus-map load + read->callgraph match + m(d)=m_max^(1-d) multiplier
+    core.py                   # bonus-map load + read->Graph match + m(d)=m_max^(1-d) multiplier
     trainer.py                # apply_p2a_reshape: capture agent reads -> reshape advantage
     main.py                   # training entry; P2AFullyAsyncTrainer (vanilla if P2A_BONUS_MAP_DIR unset)
     rollouter.py              # validation rollouter wrapper for live graph diagnostics
     validation_metrics.py     # aggregate val-p2a/* localization metrics
     third_party_eval.py       # OpenAI-compatible external model rollout harness
     test_setup.py             # startup_fixup_command(repo) — loads config/startup_fixups.json
-    trace.py                  # instrumentation + call-graph build (bonus-map precompute)
+    trace.py                  # Graph-capture instrumentation + legacy call_graph artifact build
     eval_fault_localization.py # offline eval rollout read->fault-localization metrics
     hf_assets.py              # shared HuggingFace model/dataset path helpers
     runtime_env.py            # Ray runtime-env path normalization helpers
@@ -188,16 +197,23 @@ R2E-Gym eval rows, while `SWE-bench_Verified/` carries Princeton difficulty labe
 ```bash
 PYTHONPATH=.:uni-agent:uni-agent/verl P2A_DEPLOYMENT=arl \
   uv run python p2a/precompute/precompute_bonus_maps.py \
-    $DATA/r2e_gym_subset_p2a.parquet --mode dynamic --n_parallel 64
+    $DATA/r2e_gym_subset_p2a.parquet \
+    --output_dir data/bonus_maps/r2e-gym-subset \
+    --mode dynamic --n_parallel 64
 ```
 
-Training maps default to `../../p2a/bonus_maps`; set `P2A_BONUS_MAP_DIR` to use a
-different read/write directory.
+The setup wrapper also writes maps to `data/bonus_maps/<dataset>` by default:
 
-Each generated map includes `call_graph_nodes`, `call_graph_edges`, and a
-per-node `source` snippet when the sandbox file can be read. The edge list is
-diagnostic schema for topology views; training still reshapes from node
-distances.
+```bash
+bash scripts/setup.sh maps r2e-gym-subset
+```
+
+Set `P2A_BONUS_MAP_DIR` to the matching directory when enabling P2A training.
+
+Each generated map includes Graph nodes and edges under the legacy artifact keys
+`call_graph_nodes` and `call_graph_edges`, plus a per-node `source` snippet when
+the sandbox file can be read. The edge list is diagnostic schema for topology
+views; training still reshapes from node distances.
 
 Skip this step for a pure baseline run. P2A training reads these maps through
 `P2A_BONUS_MAP_DIR`.
@@ -205,12 +221,12 @@ Skip this step for a pure baseline run. P2A training reads these maps through
 ### Step 4. Precompute eval maps for validation graph metrics
 
 ```bash
-TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
-  P2A_EVAL_BONUS_MAP_DIR=$DATA/eval_bonus_maps bash scripts/precompute_eval_bonus_maps.sh
+TEST_FILE=$DATA/swe_bench_verified_hard.parquet bash scripts/precompute_eval_bonus_maps.sh
 ```
 
-Eval maps are diagnostic only. They are read during validation logging but never
-used by the P2A training reshape.
+Eval maps default to `data/bonus_maps/swebench-hard`. They are diagnostic only:
+validation logging reads them, but the training reshape should use the training
+split's `data/bonus_maps/r2e-gym-subset` directory.
 
 ### Step 5. Configure logging and GPU layout
 
@@ -324,8 +340,8 @@ Baseline:
 TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet \
   TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
   MODEL_PATH=$MODEL \
-  P2A_EVAL_BONUS_MAP_DIR=$DATA/eval_bonus_maps \
-  P2A_EVAL_DETAILS_DIR=$DATA/eval_details \
+  P2A_EVAL_BONUS_MAP_DIR=data/bonus_maps/swebench-hard \
+  P2A_EVAL_DETAILS_DIR=data/eval_details \
   bash scripts/train_p2a.sh
 ```
 
@@ -335,9 +351,9 @@ P2A:
 TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet \
   TEST_FILE=$DATA/swe_bench_verified_hard.parquet \
   MODEL_PATH=$MODEL \
-  P2A_EVAL_BONUS_MAP_DIR=$DATA/eval_bonus_maps \
-  P2A_EVAL_DETAILS_DIR=$DATA/eval_details \
-  P2A_BONUS_MAP_DIR=../../p2a/bonus_maps \
+  P2A_EVAL_BONUS_MAP_DIR=data/bonus_maps/swebench-hard \
+  P2A_EVAL_DETAILS_DIR=data/eval_details \
+  P2A_BONUS_MAP_DIR=data/bonus_maps/r2e-gym-subset \
   P2A_M_MAX=3.0 \
   P2A_CREDIT_GRANULARITY=step \
   bash scripts/train_p2a.sh
@@ -345,7 +361,7 @@ TRAIN_FILE=$DATA/r2e_gym_subset_p2a.train.parquet \
 
 `P2A_CREDIT_GRANULARITY=step` is the default and preserves per-step reshape
 behavior. Set `P2A_CREDIT_GRANULARITY=block` to group adjacent same-purpose
-steps and apply credit to read blocks that touch the call graph.
+steps and apply credit to read blocks that touch the Graph.
 
 ### Step 8. Optional offline analysis
 
@@ -353,33 +369,117 @@ For an already-dumped rollout file or dump directory:
 
 ```bash
 uv run python -m p2a.eval_fault_localization $ROLLOUT_JSONL \
-  --bonus-map-dir $DATA/eval_bonus_maps \
-  --summary-out $DATA/eval_faultloc_summary.json \
-  --details-out $DATA/eval_faultloc_details.jsonl
+  --bonus-map-dir data/bonus_maps/swebench-hard \
+  --summary-out data/eval_faultloc_summary.json \
+  --details-out data/eval_faultloc_details.jsonl
 ```
 
-To build the static trace dashboard with summary cards, per-record drill-down,
-purpose-block/order/miracle diagnostics, and an expandable graph topology panel:
+To open the unified HTML dashboard over an already-dumped rollout file or dump
+directory:
 
 ```bash
 uv run python scripts/p2a_dashboard.py $ROLLOUT_JSONL \
-  --bonus-map-dir $DATA/eval_bonus_maps \
-  --out-dir $DATA/p2a_dashboard
+  --bonus-map-dir data/bonus_maps/swebench-hard \
+  --port 8766
 ```
 
-Add `--watch --interval 30` when `$ROLLOUT_JSONL` is a live run directory and
-you want the same artifacts rebuilt while training writes new dumps.
+To write a portable static snapshot of the same HTML dashboard:
+
+```bash
+uv run python scripts/p2a_dashboard.py $ROLLOUT_JSONL \
+  --bonus-map-dir data/bonus_maps/swebench-hard \
+  --out-dir data/p2a_dashboard
+```
+
+The dashboard can also read scored validation details, Uni-Agent run directories,
+and the third-party eval SQLite cache:
+
+```bash
+uv run python scripts/p2a_dashboard.py \
+  --details data/eval_details \
+  --bonus-map-dir data/bonus_maps/swebench-hard
+
+uv run python scripts/p2a_dashboard.py \
+  --log-dir /tmp/swebench_qwen3_coder \
+  --bonus-map-dir data/bonus_maps/swebench-hard
+
+uv run python scripts/p2a_dashboard.py \
+  --db data/evals/traces.sqlite \
+  --experiment-id public-swebench-hard-demo \
+  --dataset swebench-hard \
+  --bonus-map-dir data/bonus_maps/swebench-hard
+```
+
+The Overview tab is the dataset and eval-cell registry. Dataset-level
+distributions count unique instances in a dataset/split, so five model runs over
+the 45-instance `swebench-hard` split still show a distribution population of 45,
+not 225 trajectories. Eval cells are the model/checkpoint/API-run comparison
+unit: source kind (`local_training`, `local_inference`, or `third_party_api`),
+experiment id, provider, dataset, and model label. Select a dataset first, then
+select an eval cell/model before inspecting trajectories.
+
+The Metrics tab is the model-level analysis surface for the selected dataset.
+It renders one comparison table grouped by semantics: Graph metrics
+(`Graph P.`, `Graph R.`, `Graph F1`) score agent reads against the real
+dependency graph captured by instrumentation/failing-test execution; Outcome
+metrics report task success and symptom/root-cause hits; Path metrics score the
+issue symptom-to-root-cause subgraph/path with `Path P.`, `Path R.`, and
+`Path F1`; Pattern, purpose-block, and efficiency/cost
+metrics come after them. Cache-write metrics are hidden
+until populated. In user-facing terminology, Graph means the captured
+dependency graph, Path means the symptom-to-root-cause subgraph/path, and Trace
+means the model/agent execution trajectory.
+The SQLite eval cache is treated as raw capture plus run status by default:
+stored rollout JSON, messages, trajectories, issue descriptions, golden
+patches, and token/runtime data are read from DB, while localization metrics and
+trace pattern states are recomputed by the dashboard from raw rollouts and the
+matching bonus maps. If `--bonus-map-dir` is omitted, the dashboard tries
+`data/bonus_maps/<dataset>` under the artifact root and uses it only when it
+contains matching instance maps. Persisted DB score fields are compatibility
+fallbacks, not the default semantic source of truth; new collection paths should
+not write localization score columns, `metrics_json.detail`, or trace pattern
+flags. If old DB rows do not carry issue descriptions or golden patches, the
+dashboard fills them from `--data-file` or the standard local dataset parquet for
+the selected dataset. Node Source is bonus-map data: the dashboard reads full
+callable source from the explicit or inferred P2A bonus-map directory, and DB
+`source_preview` fields are only stale artifact fallbacks.
+The Logs tab explains artifact/log-producing executions and only
+mixes runs into a selected eval cell when they carry explicit eval-cell links;
+unlinked logs are shown separately. The Traces tab is the micro-analysis
+surface: narrow instance list on the left, graph plus purpose-block/step
+timeline in the middle, and a wide right panel with parsed tool/action details,
+separate reasoning/chat text, collapsible raw action/observation payloads, and
+inline edit diffs when write actions provide old/new text. Step colors and trace
+markers come from P2A parser/scorer fields: reads, writes, execution errors,
+root-cause edits, symptom/root-cause hits, and Path hits are computed
+in `p2a/core.py`, `p2a/eval_fault_localization.py`, and
+`p2a/dashboard_adapter.py`, then rendered by the frontend. Execution-failure
+marks use structured tool status, nonzero exit codes, explicit error fields, or
+traceback/command-failure output; source code that merely contains words such as
+`Error` is not a failed step. Miracle means root-cause access before the
+symptom/anchor evidence, or before intermediate dependency evidence; dashboard
+miracle/reverse rates are shares of the currently filtered direct/standard
+traces, matching the trace-list pattern markers. If one read step observes the
+symptom, intermediate nodes, and root cause together, that simultaneous
+observation is not a miracle. Step colors split into equal role segments when a
+single step hits multiple map roles; a callable that is both symptom and root
+cause uses a diagonal split so it is visually distinct from a multi-node step
+hit. Node Source uses the full captured callable source when the bonus map
+provides it. The
+global case filters keep Overview as the full dataset registry while restricting
+Metrics and Traces to the checked `standard`, `direct`, or `other` case types.
 
 The offline `summary-out` and `details-out` files are post-hoc artifacts for
 inspecting dumped rollouts. Training and validation do not read them; live
-validation dashboards use `P2A_EVAL_BONUS_MAP_DIR`.
+validation scoring uses `P2A_EVAL_BONUS_MAP_DIR`, and the HTML dashboard reads
+`P2A_EVAL_DETAILS_DIR` when per-case validation details are enabled.
 
 ### Step 9. Optional third-party model rollout baseline
 
 For a main-style smoke/default run, set the API key and run the wrapper. It
 defaults to `swebench-hard`, builds the parquet if missing, precomputes matching
-dependency/call-graph maps, and writes rollout + fault-localization artifacts
-under `$DATA/third_party/<dataset>/<model>/`:
+Graph/Path bonus maps, and writes rollout + fault-localization artifacts
+under `data/third_party/<dataset>/<model>/`:
 
 ```bash
 export P2A_THIRD_PARTY_API_KEY=...
@@ -404,14 +504,24 @@ tokens, and model lists stay ignored under `.secrets/internal_api_eval.py` (or
 the path set by `provider.api_module` / `P2A_INTERNAL_API_MODULE`). If that
 private module is missing, batch mode fails before launching cells.
 Batch results are upserted into the unified SQLite cache configured by
-`storage.db` (default `data/evals/traces.sqlite`, resolved under the shared
-`$DATA` root) and can be watched live:
+`storage.db` (default `data/evals/traces.sqlite`, resolved under
+`P2A_ARTIFACTS_DIR`, which defaults to this checkout's `data/`) and can be
+watched live in the unified HTML dashboard:
 
 ```bash
-uv run python scripts/watch_third_party_batch.py \
-  --db $DATA/evals/traces.sqlite \
-  --experiment-id public-swebench-hard-demo
+uv run python scripts/p2a_dashboard.py \
+  --db data/evals/traces.sqlite \
+  --experiment-id public-swebench-hard-demo \
+  --dataset swebench-hard \
+  --bonus-map-dir data/bonus_maps/swebench-hard
 ```
+
+The old terminal/TUI batch watcher has been folded into this HTML dashboard.
+The Metrics tab keeps per-model progress and efficiency/cost/cache visibility,
+but the primary diagnostic metrics are the shared Python scorer outputs:
+graph P./R./F1, path P./R./F1,
+anchor/root hit rates, order/reverse-order,
+miracle, purpose-block achieved/wasted/loop rates, and Path pattern flags.
 
 If the smoke phase records only system errors such as ARL gateway or interactive
 shell failures, batch mode stops before the full phase and reports the structured
@@ -435,13 +545,13 @@ export P2A_THIRD_PARTY_MODEL=deepseek-v4-flash
 timeout 15m bash scripts/third_party_eval.sh \
   --config config/third_party_eval.deepseek.example.yaml \
   --data $DATA/swe_bench_verified_hard.parquet \
-  --out $DATA/third_party/deepseek_v4_flash_rollouts.jsonl \
+  --out data/third_party/deepseek_v4_flash_rollouts.jsonl \
   --limit 1 \
   --max-turns 3 \
   --max-tokens 1024 \
   --tool-install-timeout 300 \
   --skip-tool-install str_replace_editor \
-  --bonus-map-dir $DATA/eval_bonus_maps
+  --bonus-map-dir data/bonus_maps/swebench-hard
 ```
 
 The harness uses Uni-Agent's `OpenAICompatibleChatModel`, the local ARL
@@ -461,12 +571,13 @@ These are knobs you set; the repo does not pin them:
 | What | Where |
 |---|---|
 | Model | `MODEL_PATH` env var; default is `../../models/Qwen3-Coder-30B-A3B-Instruct` from `Qwen/Qwen3-Coder-30B-A3B-Instruct` |
-| Shared generated data root | `DATA`, conventionally `../../datasets/p2a` |
+| Shared dataset/parquet root | `DATA`, conventionally `../../datasets/p2a` |
+| Project artifact root | `P2A_ARTIFACTS_DIR`, default `data/`; compatibility alias `P2A_PROJECT_DATA_DIR` |
 | Train / val data | `TRAIN_FILE` / `TEST_FILE` env vars (point at the parquets built above) |
 | Ray job target | `RAY_API_SERVER_ADDRESS` (Ray Jobs endpoint, usually `http://<ray-head-ip>:8265`) |
 | GPU / CPU layout | `NNODES_TRAIN` / `NNODES_ROLLOUT` / `NGPUS_PER_NODE` (32-GPU 4×8 starter: `2 / 2 / 8`); `NUM_CPUS` is the Ray CPU resource advertised per node, default 64 |
-| Bonus maps (read + write) | `P2A_BONUS_MAP_DIR` — one dir for both precompute output and training input; default `../../p2a/bonus_maps`. Training treats it as the P2A on/off switch (unset = baseline). `P2A_M_MAX` sets strength. `P2A_CREDIT_GRANULARITY=step|block` selects per-step or purpose-block credit. |
-| Eval fault-localization diagnostics | `P2A_EVAL_BONUS_MAP_DIR`, `P2A_EVAL_NEAR_THRESHOLD`, `P2A_EVAL_DETAILS_DIR`, `P2A_EVAL_BONUS_N_PARALLEL`, `P2A_EVAL_BONUS_LIMIT`, `P2A_EVAL_BONUS_OFFSET` |
+| Bonus maps (read + write) | `P2A_BONUS_MAP_DIR`; setup/eval/third-party helpers default to `data/bonus_maps/<dataset>`. Training treats it as the P2A on/off switch (unset = baseline). `P2A_M_MAX` sets strength. `P2A_CREDIT_GRANULARITY=step|block` selects per-step or purpose-block credit. |
+| Eval fault-localization diagnostics | `P2A_EVAL_BONUS_MAP_DIR`, `P2A_EVAL_NEAR_THRESHOLD`, `P2A_EVAL_DETAILS_DIR`, `P2A_EVAL_BONUS_N_PARALLEL`, `P2A_EVAL_BONUS_LIMIT`, `P2A_EVAL_BONUS_OFFSET`; defaults belong under `data/` |
 | Third-party provider baseline | `config/third_party_eval.deepseek.example.yaml` plus `P2A_THIRD_PARTY_BASE_URL`, `P2A_THIRD_PARTY_API_KEY`, `P2A_THIRD_PARTY_MODEL`; API keys stay in env vars, not git |
 | Third-party run scope | `THIRD_PARTY_DATASET`, `THIRD_PARTY_DATA_FILE`, `P2A_THIRD_PARTY_LIMIT`, `P2A_THIRD_PARTY_N_PARALLEL`, `P2A_THIRD_PARTY_RUN_TIMEOUT`, `P2A_THIRD_PARTY_BONUS_*` |
 | ARL gateway | `ARL_GATEWAY_URL` |
@@ -479,9 +590,10 @@ config, put it under `config/`.
 ## Eval Fault-Localization Metrics
 
 `scripts/precompute_eval_bonus_maps.sh` reuses the same dynamic precompute path as
-training bonus maps, but points it at `TEST_FILE` / `EVAL_FILE`.  The resulting
-eval maps should stay out of `P2A_BONUS_MAP_DIR`; they are only a diagnostic
-reference for validation rollouts.
+training bonus maps, but points it at `TEST_FILE` / `EVAL_FILE`. The resulting
+maps live under the same artifact family (`data/bonus_maps/<dataset>`), but use
+a split-specific directory. During training, `P2A_BONUS_MAP_DIR` should point at
+the training split and `P2A_EVAL_BONUS_MAP_DIR` at the validation split.
 
 `p2a.eval_fault_localization` accepts rollout dumps in `.jsonl`, `.json`, or
 `.parquet` format.  It first reads `p2a_step_traces`, then structured
@@ -490,28 +602,42 @@ reference for validation rollouts.
 | Metric | Meaning |
 |---|---|
 | `bonus_map_coverage` | Fraction of rollout rows with a matching eval bonus map. |
-| `call_graph_coverage` | Fraction with a bonus map that contains call-graph nodes. |
+| `call_graph_coverage` | Fraction with a bonus map that contains Graph nodes; the metric name is a legacy storage/API key. |
 | `read_rate` | Fraction of rows where file-viewing actions were recovered. |
-| `graph_hit_rate_over_call_graphs` | Fraction whose reads hit any node in the eval call graph. |
+| `graph_hit_rate_over_call_graphs` | Fraction whose reads hit any node in the eval Graph; the suffix is legacy naming. |
 | `ground_truth_hit_rate_over_call_graphs` | Fraction whose reads hit a patched callable (`distance == 0`). |
 | `near_hit_rate_over_call_graphs` | Fraction whose best read distance is `<= --near-threshold` (default `0.5`). |
-| `avg_node_recall` / `avg_read_precision` / `avg_hit_f1` | Node-level hit recall, read precision, and F1 across scored rollouts. |
+| `avg_read_precision` / `avg_node_recall` / `avg_hit_f1` | Graph P., Graph R., and Graph F1 across scored rollouts. |
+| `avg_path_node_precision` / `avg_path_node_recall` / `avg_path_node_f1` | Dashboard Path P., Path R., and Path F1 over deduplicated Path/context node hits; legacy `avg_chain_*` aliases are kept for old artifacts. |
+| `path_node_recall` / `path_read_precision` | CLI summary aliases for Path node recall and read-level Path hit share; legacy `chain_*` aliases are kept for old artifacts. |
 | `avg_order_score` / `reverse_order_rate` | Kendall-style agreement between read order and movement from tests toward patched callables. |
 | `miracle_rate_over_gt_hits` | Fraction of ground-truth hits that jump directly to patched code before reading intermediate graph levels. |
 | `avg_block_order_score` / `block_miracle_rate_over_gt_hits` | Same order and miracle diagnostics after purpose-block segmentation. |
 | `block_achieve_rate` / `block_waste_rate` / `block_loop_rate` | Purpose-block outcomes, including repeated same-action loop blocks. |
-| `avg_block_efficiency_steps` | Average steps to first call-graph hit inside achieving read blocks. |
+| `avg_block_efficiency_steps` | Average steps to first Graph hit inside achieving read blocks. |
 | `achieving_block_step_share` / `wasted_block_step_share` / `loop_block_step_share` | Share of block-covered steps spent in each block outcome. |
-| `bad_pattern_trace_rate` / `error_spiral_rate` | Trace-level loop and repeated-error flags. |
+| `bad_pattern_trace_rate` / `error_spiral_rate` | Trace-level loop and repeated-error flags. Step-level execution errors are parsed from tool results, command status, and traceback/error text. |
 | `avg_min_distance_on_hits` | Lower is better; `0` means the model read the edited callable. |
 | `avg_best_positive_multiplier_on_hits` | The diagnostic P2A multiplier implied by the best read distance. |
 
-For live training dashboards, set `P2A_EVAL_BONUS_MAP_DIR` when launching
-`scripts/train_p2a.sh`. The local `P2AFullyAsyncRollouter` is the dashboard
-wrapper: it keeps the validation path otherwise unchanged, scores validation
-rollouts against those eval maps, and returns the same aggregate signals to the
-trainer logger at each validation step. For the hard split built by this repo,
-the W&B/console keys are:
+For live training analysis, set `P2A_EVAL_BONUS_MAP_DIR` and
+`P2A_EVAL_DETAILS_DIR` when launching `scripts/train_p2a.sh`. The local
+`P2AFullyAsyncRollouter` keeps the validation path otherwise unchanged, scores
+validation rollouts against those eval maps, writes per-case details when
+`P2A_EVAL_DETAILS_DIR` is set, and returns the same aggregate signals to the
+trainer logger at each validation step.
+
+Run the unified HTML dashboard against the details directory while training is
+running:
+
+```bash
+uv run python scripts/p2a_dashboard.py \
+  --details data/eval_details \
+  --bonus-map-dir data/bonus_maps/swebench-hard \
+  --port 8766
+```
+
+For the hard split built by this repo, the W&B/console keys are:
 
 ```
 val-p2a/swebench-hard/bonus_map_coverage
@@ -545,10 +671,10 @@ val-p2a/swebench-hard/avg_block_order_score
 val-p2a/swebench-hard/avg_block_efficiency_steps
 ```
 
-`P2A_EVAL_DETAILS_DIR` optionally writes per-case JSONL files named by validation
-step for debugging individual instances. Those files are an auxiliary dump; the
-dashboard metrics above are returned directly from validation and do not depend
-on `summary-out` / `details-out` from the offline CLI.
+`P2A_EVAL_DETAILS_DIR` writes per-case JSONL files named by validation step for
+debugging individual instances and for the unified HTML dashboard. The logger
+metrics above are still returned directly from validation and do not depend on
+`summary-out` / `details-out` from the offline CLI.
 
 Current SWE-bench Verified eval-map sanity check, after the targeted F2P,
 trace-capture, unittest-description F2P, zero-test runner, and F2P collection

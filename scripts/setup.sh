@@ -4,7 +4,7 @@
 if [[ -z "${SRC_ROOT:-}" ]]; then
   SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
-source "${SRC_ROOT}/scripts/shared_hf.sh"
+source "${SRC_ROOT}/scripts/lib.sh"
 
 p2a_setup_usage() {
   cat <<'EOF'
@@ -143,13 +143,14 @@ p2a_setup_sync_deps() {
 }
 
 p2a_setup_ensure_bonus_maps() {
-  local dataset custom_file output_dir mode n_parallel limit offset
+  local dataset custom_file output_dir mode n_parallel limit offset artifacts_dir
   dataset="${1:-swebench-hard}"
   custom_file="${2:-}"
   output_dir="${3:-}"
   p2a_setup_ensure_dataset "${dataset}" "${custom_file}"
 
-  output_dir="${output_dir:-${DATA}/eval_bonus_maps/${P2A_SETUP_DATASET_SLUG}}"
+  artifacts_dir="$(project_artifacts_dir)"
+  output_dir="${output_dir:-${artifacts_dir}/bonus_maps/${P2A_SETUP_DATASET_SLUG}}"
   mode="${P2A_SETUP_BONUS_MODE:-dynamic}"
   n_parallel="${P2A_SETUP_BONUS_N_PARALLEL:-16}"
   limit="${P2A_SETUP_BONUS_LIMIT:-}"
