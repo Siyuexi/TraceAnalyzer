@@ -72,7 +72,7 @@ src/
     uni_agent_arl.sh          # prepare/data/smoke/debug launcher (ARL config)
     setup.sh                  # idempotent data/dependency/eval-map setup helpers
     ray_setup.sh              # bring up Ray and smoke-check Ray Jobs
-    stage_local_runtime.sh    # copy checkout/venv to node-local runtime storage
+    lib.sh                    # sourced helpers: HF/path resolution, local-env, node-local staging
     main.sh                   # one-shot baseline launcher
     main_3rd.sh               # one-shot third-party OpenAI-compatible rollout baseline
     train_p2a.sh              # training launcher (baseline OR P2A)

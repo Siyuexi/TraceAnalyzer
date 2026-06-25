@@ -5,10 +5,9 @@ set -euo pipefail
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
 SRC_ROOT="${SCRIPT_SRC_ROOT}"
-source "${SRC_ROOT}/scripts/load_local_env.sh"
+source "${SRC_ROOT}/scripts/lib.sh"
 p2a_source_local_env "${SRC_ROOT}"
 source "${SRC_ROOT}/scripts/setup.sh"
-source "${SRC_ROOT}/scripts/stage_local_runtime.sh"
 cd "${SRC_ROOT}"
 
 unset PYTHONPATH PYTHONHOME

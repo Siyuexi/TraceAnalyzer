@@ -4,7 +4,7 @@
 if [[ -z "${SRC_ROOT:-}" ]]; then
   SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
-source "${SRC_ROOT}/scripts/shared_hf.sh"
+source "${SRC_ROOT}/scripts/lib.sh"
 
 p2a_setup_usage() {
   cat <<'EOF'

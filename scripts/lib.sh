@@ -1,5 +1,153 @@
 #!/usr/bin/env bash
-# Stage the shared checkout and Python runtime onto node-local disk.
+# Shared shell helpers for P2A launchers and the setup CLI: HuggingFace path and
+# model resolution, machine-local env/secret loading, and node-local runtime
+# staging. Source this file; do not execute it.
+
+[[ -n "${_P2A_LIB_LOADED:-}" ]] && return 0
+_P2A_LIB_LOADED=1
+
+if [[ -z "${SRC_ROOT:-}" ]]; then
+  SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fi
+
+# ---------------------------------------------------------------------------
+# HuggingFace / shared-path resolution
+# ---------------------------------------------------------------------------
+
+shared_src_root() {
+  if [[ -n "${P2A_SHARED_SRC_ROOT:-}" ]]; then
+    cd "${P2A_SHARED_SRC_ROOT}" && pwd
+  else
+    cd "${SRC_ROOT}" && pwd
+  fi
+}
+
+resolve_shared_path() {
+  local path="$1"
+  case "${path}" in
+    /*) printf '%s\n' "${path}" ;;
+    *)
+      local src
+      src="$(shared_src_root)"
+      printf '%s/%s\n' "${src}" "${path}"
+      ;;
+  esac
+}
+
+shared_hf_root() {
+  if [[ -n "${P2A_SHARED_ROOT:-}" ]]; then
+    local root
+    root="$(resolve_shared_path "${P2A_SHARED_ROOT}")"
+    mkdir -p "${root}"
+    cd "${root}" && pwd
+  else
+    local src
+    src="$(shared_src_root)"
+    cd "${src}/../.." && pwd
+  fi
+}
+
+shared_models_dir() {
+  if [[ -n "${P2A_MODELS_DIR:-}" ]]; then
+    local models_dir
+    models_dir="$(resolve_shared_path "${P2A_MODELS_DIR}")"
+    mkdir -p "${models_dir}"
+    cd "${models_dir}" && pwd
+  else
+    local root
+    root="$(shared_hf_root)"
+    mkdir -p "${root}/models"
+    cd "${root}/models" && pwd
+  fi
+}
+
+project_artifacts_dir() {
+  if [[ -n "${P2A_ARTIFACTS_DIR:-}" || -n "${P2A_PROJECT_DATA_DIR:-}" ]]; then
+    local project_data
+    project_data="$(resolve_shared_path "${P2A_ARTIFACTS_DIR:-${P2A_PROJECT_DATA_DIR}}")"
+    mkdir -p "${project_data}"
+    cd "${project_data}" && pwd
+  else
+    local src
+    src="$(shared_src_root)"
+    mkdir -p "${src}/data"
+    cd "${src}/data" && pwd
+  fi
+}
+
+project_data_dir() {
+  project_artifacts_dir
+}
+
+default_model_repo() {
+  printf '%s\n' "${P2A_MODEL_REPO:-Qwen/Qwen3-Coder-30B-A3B-Instruct}"
+}
+
+default_model_path() {
+  local repo models_dir
+  repo="$(default_model_repo)"
+  models_dir="$(shared_models_dir)"
+  printf '%s/%s\n' "${models_dir}" "${repo##*/}"
+}
+
+ensure_model_path() {
+  local path repo python_bin
+  path="${MODEL_PATH:-$(default_model_path)}"
+  repo="$(default_model_repo)"
+  python_bin="${P2A_PYTHON:-${PYTHON_BIN:-python3}}"
+
+  if [[ -d "${path}" && -n "$(find "${path}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    MODEL_PATH="${path}"
+    export MODEL_PATH
+    return 0
+  fi
+
+  echo "MODEL_PATH=${path} is missing; downloading ${repo} into the shared model cache." >&2
+  PYTHONPATH="${SRC_ROOT}:${PYTHONPATH:-}" "${python_bin}" - "$repo" "$path" <<'PY'
+import sys
+
+from p2a.hf_assets import ensure_shared_model
+
+repo, path = sys.argv[1], sys.argv[2]
+ensure_shared_model(repo_id=repo, local_dir=path)
+PY
+  MODEL_PATH="${path}"
+  export MODEL_PATH
+}
+
+# ---------------------------------------------------------------------------
+# Machine-local env / secret loading
+# ---------------------------------------------------------------------------
+
+p2a_local_env_file() {
+  local root="${1:-}"
+  if [[ -z "${root}" ]]; then
+    root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  fi
+  printf '%s\n' "${P2A_LOCAL_ENV_FILE:-${root}/.secrets/ips.sh}"
+}
+
+p2a_source_local_env() {
+  local root="${1:-}"
+  local env_file
+  env_file="$(p2a_local_env_file "${root}")"
+  if [[ -f "${env_file}" ]]; then
+    # shellcheck disable=SC1090
+    source "${env_file}"
+  fi
+}
+
+p2a_require_env() {
+  local key="$1"
+  if [[ -z "${!key:-}" ]]; then
+    echo "[local-env] ${key} is required; set it or source .secrets/ips.sh." >&2
+    return 2
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Node-local runtime staging
+# ---------------------------------------------------------------------------
 
 p2a_stage_enabled() {
   [[ "${P2A_STAGE_LOCAL_RUNTIME:-${P2A_LOCAL_RUNTIME:-0}}" == "1" ]]
