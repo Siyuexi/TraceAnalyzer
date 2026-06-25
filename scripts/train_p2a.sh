@@ -115,7 +115,7 @@ clip_ratio_low=4e-4
 clip_ratio_high=4e-4
 
 max_prompt_length=$((1024 * 4))
-max_response_length=$((1024 * 64))
+max_response_length=$(((1024 * 128) - max_prompt_length))
 enable_overlong_buffer=False
 overlong_buffer_len=$((1024 * 4))
 overlong_penalty_factor=1.0
@@ -367,7 +367,7 @@ PY
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.nccl_timeout=${nccl_timeout} \
     actor_rollout_ref.hybrid_engine=False \
-    actor_rollout_ref.rollout.enforce_eager=False \
+    actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.disable_log_stats=False \
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=${update_weights_bucket_megabytes} \
