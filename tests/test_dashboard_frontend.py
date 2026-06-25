@@ -525,6 +525,49 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             if (run(`nodeRoleLabel({node_role: "fix_adapter"})`) !== "fix-adapter") {
               throw new Error("fix_adapter should use public hyphenated label");
             }
+            const blockedGraphRoute = run(`graphEdgeRouteOffset(
+              {caller: "manager", callee: "update"},
+              {x: 80, y: 55},
+              {x: 540, y: 55},
+              [{key: "manager"}, {key: "annotate"}, {key: "update"}],
+              new Map([["manager", {x: 80, y: 55}], ["annotate", {x: 310, y: 55}], ["update", {x: 540, y: 55}]])
+            )`);
+            if (blockedGraphRoute <= 0) {
+              throw new Error("long Graph edge should route around an intervening node");
+            }
+            const adjacentGraphRoute = run(`graphEdgeRouteOffset(
+              {caller: "manager", callee: "annotate"},
+              {x: 80, y: 55},
+              {x: 310, y: 55},
+              [{key: "manager"}, {key: "annotate"}, {key: "update"}],
+              new Map([["manager", {x: 80, y: 55}], ["annotate", {x: 310, y: 55}], ["update", {x: 540, y: 55}]])
+            )`);
+            if (adjacentGraphRoute !== 0) {
+              throw new Error("adjacent Graph edge should not be rerouted");
+            }
+            const routedGraphEdge = run(`graphEdgePath({x: 80, y: 55}, {x: 540, y: 55}, "context", ${blockedGraphRoute})`);
+            const straightGraphEdge = run(`graphEdgePath({x: 80, y: 55}, {x: 540, y: 55}, "context", 0)`);
+            if (routedGraphEdge === straightGraphEdge || !routedGraphEdge.includes("131.0")) {
+              throw new Error(`routed Graph edge should bend away from covered node: ${routedGraphEdge}`);
+            }
+            const backwardTopEdge = run(`graphEdgePath({x: 540, y: 55}, {x: 80, y: 55}, "context", ${blockedGraphRoute})`);
+            if (!backwardTopEdge.includes("131.0") || backwardTopEdge.includes("-21.0")) {
+              throw new Error(`backward top-row Graph edge should route downward inside the SVG: ${backwardTopEdge}`);
+            }
+            const bottomGraphRoute = run(`graphEdgeRouteOffset(
+              {caller: "manager", callee: "update"},
+              {x: 80, y: 200},
+              {x: 540, y: 200},
+              [{key: "manager"}, {key: "annotate"}, {key: "update"}],
+              new Map([["manager", {x: 80, y: 200}], ["annotate", {x: 310, y: 200}], ["update", {x: 540, y: 200}]])
+            )`);
+            if (bottomGraphRoute >= 0) {
+              throw new Error("bottom-row Graph edge should route upward");
+            }
+            const backwardBottomEdge = run(`graphEdgePath({x: 540, y: 200}, {x: 80, y: 200}, "context", ${bottomGraphRoute})`);
+            if (!backwardBottomEdge.includes("124.0") || backwardBottomEdge.includes("276.0")) {
+              throw new Error(`backward bottom-row Graph edge should route upward inside the SVG: ${backwardBottomEdge}`);
+            }
             if (run("combinedMiracleMarker({miracle_step: false, block_miracle_step: true})") !== false) {
               throw new Error("primary miracle marker should use step-level semantics");
             }

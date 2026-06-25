@@ -1381,7 +1381,36 @@ function graphEdgeMarker(edge) {
   return edge.edge_type === "context" ? "graph-arrow-context" : "graph-arrow-path";
 }
 
-function graphEdgePath(a, b, edgeType = "path") {
+const GRAPH_NODE_RADIUS = 18;
+const GRAPH_EDGE_NODE_CLEARANCE = GRAPH_NODE_RADIUS + 8;
+
+function pointToSegmentDistance(point, a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy;
+  if (!lenSq) return Math.sqrt((point.x - a.x) ** 2 + (point.y - a.y) ** 2);
+  const t = Math.max(0, Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / lenSq));
+  const x = a.x + t * dx;
+  const y = a.y + t * dy;
+  return Math.sqrt((point.x - x) ** 2 + (point.y - y) ** 2);
+}
+
+function graphEdgeRouteOffset(edge, a, b, nodes, positions) {
+  const caller = edge.caller || edge.source;
+  const callee = edge.callee || edge.target;
+  const obstacles = nodes.filter((node) => {
+    if (!node?.key || node.key === caller || node.key === callee) return false;
+    const pos = positions.get(node.key);
+    if (!pos) return false;
+    return pointToSegmentDistance(pos, a, b) <= GRAPH_EDGE_NODE_CLEARANCE;
+  });
+  if (!obstacles.length) return 0;
+  const avgY = (a.y + b.y) / 2;
+  const sign = avgY < 120 ? 1 : -1;
+  return sign * (58 + Math.min(obstacles.length, 3) * 18);
+}
+
+function graphEdgePath(a, b, edgeType = "path", routeOffset = 0) {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   const len = Math.sqrt(dx * dx + dy * dy) || 1;
@@ -1390,6 +1419,14 @@ function graphEdgePath(a, b, edgeType = "path") {
   const perpendicular = edgeType === "trace" ? 12 : 0;
   const px = -dy / len * perpendicular;
   const py = dx / len * perpendicular;
+  let routeNormalX = -dy / len;
+  let routeNormalY = dx / len;
+  if (routeNormalY < 0 || Math.abs(routeNormalY) < 1e-9 && routeNormalX < 0) {
+    routeNormalX *= -1;
+    routeNormalY *= -1;
+  }
+  const routeX = routeNormalX * routeOffset;
+  const routeY = routeNormalY * routeOffset;
   const sx = a.x + dx / len * startPad + px;
   const sy = a.y + dy / len * startPad + py;
   const tx = b.x - dx / len * endPad + px;
@@ -1398,9 +1435,11 @@ function graphEdgePath(a, b, edgeType = "path") {
   const bendFactor = edgeType === "trace" ? 0.58 : 0.45;
   const bend = Math.max(60, Math.abs(dx) * bendFactor);
   const sameLayerBend = Math.abs(dx) < 12 ? 90 : bend;
-  const c1x = sx + direction * sameLayerBend;
-  const c2x = tx - direction * sameLayerBend;
-  return `M${sx.toFixed(1)} ${sy.toFixed(1)} C${c1x.toFixed(1)} ${sy.toFixed(1)}, ${c2x.toFixed(1)} ${ty.toFixed(1)}, ${tx.toFixed(1)} ${ty.toFixed(1)}`;
+  const c1x = sx + direction * sameLayerBend + routeX;
+  const c1y = sy + routeY;
+  const c2x = tx - direction * sameLayerBend + routeX;
+  const c2y = ty + routeY;
+  return `M${sx.toFixed(1)} ${sy.toFixed(1)} C${c1x.toFixed(1)} ${c1y.toFixed(1)}, ${c2x.toFixed(1)} ${c2y.toFixed(1)}, ${tx.toFixed(1)} ${ty.toFixed(1)}`;
 }
 
 function graphEdgeLabelPosition(a, b) {
@@ -1733,7 +1772,8 @@ function renderGraph(detail) {
     const b = positions.get(callee);
     if (!a || !b) return "";
     const edgeType = edge.edge_type === "context" ? "context" : "path";
-    return `<path class="graph-edge ${esc(edgeType)}" d="${graphEdgePath(a, b, edgeType)}" marker-end="url(#${graphEdgeMarker(edge)})"><title>${esc(caller)} -> ${esc(callee)} (${esc(edgeType)})</title></path>`;
+    const routeOffset = graphEdgeRouteOffset(edge, a, b, nodes, positions);
+    return `<path class="graph-edge ${esc(edgeType)}" d="${graphEdgePath(a, b, edgeType, routeOffset)}" marker-end="url(#${graphEdgeMarker(edge)})"><title>${esc(caller)} -> ${esc(callee)} (${esc(edgeType)})</title></path>`;
   }).join("");
   const allTraversalEdges = traceEdges(detail, model);
   const traversalEdges = state.graphEdgeFilters.trace ? allTraversalEdges : [];
