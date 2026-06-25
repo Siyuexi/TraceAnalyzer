@@ -443,7 +443,7 @@ dashboard fills them from `--data-file` or the standard local dataset parquet fo
 the selected dataset. Node Source is bonus-map data: the dashboard reads full
 callable source from the explicit or inferred P2A bonus-map directory, and DB
 `source_preview` fields are only stale artifact fallbacks.
-The Run Provenance tab explains artifact/log-producing executions and only
+The Logs tab explains artifact/log-producing executions and only
 mixes runs into a selected eval cell when they carry explicit eval-cell links;
 unlinked logs are shown separately. The Traces tab is the micro-analysis
 surface: narrow instance list on the left, graph plus purpose-block/step

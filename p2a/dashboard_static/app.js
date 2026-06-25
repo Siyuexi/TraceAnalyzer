@@ -954,7 +954,7 @@ function renderModels(snapshot) {
 function renderRuns(snapshot) {
   const selected = selectedExperiment(snapshot);
   if (!state.selectedDataset) {
-    document.getElementById("run-list").innerHTML = '<div class="empty">Select a dataset before inspecting run provenance.</div>';
+    document.getElementById("run-list").innerHTML = '<div class="empty">Select a dataset before inspecting logs.</div>';
     return;
   }
   const allRuns = snapshot?.runs || [];
@@ -969,7 +969,7 @@ function renderRuns(snapshot) {
     const files = (run.files || []).slice(0, 8).map((name) => `<span class="badge">${esc(name)}</span>`).join("");
     const links = (run.eval_cell_keys || []).length
       ? `<div class="run-meta">Linked cells: ${esc((run.model_labels || []).join(", ") || run.eval_cell_keys.length)}</div>`
-      : '<div class="run-meta">Unlinked provenance: no eval-cell metadata in this artifact.</div>';
+      : '<div class="run-meta">Unlinked logs: no eval-cell metadata in this artifact.</div>';
     const log = run.log_excerpt ? `<pre class="log">${esc(run.log_excerpt.slice(-6000))}</pre>` : '<div class="muted">No run.log tail.</div>';
     return `<article class="run-card">
       <div class="run-head"><div><div class="run-title">${esc(run.run_id)}</div><div class="run-meta">${esc(run.path)}</div></div>${badge(run.status || "unknown", true, statusTone)}</div>
@@ -978,7 +978,7 @@ function renderRuns(snapshot) {
     </article>`;
   }).join("");
   document.getElementById("run-list").innerHTML = `
-    <div class="panel-note">Run Provenance maps metrics and traces back to the artifact-producing execution: run id, artifact path, linked eval cell, files, and log tail. Use it to debug where a metric came from or to reproduce a run; day-to-day analysis belongs in Metrics and Traces.</div>
+    <div class="panel-note">Logs map metrics and traces back to the artifact-producing execution: run id, artifact path, linked eval cell, files, and log tail. Use them to debug where a metric came from or to reproduce a run; day-to-day analysis belongs in Metrics and Traces.</div>
     <h3>${selected ? "Linked to selected eval cell" : `Linked to dataset ${esc(state.selectedDataset)}`}</h3>
     <div class="run-grid">${renderCards(linked) || '<div class="empty">No explicitly linked runs for this scope.</div>'}</div>
     <h3>Unlinked runs</h3>
