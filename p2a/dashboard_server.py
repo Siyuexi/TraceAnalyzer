@@ -7,6 +7,9 @@ import mimetypes
 import os
 import shutil
 import socket
+import sqlite3
+import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,15 +29,40 @@ def _read_static(name: str) -> bytes:
     return path.read_bytes()
 
 
+def _static_version() -> str:
+    try:
+        values = [
+            str(int((STATIC_DIR / name).stat().st_mtime_ns))
+            for name in ("app.js", "styles.css")
+        ]
+    except OSError:
+        return str(int(time.time_ns()))
+    return "-".join(values)
+
+
 def _index_html(*, embedded_snapshot: dict[str, Any] | None = None) -> bytes:
     html = _read_static("index.html").decode("utf-8")
+    version = _static_version()
+    html = html.replace('href="styles.css"', f'href="styles.css?v={version}"')
+    html = html.replace('src="app.js"', f'src="app.js?v={version}"')
     if embedded_snapshot is not None:
-        payload = snapshot_to_json(embedded_snapshot)
+        payload = _script_safe_json(embedded_snapshot)
         html = html.replace(
             "</head>",
             f"<script>window.__P2A_DASHBOARD_SNAPSHOT__ = {payload};</script>\n</head>",
         )
     return html.encode("utf-8")
+
+
+def _script_safe_json(snapshot: dict[str, Any]) -> str:
+    return (
+        snapshot_to_json(snapshot)
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
 
 
 def write_static_dashboard(out_dir: Path, snapshot: dict[str, Any]) -> dict[str, Path]:
@@ -51,19 +79,26 @@ def write_static_dashboard(out_dir: Path, snapshot: dict[str, Any]) -> dict[str,
 
 
 def make_handler(request: DashboardRequest) -> type[BaseHTTPRequestHandler]:
+    snapshot_cache: dict[str, Any] = {"payload": None}
+    snapshot_lock = threading.Lock()
+
     class P2ADashboardHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path == "/":
-                self._send_bytes(_index_html(), "text/html; charset=utf-8")
+                try:
+                    snapshot = self._build_or_cached_snapshot()
+                except sqlite3.OperationalError:
+                    snapshot = None
+                self._send_bytes(_index_html(embedded_snapshot=snapshot), "text/html; charset=utf-8")
                 return
             if parsed.path == "/api/health":
                 self._send_json({"ok": True, "schema_version": "p2a_unified_dashboard_v1"})
                 return
             if parsed.path == "/api/snapshot":
-                self._send_json(build_dashboard_snapshot(request))
+                self._send_snapshot()
                 return
             if parsed.path == "/api/log":
                 params = parse_qs(parsed.query)
@@ -74,6 +109,12 @@ def make_handler(request: DashboardRequest) -> type[BaseHTTPRequestHandler]:
                     return
                 try:
                     self._send_json(read_dashboard_log(request, run_id=run_id, source=source))
+                except sqlite3.OperationalError as exc:
+                    status = HTTPStatus.SERVICE_UNAVAILABLE if "locked" in str(exc).lower() else HTTPStatus.INTERNAL_SERVER_ERROR
+                    self._send_json(
+                        {"ok": False, "error": "database_locked" if status == HTTPStatus.SERVICE_UNAVAILABLE else "sqlite_error", "detail": str(exc)},
+                        status=status,
+                    )
                 except FileNotFoundError:
                     self.send_error(HTTPStatus.NOT_FOUND, "Requested log source not found")
                 return
@@ -91,15 +132,49 @@ def make_handler(request: DashboardRequest) -> type[BaseHTTPRequestHandler]:
             mime_type, _encoding = mimetypes.guess_type(name)
             self._send_bytes(payload, mime_type or "application/octet-stream")
 
-        def _send_json(self, payload: dict[str, Any]) -> None:
-            self._send_bytes(snapshot_to_json(payload).encode("utf-8"), "application/json; charset=utf-8")
+        def _send_snapshot(self) -> None:
+            try:
+                payload = self._build_or_cached_snapshot()
+            except sqlite3.OperationalError as exc:
+                status = HTTPStatus.SERVICE_UNAVAILABLE if "locked" in str(exc).lower() else HTTPStatus.INTERNAL_SERVER_ERROR
+                self._send_json(
+                    {"ok": False, "error": "database_locked" if status == HTTPStatus.SERVICE_UNAVAILABLE else "sqlite_error", "detail": str(exc)},
+                    status=status,
+                )
+                return
+            self._send_json(payload)
 
-        def _send_bytes(self, payload: bytes, content_type: str) -> None:
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
+        def _build_or_cached_snapshot(self) -> dict[str, Any]:
+            cached = snapshot_cache.get("payload")
+            acquired = snapshot_lock.acquire(blocking=cached is None)
+            if not acquired:
+                return {**cached, "snapshot_status": {"stale": True, "reason": "snapshot_build_in_progress"}}
+            try:
+                payload = build_dashboard_snapshot(request)
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower() and cached is not None:
+                    return {**cached, "snapshot_status": {"stale": True, "reason": "database_locked", "detail": str(exc)}}
+                raise
+            else:
+                snapshot_cache["payload"] = payload
+                return payload
+            finally:
+                snapshot_lock.release()
+
+        def _send_json(self, payload: dict[str, Any], *, status: HTTPStatus = HTTPStatus.OK) -> None:
+            self._send_bytes(snapshot_to_json(payload).encode("utf-8"), "application/json; charset=utf-8", status=status)
+
+        def _send_bytes(self, payload: bytes, content_type: str, *, status: HTTPStatus = HTTPStatus.OK) -> None:
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Cache-Control", "no-store, max-age=0")
+                self.send_header("Pragma", "no-cache")
+                self.end_headers()
+                self.wfile.write(payload)
+            except (BrokenPipeError, ConnectionResetError):
+                self.close_connection = True
 
     return P2ADashboardHandler
 
@@ -137,9 +212,7 @@ def _server_ip_candidates() -> list[str]:
 
 def _dashboard_urls(host: str, port: int) -> list[tuple[str, str]]:
     if host in {"0.0.0.0", "::", ""}:
-        urls = [("Local", f"http://127.0.0.1:{port}")]
-        urls.extend(("Network", f"http://{candidate}:{port}") for candidate in _server_ip_candidates())
-        return urls
+        return [("Network", f"http://{candidate}:{port}") for candidate in _server_ip_candidates()]
     return [("URL", f"http://{host}:{port}")]
 
 
@@ -167,6 +240,7 @@ def add_dashboard_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--db", type=Path, default=None, help="Unified eval SQLite DB")
     parser.add_argument("--log-dir", type=Path, default=None, help="Uni-Agent run directory root")
     parser.add_argument("--bonus-map-dir", type=Path, default=None, help="Directory containing <instance_id>.json bonus maps")
+    parser.add_argument("--data-file", type=Path, default=None, help="Dataset parquet used to fill missing issue descriptions and golden patches")
     parser.add_argument("--experiment-id", help="Filter DB rows to one experiment")
     parser.add_argument("--provider-source", help="Filter DB rows to one provider source")
     parser.add_argument("--dataset", help="Filter DB rows to one dataset")
@@ -175,7 +249,7 @@ def add_dashboard_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--m-max", type=float, default=3.0)
     parser.add_argument("--detail-limit", type=int, default=500)
     parser.add_argument("--out-dir", type=Path, default=None, help="Write a static snapshot instead of serving")
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--snapshot-json", type=Path, default=None, help="Write one snapshot JSON and exit")
 
@@ -187,6 +261,7 @@ def request_from_args(args: argparse.Namespace) -> DashboardRequest:
         db_path=args.db,
         log_dir=args.log_dir,
         bonus_map_dir=args.bonus_map_dir,
+        data_file=args.data_file,
         experiment_id=args.experiment_id,
         provider_source=args.provider_source,
         dataset=args.dataset,
@@ -202,14 +277,15 @@ def main(argv: list[str] | None = None) -> int:
     add_dashboard_args(parser)
     args = parser.parse_args(argv)
     request = request_from_args(args)
-    snapshot = build_dashboard_snapshot(request)
 
     if args.snapshot_json:
+        snapshot = build_dashboard_snapshot(request)
         args.snapshot_json.parent.mkdir(parents=True, exist_ok=True)
         args.snapshot_json.write_text(snapshot_to_json(snapshot, indent=2) + "\n", encoding="utf-8")
         print(args.snapshot_json)
         return 0
     if args.out_dir:
+        snapshot = build_dashboard_snapshot(request)
         paths = write_static_dashboard(args.out_dir, snapshot)
         print(paths["html"])
         return 0

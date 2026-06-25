@@ -199,7 +199,11 @@ def test_validation_metrics_use_schema_v5_chain_projection(tmp_path):
     ]
     context_by_key = {node["key"]: node for node in detail["chain_projection"]["context_nodes"]}
     assert context_by_key["tests/test_issue.py::test_issue"]["hit"] is True
+    assert context_by_key["tests/test_issue.py::test_issue"]["normalized_distance"] == 1.0
     assert "source_preview" not in context_by_key["tests/test_issue.py::test_issue"]
+    chain_by_key = {node["key"]: node for node in detail["chain_projection"]["chain_nodes"]}
+    assert chain_by_key["app/views.py::symptom"]["normalized_distance"] == 1.0
+    assert chain_by_key["app/root.py::patched_root"]["normalized_distance"] == 0.0
     assert metrics["val-p2a/unit/chain_graph_coverage"] == 1.0
     assert metrics["val-p2a/unit/anchor_hit_rate"] == 1.0
     assert metrics["val-p2a/unit/root_hit_rate"] == 1.0
@@ -209,6 +213,35 @@ def test_validation_metrics_use_schema_v5_chain_projection(tmp_path):
     assert metrics["val-p2a/unit/time_to_anchor"] == 1.0
     assert metrics["val-p2a/unit/time_to_root"] == 2.0
     assert metrics["val-p2a/unit/steps_anchor_to_root"] == 1.0
+
+
+def test_chain_evaluability_reports_missing_anchor_reason(tmp_path):
+    bonus_dir = tmp_path / "bonus_maps"
+    bonus_dir.mkdir()
+    bonus_map = _schema_v5_bonus_map("demo__no_anchor")
+    bonus_map["selected_issue_anchor_nodes"] = []
+    bonus_map["reason_code"] = "standard"
+    (bonus_dir / "demo__no_anchor.json").write_text(json.dumps(bonus_map), encoding="utf-8")
+
+    batch = FakeBatch(
+        {
+            "uid": np.array(["uid-1"], dtype=object),
+            "data_source": np.array(["unit"], dtype=object),
+            "extra_fields": np.array([{"instance_id": "demo__no_anchor", "p2a_step_traces": []}], dtype=object),
+        }
+    )
+
+    records = validation_records_from_batch(batch, output_texts=[""], scores=[0.0])
+    _metrics, details = compute_validation_p2a_metrics(
+        records,
+        bonus_map_dir=str(bonus_dir),
+        tracking_mode="view_and_bash",
+        near_threshold=0.5,
+        m_max=3.0,
+    )
+
+    assert details[0]["chain_evaluable"] is False
+    assert details[0]["not_chain_evaluable_reason"] == "traceable_no_anchor"
 
 
 def test_chain_metrics_fall_back_to_top_level_reads_when_step_traces_are_empty(tmp_path):
@@ -392,6 +425,12 @@ def test_validation_metrics_report_order_and_miracle_rates(tmp_path):
                 "instance_id": "demo__graph",
                 "case_type": "standard",
                 "traceable": True,
+                "selected_issue_anchor_nodes": ["tests/test_demo.py::test_demo"],
+                "root_cause_nodes": ["pkg/demo.py::target"],
+                "reward_path_edges": [
+                    ["tests/test_demo.py::test_demo", "pkg/mid.py::mid"],
+                    ["pkg/mid.py::mid", "pkg/demo.py::target"],
+                ],
                 "call_graph_nodes": {
                     "tests/test_demo.py::test_demo": {
                         "file_path": "tests/test_demo.py",
@@ -449,6 +488,234 @@ def test_validation_metrics_report_order_and_miracle_rates(tmp_path):
     assert details[1]["miracle_severity"] == 1
     assert metrics["val-p2a/unit/avg_node_recall"] == (1.0 + (1 / 3)) / 2
     assert metrics["val-p2a/unit/miracle_rate_over_gt_hits"] == 0.5
+
+
+def test_root_hit_without_prior_symptom_is_miracle_even_with_same_step_intermediate(tmp_path):
+    bonus_dir = tmp_path / "bonus_maps"
+    bonus_dir.mkdir()
+    long_source = "\n".join([f"line {idx}" for idx in range(900)])
+    (bonus_dir / "demo__missing_anchor.json").write_text(
+        json.dumps(
+            {
+                "instance_id": "demo__missing_anchor",
+                "case_type": "standard",
+                "traceable": True,
+                "selected_issue_anchor_nodes": ["tests/test_demo.py::test_demo"],
+                "root_cause_nodes": ["pkg/demo.py::target"],
+                "reward_path_edges": [
+                    ["tests/test_demo.py::test_demo", "pkg/demo.py::mid"],
+                    ["pkg/demo.py::mid", "pkg/demo.py::target"],
+                ],
+                "call_graph_nodes": {
+                    "tests/test_demo.py::test_demo": {
+                        "file_path": "tests/test_demo.py",
+                        "start_line": 1,
+                        "end_line": 4,
+                        "normalized_distance": 1.0,
+                        "node_role": "symptom",
+                    },
+                    "pkg/demo.py::mid": {
+                        "file_path": "pkg/demo.py",
+                        "start_line": 1,
+                        "end_line": 20,
+                        "normalized_distance": 0.5,
+                        "node_role": "intermediate",
+                    },
+                    "pkg/demo.py::target": {
+                        "file_path": "pkg/demo.py",
+                        "start_line": 10,
+                        "end_line": 30,
+                        "normalized_distance": 0.0,
+                        "node_role": "root_cause",
+                        "source": long_source,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    records = [
+        {
+            "instance_id": "demo__missing_anchor",
+            "data_source": "unit",
+            "p2a_step_traces": [
+                {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "str_replace_editor",
+                                "arguments": {"command": "view", "path": "/testbed/pkg/demo.py", "view_range": [1, 30]},
+                            }
+                        }
+                    ]
+                },
+            ],
+        }
+    ]
+
+    metrics, details = compute_validation_p2a_metrics(
+        records,
+        bonus_map_dir=str(bonus_dir),
+        tracking_mode="view_and_bash",
+        near_threshold=0.5,
+        m_max=3.0,
+    )
+
+    assert details[0]["anchor_hit"] is False
+    assert details[0]["root_hit"] is True
+    assert details[0]["miracle_step"] is True
+    assert metrics["val-p2a/unit/miracle_rate_over_gt_hits"] == 1.0
+    root_node = next(node for node in details[0]["graph_topology"]["nodes"] if node["key"] == "pkg/demo.py::target")
+    assert root_node["source"] == long_source
+    assert root_node["source_preview"].endswith("...")
+
+
+def test_same_step_full_chain_hit_is_not_miracle(tmp_path):
+    bonus_dir = tmp_path / "bonus_maps"
+    bonus_dir.mkdir()
+    (bonus_dir / "demo__same_step_chain.json").write_text(
+        json.dumps(
+            {
+                "instance_id": "demo__same_step_chain",
+                "case_type": "standard",
+                "traceable": True,
+                "selected_issue_anchor_nodes": ["pkg/demo.py::symptom"],
+                "root_cause_nodes": ["pkg/demo.py::target"],
+                "reward_path_edges": [
+                    ["pkg/demo.py::symptom", "pkg/demo.py::mid"],
+                    ["pkg/demo.py::mid", "pkg/demo.py::target"],
+                ],
+                "call_graph_nodes": {
+                    "pkg/demo.py::symptom": {
+                        "file_path": "pkg/demo.py",
+                        "start_line": 1,
+                        "end_line": 10,
+                        "normalized_distance": 1.0,
+                        "node_role": "symptom",
+                    },
+                    "pkg/demo.py::mid": {
+                        "file_path": "pkg/demo.py",
+                        "start_line": 11,
+                        "end_line": 20,
+                        "normalized_distance": 0.5,
+                        "node_role": "intermediate",
+                    },
+                    "pkg/demo.py::target": {
+                        "file_path": "pkg/demo.py",
+                        "start_line": 21,
+                        "end_line": 30,
+                        "normalized_distance": 0.0,
+                        "node_role": "root_cause",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    records = [
+        {
+            "instance_id": "demo__same_step_chain",
+            "data_source": "unit",
+            "p2a_step_traces": [
+                {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "str_replace_editor",
+                                "arguments": {"command": "view", "path": "/testbed/pkg/demo.py", "view_range": [1, 30]},
+                            }
+                        }
+                    ]
+                },
+            ],
+        }
+    ]
+
+    metrics, details = compute_validation_p2a_metrics(
+        records,
+        bonus_map_dir=str(bonus_dir),
+        tracking_mode="view_and_bash",
+        near_threshold=0.5,
+        m_max=3.0,
+    )
+
+    assert details[0]["anchor_hit"] is True
+    assert details[0]["root_hit"] is True
+    assert details[0]["miracle_step"] is False
+    assert details[0]["miracle_severity"] == 0
+    assert details[0]["order_defined"] is False
+    assert metrics["val-p2a/unit/miracle_rate_over_gt_hits"] == 0.0
+
+
+def test_direct_symptom_root_node_is_not_order_or_miracle_candidate(tmp_path):
+    bonus_dir = tmp_path / "bonus_maps"
+    bonus_dir.mkdir()
+    (bonus_dir / "demo__direct.json").write_text(
+        json.dumps(
+            {
+                "instance_id": "demo__direct",
+                "case_type": "direct",
+                "traceable": True,
+                "selected_issue_anchor_nodes": ["pkg/demo.py::target"],
+                "root_cause_nodes": ["pkg/demo.py::target"],
+                "reward_path_edges": [],
+                "call_graph_nodes": {
+                    "pkg/demo.py::target": {
+                        "file_path": "pkg/demo.py",
+                        "start_line": 1,
+                        "end_line": 5,
+                        "normalized_distance": 0.0,
+                        "rewardable": True,
+                        "node_role": "root_cause",
+                    },
+                    "pkg/mid.py::mid": {
+                        "file_path": "pkg/mid.py",
+                        "start_line": 1,
+                        "end_line": 5,
+                        "normalized_distance": 0.5,
+                        "rewardable": True,
+                        "node_role": "intermediate",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    records = [
+        {
+            "instance_id": "demo__direct",
+            "data_source": "unit",
+            "p2a_step_traces": [
+                {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "str_replace_editor",
+                                "arguments": {"command": "view", "path": "/testbed/pkg/demo.py", "view_range": [1, 5]},
+                            }
+                        }
+                    ]
+                },
+            ],
+        }
+    ]
+
+    metrics, details = compute_validation_p2a_metrics(
+        records,
+        bonus_map_dir=str(bonus_dir),
+        tracking_mode="view_and_bash",
+        near_threshold=0.5,
+        m_max=3.0,
+    )
+
+    assert details[0]["chain_evaluable"] is True
+    assert details[0]["chain_projection"]["anchors"] == ["pkg/demo.py::target"]
+    assert details[0]["chain_projection"]["roots"] == ["pkg/demo.py::target"]
+    assert details[0]["order_defined"] is False
+    assert details[0]["order_score"] is None
+    assert details[0]["miracle_step"] is None
+    assert metrics.get("val-p2a/unit/reverse_order_rate") is None
+    assert metrics.get("val-p2a/unit/miracle_rate_over_gt_hits") is None
 
 
 def test_validation_metrics_preserve_trace_step_indexes(tmp_path):

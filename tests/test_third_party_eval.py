@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from types import SimpleNamespace
 
 import numpy as np
@@ -174,6 +175,27 @@ def test_build_step_traces_preserves_structured_tool_calls():
     ]
 
 
+def test_build_step_traces_preserves_api_reasoning_and_text_blocks():
+    interaction = _interaction_result()
+    interaction["trajectory"][0].response = ""
+    interaction["trajectory"][0].thought = ""
+    interaction["messages"][2]["content"] = ""
+    interaction["rollout_cache"]["internal_api_assistant_metadata"] = {
+        "2": {
+            "reasoning_content": "inspect the expression tree",
+            "reasoning_blocks": [{"type": "reasoning", "value": "inspect the expression tree"}],
+            "text_blocks": [{"type": "text", "value": "I will inspect expressions.py."}],
+        }
+    }
+
+    traces = build_step_traces(interaction)
+
+    assert traces[0]["response_text"] == "I will inspect expressions.py."
+    assert traces[0]["reasoning_content"] == "inspect the expression tree"
+    assert traces[0]["reasoning_blocks"] == [{"type": "reasoning", "value": "inspect the expression tree"}]
+    assert traces[0]["text_blocks"] == [{"type": "text", "value": "I will inspect expressions.py."}]
+
+
 def test_classify_error_marks_arl_websocket_forbidden_as_system_error():
     assert classify_error("InvalidStatus: server rejected WebSocket connection: HTTP 403") == "arl_shell_forbidden"
 
@@ -316,3 +338,20 @@ def test_cache_rollouts_upserts_standard_third_party_artifacts(tmp_path):
     )
 
     assert n_cached == 1
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """
+            SELECT c.artifact_details, q.p2a_read, q.call_graph_hit, q.ground_truth_hit,
+                   q.near_hit, q.min_distance, q.metrics_json
+            FROM run_cells c
+            JOIN quantitative_metrics q ON q.cell_id = c.id
+            """
+        ).fetchone()
+    assert row["artifact_details"] == str(details_path)
+    assert row["p2a_read"] is None
+    assert row["call_graph_hit"] is None
+    assert row["ground_truth_hit"] is None
+    assert row["near_hit"] is None
+    assert row["min_distance"] is None
+    assert "detail" not in json.loads(row["metrics_json"])

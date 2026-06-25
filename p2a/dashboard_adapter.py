@@ -3,23 +3,28 @@
 from __future__ import annotations
 
 import json
+import os
 import pickle
+import re
 import sqlite3
 import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
-from p2a.core import BonusMapStore, normalize_action, reads_from_step_trace
-from p2a.eval_cache import aggregate_model_metrics, ensure_db, json_loads
+from p2a.core import BonusMapStore, _bonus_map_candidate_ids, normalize_action, reads_from_step_trace, writes_from_step_trace
+from p2a.eval_cache import aggregate_model_metrics, connect_readonly, json_loads
 from p2a.eval_fault_localization import (
     _json_default,
+    _kendall_order,
+    _miracle_stats,
     iter_records,
     score_record,
     summarize,
     summarize_trends,
 )
+from p2a.hf_assets import shared_p2a_data_dir
 
 
 DASHBOARD_SCHEMA_VERSION = "p2a_unified_dashboard_v1"
@@ -38,6 +43,22 @@ CHAIN_BAD_PATTERN_KEYS = (
     "chain_read_loop",
     "off_chain_read_spree",
     "error_spiral_on_chain",
+)
+DYNAMIC_TRACEABLE_CASE_TYPES = {"direct", "standard"}
+CASE_FILTER_BUCKETS = ("direct", "standard", "others")
+DATASET_PARQUET_FILENAMES = {
+    "swebench-hard": ("swe_bench_verified_hard.parquet",),
+    "swebench-verified": ("swe_bench_verified.parquet",),
+    "r2e-gym-subset": ("r2e_gym_subset_p2a.parquet", "r2e_gym_subset_p2a.train.parquet"),
+}
+THINK_BLOCK_RE = re.compile(r"<think>([\s\S]*?)(?:</think>|\Z)", re.IGNORECASE)
+XML_FUNCTION_RE = re.compile(
+    r"<function(?:=([A-Za-z0-9_.:-]+)|\s+name=\"([^\"]+)\")>([\s\S]*?)(?:</function>|\Z)",
+    re.MULTILINE,
+)
+XML_PARAMETER_RE = re.compile(
+    r"<parameter(?:=([A-Za-z0-9_.:-]+)|\s+name=\"([^\"]+)\")>([\s\S]*?)(?:</parameter>|\Z)",
+    re.MULTILINE,
 )
 VERIFY_MARKERS = (
     "reward_spec",
@@ -62,6 +83,7 @@ class DashboardRequest:
     db_path: Path | None = None
     log_dir: Path | None = None
     bonus_map_dir: Path | None = None
+    data_file: Path | None = None
     experiment_id: str | None = None
     provider_source: str | None = None
     dataset: str | None = None
@@ -105,6 +127,147 @@ def _tool_args(tool_call: Any) -> Any:
     return _safe_json_loads(args, args) if isinstance(args, str) else args
 
 
+def _text_value(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, default=_json_default)
+
+
+def _first_text(mapping: dict[str, Any], keys: Iterable[str]) -> str:
+    for key in keys:
+        value = _text_value(mapping.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _coerce_xml_value(raw: str) -> Any:
+    value = raw.strip()
+    if not value:
+        return ""
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, ValueError):
+        return value
+
+
+def _argument_pairs(args: Any) -> list[dict[str, Any]]:
+    if isinstance(args, dict):
+        return [{"key": str(key), "value": _jsonable(value)} for key, value in args.items()]
+    if isinstance(args, list):
+        return [{"key": str(index), "value": _jsonable(value)} for index, value in enumerate(args)]
+    if args in (None, ""):
+        return []
+    return [{"key": "value", "value": _jsonable(args)}]
+
+
+def _parsed_tool_call(tool_call: Any) -> dict[str, Any]:
+    name = _tool_name(tool_call)
+    args = _tool_args(tool_call)
+    return {"name": name, "arguments": _argument_pairs(args)}
+
+
+def _tool_call_from_parsed(parsed: dict[str, Any]) -> dict[str, Any]:
+    args = {pair.get("key"): pair.get("value") for pair in parsed.get("arguments", []) if pair.get("key")}
+    return {"type": "function", "function": {"name": parsed.get("name") or "", "arguments": args}}
+
+
+def _xml_tool_calls(text: str) -> list[dict[str, Any]]:
+    calls = []
+    for match in XML_FUNCTION_RE.finditer(text or ""):
+        name = (match.group(1) or match.group(2) or "").strip()
+        body = match.group(3)
+        args = {}
+        for param in XML_PARAMETER_RE.finditer(body):
+            param_name = (param.group(1) or param.group(2) or "").strip()
+            if param_name:
+                args[param_name] = _coerce_xml_value(param.group(3))
+        if name:
+            calls.append({"name": name, "arguments": _argument_pairs(args)})
+    return calls
+
+
+def _strip_xml_tool_calls(text: str) -> str:
+    return XML_FUNCTION_RE.sub("", text or "").strip()
+
+
+def _block_values(value: Any, *, block_type: str | None = None) -> list[str]:
+    value = _safe_json_loads(value, value) if isinstance(value, str) else value
+    if not isinstance(value, list):
+        return []
+    parts: list[str] = []
+    for block in value:
+        block = _safe_json_loads(block, block) if isinstance(block, str) else block
+        if isinstance(block, str) and block_type is None:
+            parts.append(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        if block_type is not None and block.get("type") != block_type:
+            continue
+        for key in ("value", "text", "content"):
+            text = block.get(key)
+            if isinstance(text, str) and text:
+                parts.append(text)
+                break
+    return parts
+
+
+def _content_block_text(value: Any, *, types: set[str]) -> str:
+    value = _safe_json_loads(value, value) if isinstance(value, str) else value
+    if isinstance(value, str):
+        return value if "text" in types else ""
+    if not isinstance(value, list):
+        return ""
+    parts: list[str] = []
+    for block in value:
+        block = _safe_json_loads(block, block) if isinstance(block, str) else block
+        if isinstance(block, str):
+            if "text" in types:
+                parts.append(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "")
+        if block_type not in types:
+            continue
+        for key in ("value", "text", "content"):
+            text = block.get(key)
+            if isinstance(text, str) and text:
+                parts.append(text)
+                break
+    return "".join(parts)
+
+
+def _split_reasoning_and_chat(trace: dict[str, Any], tool_calls: list[Any]) -> tuple[str, str, list[dict[str, Any]]]:
+    response_text = _first_text(trace, ("completion", "response_text", "response", "assistant_response", "content"))
+    reasoning = _first_text(trace, ("reasoning", "reasoning_content", "reasoning_text"))
+    reasoning_parts = _block_values(trace.get("reasoning_blocks"), block_type="reasoning")
+    if not reasoning_parts:
+        reasoning_parts = _block_values(trace.get("reasoning_blocks"))
+    content_reasoning = _content_block_text(trace.get("content"), types={"reasoning"})
+    if content_reasoning:
+        reasoning_parts.append(content_reasoning)
+    if reasoning_parts:
+        reasoning = "\n\n".join([part for part in [reasoning, *reasoning_parts] if part])
+    text_block_chat = "\n\n".join(_block_values(trace.get("text_blocks")))
+    if not response_text:
+        response_text = text_block_chat or _content_block_text(trace.get("content"), types={"text", "output_text", "message"})
+    think_parts = [match.group(1).strip() for match in THINK_BLOCK_RE.finditer(response_text) if match.group(1).strip()]
+    if think_parts:
+        reasoning = "\n\n".join([part for part in [reasoning, *think_parts] if part])
+    chat = THINK_BLOCK_RE.sub("", response_text).strip()
+    parsed_calls = [_parsed_tool_call(call) for call in tool_calls]
+    if not parsed_calls:
+        parsed_calls = _xml_tool_calls(chat)
+    chat = _strip_xml_tool_calls(chat)
+    if not chat:
+        chat = _first_text(trace, ("chat", "chat_text", "message", "thought")) or text_block_chat
+    return reasoning, chat, parsed_calls
+
+
 def _source_kind(*, provider_source: str | None, schema_version: str | None, run_step: Any, log_dir: bool = False) -> str:
     source = (provider_source or "").lower()
     schema = (schema_version or "").lower()
@@ -118,14 +281,16 @@ def _source_kind(*, provider_source: str | None, schema_version: str | None, run
 
 
 def _experiment_key(parts: dict[str, Any]) -> str:
-    fields = (
+    fields = [
         parts.get("source_kind") or "unknown",
         parts.get("experiment_id") or "adhoc",
         parts.get("provider_source") or "unknown-provider",
         parts.get("dataset") or parts.get("data_source") or "unknown-dataset",
         parts.get("model_api_name") or parts.get("model_label") or "unknown-model",
         parts.get("model_label") or parts.get("model_api_name") or "unknown-label",
-    )
+    ]
+    if parts.get("source_kind") == "local_training":
+        fields.append(parts.get("run_step") if parts.get("run_step") is not None else "unknown-step")
     return "::".join(str(field) for field in fields)
 
 
@@ -182,6 +347,183 @@ def _record_metadata(record: dict[str, Any], request: DashboardRequest, *, log_d
     return metadata
 
 
+def _nested_mappings(record: dict[str, Any]) -> list[dict[str, Any]]:
+    extra = record.get("extra_info") if isinstance(record.get("extra_info"), dict) else {}
+    tools = extra.get("tools_kwargs") if isinstance(extra.get("tools_kwargs"), dict) else {}
+    reward = tools.get("reward") if isinstance(tools.get("reward"), dict) else {}
+    metadata = reward.get("metadata") if isinstance(reward.get("metadata"), dict) else {}
+    return [record, extra, tools, reward, metadata]
+
+
+def _first_text_field(record: dict[str, Any], fields: Iterable[str]) -> str | None:
+    for mapping in _nested_mappings(record):
+        for field in fields:
+            value = mapping.get(field)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _issue_description(record: dict[str, Any]) -> str | None:
+    return _first_text_field(record, ("problem_statement", "issue_description", "issue_text", "issue", "description", "problem", "title"))
+
+
+def _golden_patch(record: dict[str, Any]) -> str | None:
+    return _first_text_field(record, ("golden_patch", "patch", "base_patch", "fix_patch"))
+
+
+def _row_instance_id(record: dict[str, Any]) -> str | None:
+    direct = record.get("instance_id")
+    if isinstance(direct, str) and direct:
+        return direct
+    for mapping in _nested_mappings(record):
+        value = mapping.get("instance_id")
+        if isinstance(value, str) and value:
+            return value
+    uid = record.get("uid")
+    return uid if isinstance(uid, str) and uid else None
+
+
+def _dataset_file_candidates(request: DashboardRequest, dataset: str) -> list[Path]:
+    candidates: list[Path] = []
+
+    def add(path: Path | None) -> None:
+        if path is None:
+            return
+        expanded = path.expanduser()
+        if expanded not in candidates:
+            candidates.append(expanded)
+
+    add(request.data_file)
+    for filename in DATASET_PARQUET_FILENAMES.get(dataset, ()):
+        try:
+            add(shared_p2a_data_dir() / filename)
+        except OSError:
+            pass
+        env_data = os.environ.get("DATA")
+        if env_data:
+            add(Path(env_data) / filename)
+        env_datasets = os.environ.get("P2A_DATASETS_DIR")
+        if env_datasets:
+            add(Path(env_datasets) / "p2a" / filename)
+            add(Path(env_datasets) / filename)
+        add(Path.cwd() / "../../datasets/p2a" / filename)
+    return candidates
+
+
+def _load_dataset_lookup(request: DashboardRequest, datasets: Iterable[str]) -> dict[tuple[str, str], dict[str, str]]:
+    lookup: dict[tuple[str, str], dict[str, str]] = {}
+    for dataset in sorted({str(name) for name in datasets if name}):
+        for path in _dataset_file_candidates(request, dataset):
+            if not path.exists():
+                continue
+            try:
+                import pandas as pd
+
+                records = pd.read_parquet(path).to_dict(orient="records")
+            except Exception:  # noqa: BLE001 - dataset fallback must not break dashboard rendering
+                continue
+            for raw in records:
+                if not isinstance(raw, dict):
+                    continue
+                record = _jsonable(raw)
+                instance_id = _row_instance_id(record)
+                if not instance_id:
+                    continue
+                item: dict[str, str] = {}
+                issue = _issue_description(record)
+                patch = _golden_patch(record)
+                if issue:
+                    item["issue_description"] = issue
+                if patch:
+                    item["golden_patch"] = patch
+                if item:
+                    lookup[(dataset, instance_id)] = item
+            if lookup:
+                break
+    return lookup
+
+
+def _enrich_details_from_dataset_parquet(details: list[dict[str, Any]], request: DashboardRequest) -> None:
+    datasets = {str(detail.get("dataset") or detail.get("data_source") or "") for detail in details}
+    lookup = _load_dataset_lookup(request, datasets)
+    if not lookup:
+        return
+    for detail in details:
+        dataset = str(detail.get("dataset") or detail.get("data_source") or "")
+        instance_id = str(detail.get("instance_id") or "")
+        values = lookup.get((dataset, instance_id))
+        if not values:
+            continue
+        if not detail.get("issue_description") and values.get("issue_description"):
+            detail["issue_description"] = values["issue_description"]
+        if not detail.get("golden_patch") and values.get("golden_patch"):
+            detail["golden_patch"] = values["golden_patch"]
+
+
+def _source_preview_from_source(source: str, max_chars: int = 4000) -> str:
+    if len(source) <= max_chars:
+        return source
+    return source[:max_chars].rstrip() + "\n..."
+
+
+def _copy_full_node_source(node: dict[str, Any], source_node: dict[str, Any]) -> None:
+    source = source_node.get("source")
+    if isinstance(source, str) and source:
+        node["source"] = source
+        node["source_preview"] = _source_preview_from_source(source)
+
+
+def _enrich_node_list_sources(nodes: Any, source_nodes: dict[str, Any]) -> None:
+    if not isinstance(nodes, list):
+        return
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        key = node.get("key")
+        source_node = source_nodes.get(str(key)) if key else None
+        if isinstance(source_node, dict):
+            _copy_full_node_source(node, source_node)
+
+
+def _enrich_details_from_bonus_maps(details: list[dict[str, Any]], bonus_map_dir: Path | None) -> None:
+    if bonus_map_dir is None:
+        return
+    bonus_maps = BonusMapStore(str(bonus_map_dir))
+    loaded: dict[str, dict[str, Any]] = {}
+    for detail in details:
+        instance_id = str(detail.get("instance_id") or "")
+        if not instance_id:
+            continue
+        if instance_id not in loaded:
+            bonus_map = bonus_maps.get(instance_id)
+            nodes = bonus_map.get("call_graph_nodes") if isinstance(bonus_map, dict) else {}
+            loaded[instance_id] = nodes if isinstance(nodes, dict) else {}
+        source_nodes = loaded[instance_id]
+        if not source_nodes:
+            continue
+        projection = detail.get("chain_projection")
+        if isinstance(projection, dict):
+            _enrich_node_list_sources(projection.get("chain_nodes"), source_nodes)
+            _enrich_node_list_sources(projection.get("context_nodes"), source_nodes)
+        topology = detail.get("graph_topology")
+        if isinstance(topology, dict):
+            _enrich_node_list_sources(topology.get("nodes"), source_nodes)
+
+
+def _enrich_details_from_bonus_map_dirs(details: list[dict[str, Any]], bonus_map_dirs: dict[str, Path]) -> None:
+    by_dataset: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    fallback_dir = bonus_map_dirs.get("")
+    for detail in details:
+        dataset = _dataset_name(detail)
+        bonus_dir = bonus_map_dirs.get(dataset) or fallback_dir
+        if bonus_dir is None:
+            continue
+        by_dataset[str(bonus_dir)].append(detail)
+    for path, items in by_dataset.items():
+        _enrich_details_from_bonus_maps(items, Path(path))
+
+
 def _step_inspection(record: dict[str, Any], step_details: list[dict[str, Any]]) -> list[dict[str, Any]]:
     traces = _as_sequence(record.get("p2a_step_traces"))
     by_trace_index = {
@@ -193,14 +535,22 @@ def _step_inspection(record: dict[str, Any], step_details: list[dict[str, Any]])
     for index, trace_value in enumerate(traces):
         trace = _as_mapping(trace_value)
         tool_calls = _as_sequence(trace.get("tool_calls"))
-        tool_names = [_tool_name(call) for call in tool_calls] or ["no-tool"]
-        tool_args = [_tool_args(call) for call in tool_calls]
+        reasoning_text, chat_text, parsed_tool_calls = _split_reasoning_and_chat(trace, tool_calls)
+        tool_names = [call["name"] for call in parsed_tool_calls if call.get("name")] or ["no-tool"]
+        tool_args = [{pair["key"]: pair.get("value") for pair in call.get("arguments", [])} for call in parsed_tool_calls]
         primary_args = _as_mapping(tool_args[0]) if tool_args else {}
         tool_results = _as_sequence(trace.get("tool_results"))
         observation = _tool_observation(tool_results)
         scored = by_trace_index.get(index, {})
-        action = normalize_action(trace, tracking_mode="view_and_bash")
-        recovered_reads = scored.get("reads") or reads_from_step_trace(trace, tracking_mode="view_and_bash")
+        action_trace = trace
+        if parsed_tool_calls and not tool_calls:
+            action_trace = {**trace, "tool_calls": [_tool_call_from_parsed(call) for call in parsed_tool_calls]}
+        action = normalize_action(action_trace, tracking_mode="view_and_bash")
+        recovered_reads = scored.get("reads") or reads_from_step_trace(action_trace, tracking_mode="view_and_bash")
+        write_actions = scored.get("writes") or writes_from_step_trace(action_trace)
+        computed_execution_error = _step_execution_error(trace, tool_results, observation)
+        stale_scored_error = bool(scored.get("execution_error")) and not tool_results and not observation
+        execution_error = bool(stale_scored_error or computed_execution_error)
         out.append(
             {
                 "trace_index": index,
@@ -215,14 +565,20 @@ def _step_inspection(record: dict[str, Any], step_details: list[dict[str, Any]])
                 "view_range": primary_args.get("view_range"),
                 "old_str": primary_args.get("old_str"),
                 "new_str": primary_args.get("new_str"),
+                "write_actions": _jsonable(write_actions),
+                "edited_root_cause": bool(scored.get("edited_root_cause")),
+                "reasoning_text": reasoning_text,
+                "chat_text": chat_text,
                 "thought": trace.get("thought") or "",
-                "think": trace.get("thought") or "",
-                "response_text": trace.get("response_text") or trace.get("response") or trace.get("assistant_response") or "",
+                "think": reasoning_text,
+                "response_text": _first_text(trace, ("response_text", "response", "assistant_response", "completion", "content")),
                 "tool_calls": _jsonable(tool_calls),
+                "parsed_tool_calls": _jsonable(parsed_tool_calls),
                 "tool_results": _jsonable(tool_results),
                 "observation": observation,
                 "raw_action": _jsonable(tool_calls[0]) if tool_calls else "",
-                "status": "error" if _looks_like_error(observation) else "ok",
+                "status": "error" if execution_error else "ok",
+                "execution_error": execution_error,
                 "recovered_reads": _jsonable(recovered_reads),
                 "exit_reason": trace.get("exit_reason"),
                 "parse_error": trace.get("parse_error"),
@@ -247,8 +603,31 @@ def _tool_observation(tool_results: list[Any]) -> str:
 
 
 def _looks_like_error(text: str) -> bool:
-    lowered = text.lower()
-    return any(marker in lowered for marker in ("traceback", "error:", "exception", "command failed", "no such file"))
+    sample = str(text or "")[:6000]
+    if re.search(r"\b(exit status|exit code|returned non-zero|command not found|segmentation fault)\b", sample, re.IGNORECASE):
+        return True
+    return any(
+        re.search(r"^\s*(traceback\b|error:|exception:|command failed\b|failed:|failure:|no such file\b|bash:|sh:)", line, re.IGNORECASE)
+        for line in sample.splitlines()[:80]
+    )
+
+
+def _step_execution_error(trace: dict[str, Any], tool_results: list[Any], observation: str) -> bool:
+    if _looks_like_error(observation):
+        return True
+    if trace.get("error") or trace.get("system_error"):
+        return True
+    for result_value in tool_results:
+        result = _as_mapping(result_value)
+        if result.get("error"):
+            return True
+        status = str(result.get("status") or result.get("state") or "").lower()
+        if status in {"error", "failed", "failure"}:
+            return True
+        exit_code = result.get("exit_code", result.get("returncode"))
+        if isinstance(exit_code, (int, float)) and int(exit_code) != 0:
+            return True
+    return False
 
 
 def _enrich_detail_from_record(
@@ -260,6 +639,8 @@ def _enrich_detail_from_record(
 ) -> dict[str, Any]:
     metadata = _record_metadata(record, request, log_dir=log_dir)
     enriched = {**metadata, **detail}
+    if enriched.get("run_step") is None:
+        enriched["run_step"] = metadata.get("run_step")
     if metadata.get("dataset") and enriched.get("data_source") in {None, "unknown"}:
         enriched["data_source"] = metadata["dataset"]
     enriched["experiment_key"] = metadata["experiment_key"]
@@ -271,11 +652,25 @@ def _enrich_detail_from_record(
     enriched["messages"] = _jsonable(record.get("messages") or [])
     enriched["trajectory"] = _jsonable(record.get("trajectory") or [])
     enriched["raw_response_text"] = record.get("response_text") or ""
+    enriched["issue_description"] = _issue_description(record)
+    enriched["golden_patch"] = _golden_patch(record)
     enriched["reward"] = record.get("reward")
     enriched["resolved"] = record.get("resolved")
     enriched["termination_reason"] = record.get("termination_reason")
     enriched["error"] = record.get("error")
     enriched["system_error"] = record.get("system_error")
+    token_usage = record.get("token_usage") if isinstance(record.get("token_usage"), dict) else {}
+    step_traces = _as_sequence(record.get("p2a_step_traces"))
+    trajectory = _as_sequence(record.get("trajectory"))
+    enriched["turns"] = len(step_traces or trajectory)
+    enriched["tool_calls"] = _record_tool_call_count(record)
+    enriched["wall_time"] = _number(record.get("wall_time") or record.get("execution_time"))
+    enriched["input_tokens"] = _number(token_usage.get("input_tokens"))
+    enriched["output_tokens"] = _number(token_usage.get("output_tokens"))
+    enriched["reasoning_tokens"] = _number(token_usage.get("reasoning_tokens"))
+    enriched["cache_hit_tokens"] = _number(token_usage.get("cache_hit_tokens"))
+    enriched["cache_write_tokens"] = _number(token_usage.get("cache_write_tokens"))
+    enriched["cost"] = _number(token_usage.get("cost"))
     enriched["step_inspection"] = _step_inspection(record, enriched.get("step_details") or [])
     return enriched
 
@@ -284,6 +679,122 @@ def _is_scored_detail(record: dict[str, Any]) -> bool:
     return "record_index" in record and (
         "chain_evaluable" in record or "hit_call_graph" in record or "step_details" in record
     )
+
+
+def _detail_bonus_map(detail: dict[str, Any]) -> dict[str, Any] | None:
+    projection = detail.get("chain_projection") if isinstance(detail.get("chain_projection"), dict) else {}
+    nodes: dict[str, dict[str, Any]] = {}
+    for node in projection.get("context_nodes") or []:
+        if isinstance(node, dict) and node.get("key"):
+            nodes[str(node["key"])] = {**node, "rewardable": node.get("rewardable", False)}
+    for node in projection.get("chain_nodes") or []:
+        if isinstance(node, dict) and node.get("key"):
+            nodes[str(node["key"])] = {**node, "rewardable": node.get("rewardable", True)}
+    topology = detail.get("graph_topology") if isinstance(detail.get("graph_topology"), dict) else {}
+    for node in topology.get("nodes") or []:
+        if isinstance(node, dict) and node.get("key"):
+            current = nodes.get(str(node["key"]), {})
+            nodes[str(node["key"])] = {**node, **current, "rewardable": current.get("rewardable", node.get("rewardable", True))}
+    if not nodes:
+        return None
+    return {
+        "call_graph_nodes": nodes,
+        "selected_issue_anchor_nodes": projection.get("anchors") or [],
+        "root_cause_nodes": projection.get("roots") or [],
+        "reward_path_edges": projection.get("chain_edges") or [],
+    }
+
+
+def _stored_step_hit_nodes(step: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes = step.get("hit_nodes")
+    if not nodes and isinstance(step.get("scored"), dict):
+        nodes = step["scored"].get("hit_nodes")
+    return [node for node in (nodes or []) if isinstance(node, dict) and node.get("key")]
+
+
+def _stored_step_order(step: dict[str, Any], fallback: int) -> int:
+    for key in ("trace_index", "step_index"):
+        value = step.get(key)
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return int(value)
+    return fallback
+
+
+def _stored_step_first_hits(detail: dict[str, Any]) -> dict[str, int]:
+    first_hits: dict[str, int] = {}
+    for fallback, step in enumerate(detail.get("step_details") or []):
+        if not isinstance(step, dict):
+            continue
+        order = _stored_step_order(step, fallback)
+        for node in _stored_step_hit_nodes(step):
+            first_hits.setdefault(str(node["key"]), order)
+    return first_hits
+
+
+def _stored_block_first_hits(detail: dict[str, Any]) -> dict[str, int]:
+    steps_by_trace = {
+        _stored_step_order(step, fallback): step
+        for fallback, step in enumerate(detail.get("step_details") or [])
+        if isinstance(step, dict)
+    }
+    first_hits: dict[str, int] = {}
+    for fallback, block in enumerate(detail.get("purpose_blocks") or []):
+        if not isinstance(block, dict):
+            continue
+        block_order = int(block.get("block_index") if isinstance(block.get("block_index"), int) else fallback)
+        step_refs = block.get("trace_indices") or block.get("step_indices") or []
+        for ref in step_refs:
+            if not isinstance(ref, int | float) or isinstance(ref, bool):
+                continue
+            step = steps_by_trace.get(int(ref))
+            if not step:
+                continue
+            for node in _stored_step_hit_nodes(step):
+                first_hits.setdefault(str(node["key"]), block_order)
+    return first_hits
+
+
+def _first_hit(first_hits: dict[str, int], node_keys: Iterable[str]) -> int | None:
+    values = [first_hits[key] for key in node_keys if key in first_hits]
+    return min(values) if values else None
+
+
+def _repair_order_semantics(detail: dict[str, Any]) -> None:
+    if not _is_order_metric_detail(detail):
+        return
+    bonus_map = _detail_bonus_map(detail)
+    if bonus_map is None:
+        return
+    anchors = set(bonus_map.get("selected_issue_anchor_nodes") or [])
+    roots = set(bonus_map.get("root_cause_nodes") or [])
+    first_hits = _stored_step_first_hits(detail)
+    if first_hits:
+        detail["order_score"], detail["order_defined"] = _kendall_order(first_hits, bonus_map)
+        detail["miracle_step"], detail["miracle_severity"] = _miracle_stats(
+            first_hits,
+            bonus_map,
+            anchor_nodes=anchors,
+            root_nodes=roots,
+        )
+        first_anchor = _first_hit(first_hits, anchors)
+        first_root = _first_hit(first_hits, roots)
+        detail["first_anchor_step"] = first_anchor
+        detail["first_root_step"] = first_root
+        if first_anchor is not None and first_root is not None:
+            detail["anchor_before_root"] = first_anchor <= first_root
+            detail["steps_anchor_to_root"] = first_root - first_anchor
+        else:
+            detail["anchor_before_root"] = None
+            detail["steps_anchor_to_root"] = None
+    block_hits = _stored_block_first_hits(detail)
+    if block_hits:
+        detail["block_order_score"], detail["block_order_defined"] = _kendall_order(block_hits, bonus_map)
+        detail["block_miracle_step"], detail["block_miracle_severity"] = _miracle_stats(
+            block_hits,
+            bonus_map,
+            anchor_nodes=anchors,
+            root_nodes=roots,
+        )
 
 
 def _normalize_detail(detail: dict[str, Any], index: int | None = None) -> dict[str, Any]:
@@ -340,6 +851,7 @@ def _normalize_detail(detail: dict[str, Any], index: int | None = None) -> dict[
         "n_hit_chain_nodes": 0,
         "chain_bad_patterns": {},
         "step_details": [],
+        "edited_root_cause": False,
         "purpose_blocks": [],
         "bad_patterns": {},
         "n_blocks": 0,
@@ -355,6 +867,7 @@ def _normalize_detail(detail: dict[str, Any], index: int | None = None) -> dict[
         "block_efficiency": None,
     }
     normalized.update(detail)
+    _repair_order_semantics(normalized)
     return normalized
 
 
@@ -425,6 +938,25 @@ def _score_records(
         )
         scored.append(_enrich_detail_from_record(detail, record, request))
     return scored
+
+
+def _raw_record_details(
+    records: Iterable[dict[str, Any]],
+    *,
+    request: DashboardRequest,
+    start_index: int = 0,
+) -> list[dict[str, Any]]:
+    details = []
+    for index, record in enumerate(records):
+        detail = {
+            "record_index": start_index + index,
+            "instance_id": _row_instance_id(record),
+            "data_source": _record_dataset(record) or "unknown",
+            "has_step_traces": bool(record.get("p2a_step_traces")),
+            "not_chain_evaluable_reason": "missing_bonus_map",
+        }
+        details.append(_enrich_detail_from_record(detail, record, request))
+    return details
 
 
 def _load_record_path(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -534,6 +1066,9 @@ def _load_db_records(conn: sqlite3.Connection, request: DashboardRequest) -> tup
         provider_source=request.provider_source,
         dataset=request.dataset,
     )
+    raw_columns = _sqlite_columns(conn, "raw_rollouts")
+    issue_sql = "r.issue_description" if "issue_description" in raw_columns else "NULL AS issue_description"
+    patch_sql = "r.golden_patch" if "golden_patch" in raw_columns else "NULL AS golden_patch"
     rows = conn.execute(
         f"""
         SELECT
@@ -547,6 +1082,8 @@ def _load_db_records(conn: sqlite3.Connection, request: DashboardRequest) -> tup
           c.artifact_rollouts,
           c.artifact_details,
           c.run_id,
+          {issue_sql},
+          {patch_sql},
           r.rollout_json,
           q.metrics_json
         FROM run_cells c
@@ -571,6 +1108,10 @@ def _load_db_records(conn: sqlite3.Connection, request: DashboardRequest) -> tup
             record.setdefault("model_api_name", row["model_api_name"])
             record.setdefault("run_id", row["run_id"])
             record.setdefault("artifact_rollouts", row["artifact_rollouts"])
+            if row["issue_description"] and not _issue_description(record):
+                record["issue_description"] = row["issue_description"]
+            if row["golden_patch"] and not _golden_patch(record):
+                record["golden_patch"] = row["golden_patch"]
             records.append(record)
 
         metrics = _safe_json_loads(row["metrics_json"], {})
@@ -588,6 +1129,8 @@ def _load_db_records(conn: sqlite3.Connection, request: DashboardRequest) -> tup
                     "model_api_name": row["model_api_name"],
                     "run_id": row["run_id"],
                     "artifact_rollouts": row["artifact_rollouts"],
+                    "issue_description": row["issue_description"],
+                    "golden_patch": row["golden_patch"],
                 }
                 stored_details.append(_enrich_detail_from_record(detail, fallback_record, request))
     return records, stored_details
@@ -723,13 +1266,25 @@ def _read_log_from_runs(runs: Iterable[dict[str, Any]], run_id: str, source: str
     for run in runs:
         if run.get("run_id") != run_id:
             continue
-        path = Path(str(run.get("path") or "")) / source
+        allowed_sources = {
+            str(item.get("key"))
+            for item in run.get("log_sources") or []
+            if isinstance(item, dict) and item.get("key")
+        }
+        if source not in allowed_sources:
+            raise FileNotFoundError(f"Run {run_id!r} log source {source!r} is not an enumerated log file")
+        base = Path(str(run.get("path") or "")).resolve()
+        path = (base / source).resolve()
+        if base != path and base not in path.parents:
+            raise FileNotFoundError(f"Run {run_id!r} log source {source!r} escapes the run directory")
+        if not path.is_file():
+            raise FileNotFoundError(f"Run {run_id!r} log source {source!r} not found")
         text = _tail(path, max_chars=120_000)
         return {
             "run_id": run_id,
             "source": source,
             "text": text,
-            "file_size": path.stat().st_size if path.exists() else 0,
+            "file_size": path.stat().st_size,
         }
     raise FileNotFoundError(f"Run {run_id!r} log source {source!r} not found")
 
@@ -761,6 +1316,175 @@ def _source_list(request: DashboardRequest) -> list[dict[str, str]]:
     return sources
 
 
+def _artifact_root_candidates(request: DashboardRequest) -> list[Path]:
+    candidates: list[Path] = []
+
+    def add(path: Path | None) -> None:
+        if path is None:
+            return
+        resolved = path.expanduser()
+        if resolved not in candidates:
+            candidates.append(resolved)
+
+    env_root = os.environ.get("P2A_ARTIFACTS_DIR") or os.environ.get("P2A_PROJECT_DATA_DIR")
+    if env_root:
+        add(Path(env_root))
+    if request.db_path:
+        add(request.db_path.parent.parent)
+    if request.log_dir:
+        add(request.log_dir)
+        add(request.log_dir.parent)
+    add(Path(__file__).resolve().parents[1] / "data")
+    add(Path.cwd() / "data")
+    return candidates
+
+
+def _record_dataset(record: dict[str, Any]) -> str | None:
+    extra = record.get("extra_info") if isinstance(record.get("extra_info"), dict) else {}
+    value = record.get("dataset") or record.get("data_source") or extra.get("data_source")
+    return str(value) if value else None
+
+
+def _detail_dataset(detail: dict[str, Any]) -> str | None:
+    value = detail.get("dataset") or detail.get("data_source")
+    return str(value) if value else None
+
+
+def _dataset_instance_ids(
+    raw_records: Iterable[dict[str, Any]],
+    details: Iterable[dict[str, Any]],
+) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = defaultdict(set)
+    for record in raw_records:
+        dataset = _record_dataset(record) or "unknown-dataset"
+        instance_id = record.get("instance_id")
+        if instance_id:
+            out[dataset].add(str(instance_id))
+    for detail in details:
+        dataset = _detail_dataset(detail) or "unknown-dataset"
+        instance_id = detail.get("instance_id")
+        if instance_id:
+            out[dataset].add(str(instance_id))
+    return out
+
+
+def _bonus_map_dir_has_instance(candidate: Path, instance_id: str) -> bool:
+    return any((candidate / f"{candidate_id}.json").exists() for candidate_id in _bonus_map_candidate_ids(instance_id))
+
+
+def _effective_bonus_map_dirs(
+    request: DashboardRequest,
+    raw_records: Iterable[dict[str, Any]],
+    details: Iterable[dict[str, Any]],
+) -> dict[str, Path]:
+    raw_records = list(raw_records)
+    details = list(details)
+    datasets = {name for name in [_record_dataset(record) for record in raw_records] if name}
+    datasets.update(name for name in [_detail_dataset(detail) for detail in details] if name)
+    if request.dataset:
+        datasets = {request.dataset}
+    if request.bonus_map_dir is not None:
+        if not datasets:
+            return {"": request.bonus_map_dir}
+        return {dataset: request.bonus_map_dir for dataset in datasets}
+    if not datasets:
+        return {}
+    instance_ids_by_dataset = _dataset_instance_ids(raw_records, details)
+    bonus_map_dirs: dict[str, Path] = {}
+    for dataset in sorted(datasets):
+        instance_ids = instance_ids_by_dataset.get(dataset, set())
+        for root in _artifact_root_candidates(request):
+            candidate = root / "bonus_maps" / dataset
+            if candidate.is_dir() and (
+                not instance_ids or any(_bonus_map_dir_has_instance(candidate, instance_id) for instance_id in instance_ids)
+            ):
+                bonus_map_dirs[dataset] = candidate
+                break
+    return bonus_map_dirs
+
+
+def _effective_bonus_map_dir(
+    request: DashboardRequest,
+    raw_records: Iterable[dict[str, Any]],
+    details: Iterable[dict[str, Any]],
+) -> Path | None:
+    bonus_map_dirs = _effective_bonus_map_dirs(request, raw_records, details)
+    unique_paths = {path for path in bonus_map_dirs.values()}
+    if len(unique_paths) == 1:
+        return next(iter(unique_paths))
+    return None
+
+
+def _bonus_map_summary_dir(bonus_map_dirs: dict[str, Path]) -> Path:
+    unique_paths = {path for path in bonus_map_dirs.values()}
+    if len(unique_paths) == 1:
+        return next(iter(unique_paths))
+    return Path("multiple_bonus_map_dirs") if unique_paths else Path(".")
+
+
+def _score_records_by_bonus_map_dir(
+    records: list[dict[str, Any]],
+    *,
+    request: DashboardRequest,
+    bonus_map_dirs: dict[str, Path],
+    start_index: int = 0,
+) -> tuple[list[dict[str, Any]], set[str]]:
+    scored: list[dict[str, Any]] = []
+    scored_datasets: set[str] = set()
+    fallback_dir = bonus_map_dirs.get("")
+    records_by_dataset: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        records_by_dataset[_record_dataset(record) or "unknown-dataset"].append(record)
+    for dataset, dataset_records in sorted(records_by_dataset.items()):
+        bonus_dir = bonus_map_dirs.get(dataset) or fallback_dir
+        if bonus_dir is None:
+            continue
+        score_request = replace(request, bonus_map_dir=bonus_dir, dataset=dataset if request.dataset is None else request.dataset)
+        scored.extend(_score_records(dataset_records, request=score_request, start_index=start_index + len(scored)))
+        scored_datasets.add(dataset)
+    return scored, scored_datasets
+
+
+def _records_for_unscored_datasets(records: Iterable[dict[str, Any]], scored_datasets: set[str]) -> list[dict[str, Any]]:
+    return [record for record in records if (_record_dataset(record) or "unknown-dataset") not in scored_datasets]
+
+
+def _source_list_with_bonus(request: DashboardRequest, bonus_map_dirs: dict[str, Path] | Path | None) -> list[dict[str, str]]:
+    sources = _source_list(request)
+    if request.bonus_map_dir is None:
+        if isinstance(bonus_map_dirs, Path):
+            sources.append({"kind": "bonus_map_dir", "path": str(bonus_map_dirs), "mode": "inferred"})
+        elif isinstance(bonus_map_dirs, dict):
+            for dataset, bonus_map_dir in sorted(bonus_map_dirs.items()):
+                sources.append({"kind": "bonus_map_dir", "path": str(bonus_map_dir), "dataset": dataset, "mode": "inferred"})
+    return sources
+
+
+def _has_eval_cache_schema(conn: sqlite3.Connection) -> bool:
+    rows = conn.execute(
+        """
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name IN ('run_cells', 'raw_rollouts', 'quantitative_metrics')
+        """
+    ).fetchall()
+    return {str(row["name"]) for row in rows} == {"run_cells", "raw_rollouts", "quantitative_metrics"}
+
+
+def _open_readonly_eval_cache(db_path: Path) -> sqlite3.Connection | None:
+    try:
+        conn = connect_readonly(db_path)
+    except FileNotFoundError:
+        return None
+    if _has_eval_cache_schema(conn):
+        return conn
+    conn.close()
+    return None
+
+
+def _sqlite_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
 def _avg(values: Iterable[Any]) -> float | None:
     real = [float(value) for value in values if isinstance(value, int | float) and not isinstance(value, bool)]
     return sum(real) / len(real) if real else None
@@ -769,6 +1493,45 @@ def _avg(values: Iterable[Any]) -> float | None:
 def _rate(values: Iterable[Any]) -> float | None:
     real = [1 if bool(value) else 0 for value in values if value is not None]
     return sum(real) / len(real) if real else None
+
+
+def _negative(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool) and value < 0
+
+
+def _combined_reverse_marker(item: dict[str, Any]) -> bool | None:
+    has_order = isinstance(item.get("order_score"), int | float) and not isinstance(item.get("order_score"), bool)
+    if not has_order:
+        return None
+    return _negative(item.get("order_score"))
+
+
+def _combined_miracle_marker(item: dict[str, Any]) -> bool | None:
+    if item.get("miracle_step") is None:
+        return None
+    return bool(item.get("miracle_step"))
+
+
+def _number(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_tool_call_count(record: dict[str, Any]) -> int:
+    total = 0
+    for trace in _as_sequence(record.get("p2a_step_traces")):
+        if isinstance(trace, dict):
+            total += len(_as_sequence(trace.get("tool_calls")))
+    if total:
+        return total
+    for message in _as_sequence(record.get("messages")):
+        if isinstance(message, dict):
+            total += len(_as_sequence(message.get("tool_calls")))
+    return total
 
 
 def _sum_int(items: Iterable[dict[str, Any]], key: str) -> int:
@@ -780,6 +1543,29 @@ def _sum_int(items: Iterable[dict[str, Any]], key: str) -> int:
     return total
 
 
+def _chain_node_precision(detail: dict[str, Any]) -> float | None:
+    projection = detail.get("chain_projection") or {}
+    chain_nodes = projection.get("chain_nodes") or []
+    context_nodes = projection.get("context_nodes") or []
+    if not isinstance(chain_nodes, list) or not isinstance(context_nodes, list):
+        return None
+    hit_chain = sum(1 for node in chain_nodes if isinstance(node, dict) and node.get("hit"))
+    hit_context = sum(1 for node in context_nodes if isinstance(node, dict) and node.get("hit"))
+    denom = hit_chain + hit_context
+    return (hit_chain / denom) if denom else None
+
+
+def _f1(precision: float | None, recall: float | None) -> float | None:
+    if precision is None or recall is None:
+        return None
+    denom = precision + recall
+    return 2 * precision * recall / denom if denom else 0.0
+
+
+def _chain_node_f1(detail: dict[str, Any]) -> float | None:
+    return _f1(_chain_node_precision(detail), _number(detail.get("chain_node_recall")))
+
+
 def _distribution(items: Iterable[dict[str, Any]], key: str) -> dict[str, int]:
     counts: dict[str, int] = defaultdict(int)
     for item in items:
@@ -787,6 +1573,37 @@ def _distribution(items: Iterable[dict[str, Any]], key: str) -> dict[str, int]:
         if value is not None:
             counts[str(value)] += 1
     return dict(sorted(counts.items()))
+
+
+def _detail_case_type(detail: dict[str, Any]) -> str:
+    return str(detail.get("bonus_case_type") or detail.get("chain_case_kind") or "")
+
+
+def _case_filter_bucket(detail: dict[str, Any]) -> str:
+    case_type = _detail_case_type(detail)
+    if detail.get("chain_evaluable") is True and case_type in {"direct", "standard"}:
+        return case_type
+    return "others"
+
+
+def _is_dynamic_traceable_detail(detail: dict[str, Any]) -> bool:
+    return detail.get("chain_evaluable") is True and _detail_case_type(detail) in DYNAMIC_TRACEABLE_CASE_TYPES
+
+
+def _has_dual_symptom_root(detail: dict[str, Any]) -> bool:
+    projection = detail.get("chain_projection") or {}
+    anchors = set(projection.get("anchors") or [])
+    roots = set(projection.get("roots") or [])
+    return bool(anchors & roots)
+
+
+def _has_reward_path_edges(detail: dict[str, Any]) -> bool:
+    projection = detail.get("chain_projection") or {}
+    return bool(projection.get("chain_edges") or [])
+
+
+def _is_order_metric_detail(detail: dict[str, Any]) -> bool:
+    return _is_dynamic_traceable_detail(detail) and _has_reward_path_edges(detail) and not _has_dual_symptom_root(detail)
 
 
 def _instance_key(detail: dict[str, Any]) -> str:
@@ -870,13 +1687,17 @@ def _detail_model_metrics(details: list[dict[str, Any]]) -> list[dict[str, Any]]
 
     rows = []
     for (experiment_key, source_kind, experiment_id, provider_source, dataset, model_label), items in sorted(groups.items()):
-        chain_items = [item for item in items if item.get("chain_evaluable") is True]
-        order_items = [item for item in items if item.get("order_defined") is True]
-        block_order_items = [item for item in items if item.get("block_order_defined") is True]
-        scored_blocks = _sum_int(items, "n_scored_read_blocks")
-        total_blocks = _sum_int(items, "n_blocks")
-        scored_block_steps = _sum_int(items, "n_scored_read_block_steps")
-        block_steps = _sum_int(items, "n_block_steps")
+        bonus_items = [item for item in items if _is_dynamic_traceable_detail(item)]
+        order_metric_items = [item for item in items if _is_order_metric_detail(item)]
+        order_items = [item for item in order_metric_items if item.get("order_defined") is True]
+        block_order_items = [item for item in order_metric_items if item.get("block_order_defined") is True]
+        scored_blocks = _sum_int(bonus_items, "n_scored_read_blocks")
+        total_blocks = _sum_int(bonus_items, "n_blocks")
+        scored_block_steps = _sum_int(bonus_items, "n_scored_read_block_steps")
+        block_steps = _sum_int(bonus_items, "n_block_steps")
+        cache_hit = sum(float(item.get("cache_hit_tokens") or 0) for item in items)
+        cache_write = sum(float(item.get("cache_write_tokens") or 0) for item in items)
+        input_tokens = sum(float(item.get("input_tokens") or 0) for item in items)
         row = {
             "experiment_key": experiment_key,
             "eval_cell_key": experiment_key,
@@ -886,6 +1707,7 @@ def _detail_model_metrics(details: list[dict[str, Any]]) -> list[dict[str, Any]]
             "dataset": dataset,
             "model_api_name": str(items[0].get("model_api_name") or model_label),
             "model_label": model_label,
+            "run_step": items[0].get("run_step"),
             "target": len(items),
             "done": len(items),
             "errors": sum(1 for item in items if item.get("error") or item.get("system_error")),
@@ -897,56 +1719,60 @@ def _detail_model_metrics(details: list[dict[str, Any]]) -> list[dict[str, Any]]
             "ground_truth_hit_rate": _rate(item.get("hit_ground_truth") for item in items),
             "near_hit_rate": _rate(item.get("hit_near") for item in items),
             "avg_min_distance": _avg(item.get("min_distance") for item in items),
-            "avg_read_precision": _avg(item.get("hit_precision") for item in items),
-            "avg_node_recall": _avg(item.get("hit_recall") for item in items),
-            "avg_hit_f1": _avg(item.get("hit_f1") for item in items),
-            "chain_graph_coverage": _rate(item.get("chain_graph_covered") for item in items),
-            "chain_hit_rate": _rate(item.get("chain_hit") for item in chain_items),
-            "anchor_hit_rate": _rate(item.get("anchor_hit") for item in chain_items),
-            "root_hit_rate": _rate(item.get("root_hit") for item in chain_items),
-            "avg_chain_node_recall": _avg(item.get("chain_node_recall") for item in chain_items),
-            "avg_chain_read_precision": _avg(item.get("chain_read_precision") for item in chain_items),
-            "avg_first_anchor_step": _avg(item.get("first_anchor_step") for item in chain_items),
-            "avg_first_root_step": _avg(item.get("first_root_step") for item in chain_items),
-            "avg_steps_anchor_to_root": _avg(item.get("steps_anchor_to_root") for item in chain_items),
-            "anchor_before_root_rate": _rate(item.get("anchor_before_root") for item in chain_items),
+            "avg_read_precision": _avg(item.get("hit_precision") for item in bonus_items),
+            "avg_node_recall": _avg(item.get("hit_recall") for item in bonus_items),
+            "avg_hit_f1": _avg(item.get("hit_f1") for item in bonus_items),
+            "chain_graph_coverage": _rate(item.get("chain_graph_covered") for item in bonus_items),
+            "chain_hit_rate": _rate(item.get("chain_hit") for item in bonus_items),
+            "anchor_hit_rate": _rate(item.get("anchor_hit") for item in bonus_items),
+            "root_hit_rate": _rate(item.get("root_hit") for item in bonus_items),
+            "avg_chain_node_recall": _avg(item.get("chain_node_recall") for item in bonus_items),
+            "avg_chain_node_precision": _avg(_chain_node_precision(item) for item in bonus_items),
+            "avg_chain_node_f1": _avg(_chain_node_f1(item) for item in bonus_items),
+            "avg_chain_read_precision": _avg(item.get("chain_read_precision") for item in bonus_items),
+            "avg_first_anchor_step": _avg(item.get("first_anchor_step") for item in bonus_items),
+            "avg_first_root_step": _avg(item.get("first_root_step") for item in bonus_items),
+            "avg_steps_anchor_to_root": _avg(item.get("steps_anchor_to_root") for item in bonus_items),
+            "anchor_before_root_rate": _rate(item.get("anchor_before_root") for item in bonus_items),
             "avg_order_score": _avg(item.get("order_score") for item in order_items),
-            "reverse_order_rate": _rate(
-                (item.get("order_score") < 0)
-                for item in order_items
-                if isinstance(item.get("order_score"), int | float)
-            ),
-            "miracle_rate": _rate(
-                item.get("miracle_step")
-                for item in items
-                if item.get("hit_ground_truth") and item.get("miracle_step") is not None
-            ),
-            "avg_miracle_severity": _avg(item.get("miracle_severity") for item in items),
+            "reverse_order_rate": _rate(_combined_reverse_marker(item) for item in order_metric_items),
+            "miracle_rate": _rate(_combined_miracle_marker(item) for item in order_metric_items),
+            "avg_miracle_severity": _avg(item.get("miracle_severity") for item in order_metric_items),
             "avg_block_order_score": _avg(item.get("block_order_score") for item in block_order_items),
             "block_reverse_order_rate": _rate(
-                (item.get("block_order_score") < 0)
-                for item in block_order_items
-                if isinstance(item.get("block_order_score"), int | float)
+                _negative(item.get("block_order_score"))
+                if isinstance(item.get("block_order_score"), int | float) and not isinstance(item.get("block_order_score"), bool)
+                else None
+                for item in order_metric_items
             ),
             "block_miracle_rate": _rate(
-                item.get("block_miracle_step")
-                for item in items
-                if item.get("hit_ground_truth") and item.get("block_miracle_step") is not None
+                None if item.get("block_miracle_step") is None else bool(item.get("block_miracle_step"))
+                for item in order_metric_items
             ),
-            "avg_block_efficiency": _avg(item.get("block_efficiency") for item in items),
-            "avg_blocks_per_trace": (total_blocks / len(items)) if items else None,
-            "block_achieve_rate": (_sum_int(items, "n_achieving_blocks") / scored_blocks) if scored_blocks else None,
-            "block_waste_rate": (_sum_int(items, "n_wasted_blocks") / scored_blocks) if scored_blocks else None,
-            "block_loop_rate": (_sum_int(items, "n_loop_blocks") / total_blocks) if total_blocks else None,
-            "achieving_block_step_share": (_sum_int(items, "n_achieving_block_steps") / scored_block_steps)
+            "avg_block_efficiency": _avg(item.get("block_efficiency") for item in bonus_items),
+            "avg_blocks_per_trace": (total_blocks / len(bonus_items)) if bonus_items else None,
+            "block_achieve_rate": (_sum_int(bonus_items, "n_achieving_blocks") / scored_blocks) if scored_blocks else None,
+            "block_waste_rate": (_sum_int(bonus_items, "n_wasted_blocks") / scored_blocks) if scored_blocks else None,
+            "block_loop_rate": (_sum_int(bonus_items, "n_loop_blocks") / total_blocks) if total_blocks else None,
+            "achieving_block_step_share": (_sum_int(bonus_items, "n_achieving_block_steps") / scored_block_steps)
             if scored_block_steps
             else None,
-            "wasted_block_step_share": (_sum_int(items, "n_wasted_block_steps") / scored_block_steps)
+            "wasted_block_step_share": (_sum_int(bonus_items, "n_wasted_block_steps") / scored_block_steps)
             if scored_block_steps
             else None,
-            "loop_block_step_share": (_sum_int(items, "n_loop_block_steps") / block_steps) if block_steps else None,
+            "loop_block_step_share": (_sum_int(bonus_items, "n_loop_block_steps") / block_steps) if block_steps else None,
             "loop_trace_rate": _rate((item.get("bad_patterns") or {}).get("has_loop") for item in items),
             "error_spiral_rate": _rate((item.get("bad_patterns") or {}).get("error_spiral") for item in items),
+            "avg_turns": _avg(item.get("turns") for item in items),
+            "avg_tool_calls": _avg(item.get("tool_calls") for item in items),
+            "avg_wall_time": _avg(item.get("wall_time") for item in items),
+            "avg_input_tokens": _avg(item.get("input_tokens") for item in items),
+            "avg_output_tokens": _avg(item.get("output_tokens") for item in items),
+            "avg_reasoning_tokens": _avg(item.get("reasoning_tokens") for item in items),
+            "cache_hit_rate": (cache_hit / (input_tokens + cache_hit)) if cache_hit and (input_tokens + cache_hit) else None,
+            "cache_write_rate": (cache_write / (input_tokens + cache_write)) if cache_write and (input_tokens + cache_write) else None,
+            "total_cache_write_tokens": cache_write if cache_write else None,
+            "total_cost": sum(float(item.get("cost") or 0) for item in items) if items else None,
             "not_chain_evaluable_reasons": _distribution(
                 [item for item in items if not item.get("chain_evaluable")],
                 "not_chain_evaluable_reason",
@@ -955,6 +1781,16 @@ def _detail_model_metrics(details: list[dict[str, Any]]) -> list[dict[str, Any]]
         }
         rows.append(row)
     return rows
+
+
+def _case_filter_model_metrics(details: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    out: dict[str, list[dict[str, Any]]] = {}
+    for mask in range(1, 1 << len(CASE_FILTER_BUCKETS)):
+        buckets = tuple(bucket for index, bucket in enumerate(CASE_FILTER_BUCKETS) if mask & (1 << index))
+        key = ",".join(buckets)
+        filtered = [detail for detail in details if _case_filter_bucket(detail) in buckets]
+        out[key] = _detail_model_metrics(filtered) if filtered else []
+    return out
 
 
 def _normalize_model_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -973,10 +1809,11 @@ def _merge_model_metrics(base_rows: list[dict[str, Any]], detail_rows: list[dict
     merged = {_normalize_model_row(row)["eval_cell_key"]: _normalize_model_row(row) for row in base_rows}
     for row in detail_rows:
         current = merged.get(row["eval_cell_key"], {})
-        merged[row["eval_cell_key"]] = {**row, **current, **{key: value for key, value in row.items() if value is not None}}
+        merged_row = dict(row)
         for key in ("target", "done", "errors", "pending"):
             if current.get(key) is not None:
-                merged[row["eval_cell_key"]][key] = current[key]
+                merged_row[key] = current[key]
+        merged[row["eval_cell_key"]] = _normalize_model_row(merged_row)
     return sorted(merged.values(), key=lambda item: (str(item.get("experiment_id")), str(item.get("model_label"))))
 
 
@@ -1002,6 +1839,7 @@ def _eval_cell_registry(model_metrics: list[dict[str, Any]], details: list[dict[
                 "dataset": row.get("dataset"),
                 "model_api_name": row.get("model_api_name"),
                 "model_label": row.get("model_label"),
+                "run_step": row.get("run_step"),
                 "target": row.get("target"),
                 "done": row.get("done"),
                 "errors": row.get("errors"),
@@ -1058,33 +1896,55 @@ def _dataset_registry(
 def build_dashboard_snapshot(request: DashboardRequest) -> dict[str, Any]:
     raw_records = _load_rollout_paths(request.rollouts)
     details = _load_detail_paths(request.details)
+    stored_db_details: list[dict[str, Any]] = []
     runs = _scan_log_dir(request.log_dir)
     raw_records.extend(_load_uni_agent_records(request.log_dir))
 
     base_model_metrics: list[dict[str, Any]] = []
     if request.db_path:
-        with ensure_db(request.db_path) as conn:
-            base_model_metrics = aggregate_model_metrics(
-                conn,
-                experiment_id=request.experiment_id,
-                provider_source=request.provider_source,
-                dataset=request.dataset,
-            )
-            db_records, db_details = _load_db_records(conn, request)
-            raw_records.extend(db_records)
-            if request.bonus_map_dir is None:
-                details.extend(db_details)
-            runs.extend(_scan_db_artifact_runs(conn, request))
+        conn = _open_readonly_eval_cache(request.db_path)
+        if conn is not None:
+            try:
+                base_model_metrics = aggregate_model_metrics(
+                    conn,
+                    experiment_id=request.experiment_id,
+                    provider_source=request.provider_source,
+                    dataset=request.dataset,
+                )
+                db_records, db_details = _load_db_records(conn, request)
+                raw_records.extend(db_records)
+                stored_db_details.extend(db_details)
+                runs.extend(_scan_db_artifact_runs(conn, request))
+            finally:
+                conn.close()
 
-    if request.bonus_map_dir is not None and raw_records:
-        details.extend(_score_records(raw_records, request=request, start_index=len(details)))
+    bonus_map_dirs = _effective_bonus_map_dirs(request, raw_records, [*details, *stored_db_details])
+    scored_datasets: set[str] = set()
+    if raw_records:
+        scored_details, scored_datasets = _score_records_by_bonus_map_dir(
+            raw_records,
+            request=request,
+            bonus_map_dirs=bonus_map_dirs,
+            start_index=len(details),
+        )
+        details.extend(scored_details)
+        stored_detail_datasets = {_dataset_name(detail) for detail in stored_db_details}
+        raw_fallback_records = [
+            record
+            for record in _records_for_unscored_datasets(raw_records, scored_datasets)
+            if (_record_dataset(record) or "unknown-dataset") not in stored_detail_datasets
+        ]
+        details.extend(_raw_record_details(raw_fallback_records, request=request, start_index=len(details)))
+    details.extend(detail for detail in stored_db_details if _dataset_name(detail) not in scored_datasets)
 
     if details:
         details = _normalize_details(details)
+        _enrich_details_from_dataset_parquet(details, request)
+        _enrich_details_from_bonus_map_dirs(details, bonus_map_dirs)
         summary = _finalize_summary(summarize(
             details,
             source=_summary_source(request),
-            bonus_map_dir=request.bonus_map_dir or Path("."),
+            bonus_map_dir=_bonus_map_summary_dir(bonus_map_dirs),
             tracking_mode=request.tracking_mode,
             near_threshold=request.near_threshold,
             m_max=request.m_max,
@@ -1101,6 +1961,9 @@ def build_dashboard_snapshot(request: DashboardRequest) -> dict[str, Any]:
 
     detail_model_metrics = _detail_model_metrics(details)
     model_metrics = _merge_model_metrics(base_model_metrics, detail_model_metrics)
+    dynamic_traceable_details = [detail for detail in details if _is_dynamic_traceable_detail(detail)]
+    dynamic_traceable_model_metrics = _detail_model_metrics(dynamic_traceable_details)
+    case_filter_model_metrics = _case_filter_model_metrics(details)
     eval_cells = _eval_cell_registry(model_metrics, details)
     distributions_by_dataset = _dataset_distributions(details)
     datasets = _dataset_registry(details, eval_cells, distributions_by_dataset)
@@ -1122,15 +1985,18 @@ def build_dashboard_snapshot(request: DashboardRequest) -> dict[str, Any]:
             "provider_source": request.provider_source,
             "dataset": request.dataset,
         },
-        "sources": _source_list(request),
+        "sources": _source_list_with_bonus(request, bonus_map_dirs),
         "datasets": datasets,
         "eval_cells": eval_cells,
         "experiments": eval_cells,
         "summary": summary,
         "model_metrics": model_metrics,
+        "dynamic_traceable_model_metrics": dynamic_traceable_model_metrics,
+        "case_filter_model_metrics": case_filter_model_metrics,
         "runs": sorted(deduped_runs.values(), key=lambda run: (str(run.get("status")), str(run.get("run_id")))),
         "details": details[: request.detail_limit],
         "detail_count": len(details),
+        "dynamic_traceable_detail_count": len(dynamic_traceable_details),
         "raw_record_count": len(raw_records),
     }
 
@@ -1138,8 +2004,12 @@ def build_dashboard_snapshot(request: DashboardRequest) -> dict[str, Any]:
 def read_dashboard_log(request: DashboardRequest, run_id: str, source: str = "run.log") -> dict[str, Any]:
     runs = _scan_log_dir(request.log_dir)
     if request.db_path:
-        with ensure_db(request.db_path) as conn:
-            runs.extend(_scan_db_artifact_runs(conn, request))
+        conn = _open_readonly_eval_cache(request.db_path)
+        if conn is not None:
+            try:
+                runs.extend(_scan_db_artifact_runs(conn, request))
+            finally:
+                conn.close()
     return _read_log_from_runs(runs, run_id=run_id, source=source)
 
 

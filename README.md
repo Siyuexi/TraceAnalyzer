@@ -411,17 +411,56 @@ unit: source kind (`local_training`, `local_inference`, or `third_party_api`),
 experiment id, provider, dataset, and model label. Select a dataset first, then
 select an eval cell/model before inspecting trajectories.
 
-The Macro KPI tab is the model-level analysis surface for the selected dataset.
-It renders one comparison table with effect/rigor metrics first (task success,
-read precision, node recall, F1, anchor/root hits, order, miracle, purpose-block
-rates, bad patterns) and efficiency/cost metrics after them (turns, tools, wall
-time, tokens, cost, cache hit). Cache-write metrics are hidden until populated.
+The Metrics tab is the model-level analysis surface for the selected dataset.
+It renders one comparison table grouped by semantics: Graph metrics
+(`Graph P.`, `Graph R.`, `Graph F1`) score agent reads against the real
+dependency graph captured by instrumentation/failing-test execution; Outcome
+metrics report task success and symptom/root-cause hits; Path metrics score the
+issue symptom-to-root-cause subgraph/path with `Path P.`, `Path R.`, and
+`Path F1`; Pattern, purpose-block, and efficiency/cost
+metrics come after them. Cache-write metrics are hidden
+until populated. In user-facing terminology, Graph means the captured
+dependency graph, Path means the symptom-to-root-cause subgraph/path, and Trace
+means the model/agent execution trajectory.
+The SQLite eval cache is treated as raw capture plus run status by default:
+stored rollout JSON, messages, trajectories, issue descriptions, golden
+patches, and token/runtime data are read from DB, while localization metrics and
+trace pattern states are recomputed by the dashboard from raw rollouts and the
+matching bonus maps. If `--bonus-map-dir` is omitted, the dashboard tries
+`data/bonus_maps/<dataset>` under the artifact root and uses it only when it
+contains matching instance maps. Persisted DB score fields are compatibility
+fallbacks, not the default semantic source of truth; new collection paths should
+not write localization score columns, `metrics_json.detail`, or trace pattern
+flags. If old DB rows do not carry issue descriptions or golden patches, the
+dashboard fills them from `--data-file` or the standard local dataset parquet for
+the selected dataset. Node Source is bonus-map data: the dashboard reads full
+callable source from the explicit or inferred P2A bonus-map directory, and DB
+`source_preview` fields are only stale artifact fallbacks.
 The Run Provenance tab explains artifact/log-producing executions and only
 mixes runs into a selected eval cell when they carry explicit eval-cell links;
-unlinked logs are shown separately. The Trajectories tab is the micro-analysis
+unlinked logs are shown separately. The Traces tab is the micro-analysis
 surface: narrow instance list on the left, graph plus purpose-block/step
 timeline in the middle, and a wide right panel with parsed tool/action details,
-observations, recovered reads, inline edit diffs, and matched bonus-map nodes.
+separate reasoning/chat text, collapsible raw action/observation payloads, and
+inline edit diffs when write actions provide old/new text. Step colors and trace
+markers come from P2A parser/scorer fields: reads, writes, execution errors,
+root-cause edits, symptom/root-cause hits, and dependency-path hits are computed
+in `p2a/core.py`, `p2a/eval_fault_localization.py`, and
+`p2a/dashboard_adapter.py`, then rendered by the frontend. Execution-failure
+marks use structured tool status, nonzero exit codes, explicit error fields, or
+traceback/command-failure output; source code that merely contains words such as
+`Error` is not a failed step. Miracle means root-cause access before the
+symptom/anchor evidence, or before intermediate dependency evidence; dashboard
+miracle/reverse rates are shares of the currently filtered direct/standard
+traces, matching the trace-list pattern markers. If one read step observes the
+symptom, intermediate nodes, and root cause together, that simultaneous
+observation is not a miracle. Step colors split into equal role segments when a
+single step hits multiple map roles; a callable that is both symptom and root
+cause uses a diagonal split so it is visually distinct from a multi-node step
+hit. Node Source uses the full captured callable source when the bonus map
+provides it. The
+global case filters keep Overview as the full dataset registry while restricting
+Metrics and Traces to the checked `standard`, `direct`, or `other` case types.
 
 The offline `summary-out` and `details-out` files are post-hoc artifacts for
 inspecting dumped rollouts. Training and validation do not read them; live
@@ -471,9 +510,10 @@ uv run python scripts/p2a_dashboard.py \
 ```
 
 The old terminal/TUI batch watcher has been folded into this HTML dashboard.
-The Macro KPI tab keeps per-model progress and efficiency/cost/cache visibility,
+The Metrics tab keeps per-model progress and efficiency/cost/cache visibility,
 but the primary diagnostic metrics are the shared Python scorer outputs:
-read precision, node recall, F1, anchor/root hit rates, order/reverse-order,
+graph P./R./F1, path P./R./F1,
+anchor/root hit rates, order/reverse-order,
 miracle, purpose-block achieved/wasted/loop rates, and chain bad-pattern flags.
 
 If the smoke phase records only system errors such as ARL gateway or interactive
@@ -560,14 +600,15 @@ the training split and `P2A_EVAL_BONUS_MAP_DIR` at the validation split.
 | `graph_hit_rate_over_call_graphs` | Fraction whose reads hit any node in the eval call graph. |
 | `ground_truth_hit_rate_over_call_graphs` | Fraction whose reads hit a patched callable (`distance == 0`). |
 | `near_hit_rate_over_call_graphs` | Fraction whose best read distance is `<= --near-threshold` (default `0.5`). |
-| `avg_node_recall` / `avg_read_precision` / `avg_hit_f1` | Node-level hit recall, read precision, and F1 across scored rollouts. |
+| `avg_read_precision` / `avg_node_recall` / `avg_hit_f1` | Graph P., Graph R., and Graph F1 across scored rollouts. |
+| `avg_chain_node_precision` / `chain_node_recall` / `avg_chain_node_f1` | Path P., Path R., and Path F1 over deduplicated path/context node hits. The raw `chain_read_precision` field remains a read-level compatibility metric, but the dashboard does not expose it as Path P. |
 | `avg_order_score` / `reverse_order_rate` | Kendall-style agreement between read order and movement from tests toward patched callables. |
 | `miracle_rate_over_gt_hits` | Fraction of ground-truth hits that jump directly to patched code before reading intermediate graph levels. |
 | `avg_block_order_score` / `block_miracle_rate_over_gt_hits` | Same order and miracle diagnostics after purpose-block segmentation. |
 | `block_achieve_rate` / `block_waste_rate` / `block_loop_rate` | Purpose-block outcomes, including repeated same-action loop blocks. |
 | `avg_block_efficiency_steps` | Average steps to first call-graph hit inside achieving read blocks. |
 | `achieving_block_step_share` / `wasted_block_step_share` / `loop_block_step_share` | Share of block-covered steps spent in each block outcome. |
-| `bad_pattern_trace_rate` / `error_spiral_rate` | Trace-level loop and repeated-error flags. |
+| `bad_pattern_trace_rate` / `error_spiral_rate` | Trace-level loop and repeated-error flags. Step-level execution errors are parsed from tool results, command status, and traceback/error text. |
 | `avg_min_distance_on_hits` | Lower is better; `0` means the model read the edited callable. |
 | `avg_best_positive_multiplier_on_hits` | The diagnostic P2A multiplier implied by the best read distance. |
 

@@ -231,6 +231,42 @@ def _as_jsonable(value: Any) -> Any:
     return value
 
 
+def _content_text(value: Any) -> str:
+    value = _as_jsonable(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                block_type = str(item.get("type") or "")
+                if block_type in {"text", "output_text", "message"} and item.get("value") is not None:
+                    parts.append(str(item["value"]))
+                elif block_type in {"text", "output_text", "message"} and item.get("text") is not None:
+                    parts.append(str(item["text"]))
+        return "".join(parts)
+    return ""
+
+
+def _block_text(blocks: Any, *, block_type: str | None = None) -> str:
+    blocks = _as_jsonable(blocks)
+    if not isinstance(blocks, list):
+        return ""
+    parts = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if block_type is not None and block.get("type") != block_type:
+            continue
+        if block.get("value") is not None:
+            parts.append(str(block["value"]))
+        elif block.get("text") is not None:
+            parts.append(str(block["text"]))
+    return "".join(parts)
+
+
 def _load_rows(path: Path) -> list[dict[str, Any]]:
     if path.suffix.lower() == ".parquet":
         import pandas as pd
@@ -393,20 +429,51 @@ async def _install_tools(
 
 def build_step_traces(interaction_result: dict[str, Any]) -> list[dict[str, Any]]:
     messages = interaction_result.get("messages") or []
-    assistant_messages = [message for message in messages if isinstance(message, dict) and message.get("role") == "assistant"]
+    assistant_messages = [
+        (index, message)
+        for index, message in enumerate(messages)
+        if isinstance(message, dict) and message.get("role") == "assistant"
+    ]
+    rollout_cache = interaction_result.get("rollout_cache") or {}
+    assistant_metadata = rollout_cache.get("internal_api_assistant_metadata") or {}
     traces = []
     for idx, step in enumerate(interaction_result.get("trajectory") or []):
         step_data = _as_jsonable(step)
-        message = assistant_messages[idx] if idx < len(assistant_messages) else {}
+        message_index, message = assistant_messages[idx] if idx < len(assistant_messages) else (-1, {})
+        metadata = {}
+        if isinstance(assistant_metadata, dict):
+            metadata = assistant_metadata.get(str(message_index)) or assistant_metadata.get(message_index) or {}
+            metadata = _as_jsonable(metadata) if isinstance(metadata, dict) else {}
+        text_blocks = metadata.get("text_blocks") or message.get("text_blocks") or []
+        reasoning_blocks = metadata.get("reasoning_blocks") or message.get("reasoning_blocks") or []
+        reasoning_content = (
+            metadata.get("reasoning_content")
+            or message.get("reasoning_content")
+            or _block_text(reasoning_blocks)
+            or ""
+        )
+        response_text = (
+            step_data.get("response")
+            or _content_text(message.get("content"))
+            or _block_text(text_blocks)
+            or ""
+        )
+        trace = {
+            "step_idx": int(step_data.get("step_idx", idx + 1)),
+            "response_text": response_text,
+            "thought": step_data.get("thought") or "",
+            "tool_calls": _as_jsonable(message.get("tool_calls") or []),
+            "tool_results": _as_jsonable(step_data.get("tool_results") or []),
+            "exit_reason": step_data.get("exit_reason"),
+        }
+        if reasoning_content:
+            trace["reasoning_content"] = reasoning_content
+        if reasoning_blocks:
+            trace["reasoning_blocks"] = _as_jsonable(reasoning_blocks)
+        if text_blocks:
+            trace["text_blocks"] = _as_jsonable(text_blocks)
         traces.append(
-            {
-                "step_idx": int(step_data.get("step_idx", idx + 1)),
-                "response_text": step_data.get("response") or message.get("content") or "",
-                "thought": step_data.get("thought") or "",
-                "tool_calls": _as_jsonable(message.get("tool_calls") or []),
-                "tool_results": _as_jsonable(step_data.get("tool_results") or []),
-                "exit_reason": step_data.get("exit_reason"),
-            }
+            trace
         )
     return traces
 
@@ -432,6 +499,7 @@ def build_dump_record(
 
     trajectory = _as_jsonable((interaction_result or {}).get("trajectory") or [])
     messages = _as_jsonable((interaction_result or {}).get("messages") or [])
+    rollout_cache = (interaction_result or {}).get("rollout_cache", {}) if isinstance(interaction_result, dict) else {}
     traces = build_step_traces(interaction_result or {})
     responses = [trace["response_text"] for trace in traces if trace.get("response_text")]
     termination_reason = trajectory[-1].get("exit_reason") if trajectory else "error" if error else "unknown"
@@ -452,8 +520,9 @@ def build_dump_record(
         "resolved": bool(reward_details.get("resolved")) if isinstance(reward_details, dict) else None,
         "termination_reason": termination_reason,
         "execution_time": (interaction_result or {}).get("execution_time"),
-        "metrics": _as_jsonable((interaction_result or {}).get("rollout_cache", {}).get("metrics", {})),
-        "token_usage": _as_jsonable((interaction_result or {}).get("rollout_cache", {}).get("token_usage", {})),
+        "metrics": _as_jsonable(rollout_cache.get("metrics", {})),
+        "token_usage": _as_jsonable(rollout_cache.get("token_usage", {})),
+        "assistant_metadata": _as_jsonable(rollout_cache.get("internal_api_assistant_metadata", {})),
         "extra_info": extra_info,
         "error": error,
         "error_kind": error_kind,

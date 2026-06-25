@@ -42,6 +42,42 @@ is on `main`.
   semantics, experiment definitions, or public terminology, update root
   `proposal.md`, `proposal.html`, and `report/proposal.html` in the same unit.
 
+## Semantic consistency rules
+
+- Do not let dashboard-only terminology drift from P2A functionality. Trace
+  labels, KPI names, legend text, reports, and README explanations must use the
+  same semantics as `p2a/core.py`, `p2a/eval_fault_localization.py`, and
+  `p2a/dashboard_adapter.py`.
+- Use Graph / Path / Trace terminology consistently. **Graph** means the real
+  dependency graph captured from instrumentation/failing-test execution.
+  **Path** means the issue symptom-to-root-cause subgraph/path. **Trace** means
+  the model/agent execution trajectory. Do not use "Trace" for the captured
+  dependency graph in user-facing labels or research text.
+- If a dashboard feature depends on read/write/error/root-cause semantics, add
+  or reuse the corresponding parser/scorer fields in P2A source first, then
+  render those fields in the frontend. Avoid frontend-only inference for
+  metrics or trace status unless it is a compatibility fallback for old
+  artifacts.
+- Treat the SQLite eval cache as a raw capture and run-status store by default.
+  Dashboard metrics and trace pattern states must be computed from raw rollout
+  content plus bonus maps in dashboard/scorer code, not trusted from stale DB
+  score fields. New collection paths should store basic facts such as resolved
+  state, token usage, runtime, artifacts, and raw rollout content, but should
+  not populate localization score columns, `metrics_json.detail`, or pattern
+  flags. If dashboard-computed scores are persisted later, the write path is
+  one-way dashboard -> DB and the default read path still recomputes.
+- Treat node source code as bonus-map data. Dashboard Node Source must read full
+  callable source from the inferred or explicit P2A bonus-map directory; DB
+  `source_preview` fields are only compatibility fallbacks for old artifacts.
+- Execution failure must be inferred from structured tool/runtime signals such
+  as `status`, `error`, nonzero exit code, or traceback/command-failure output,
+  not from broad keyword scans over source code or successful read observations.
+- Keep the unified dashboard compatible with local training, local inference,
+  and third-party API inference artifacts. New trace fields should degrade
+  cleanly when older artifacts do not contain them.
+- When public-facing semantics change, update the README and, where research
+  claims are affected, keep the proposal/report documents synchronized.
+
 ## ARL is a sandbox, not a VRC remote
 
 ARL is the containerized compute backend. The `arl-env` SDK connects directly to the

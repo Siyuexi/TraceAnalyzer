@@ -6,15 +6,161 @@ const state = {
   selectedExperimentKey: null,
   selectedTraceKey: null,
   selectedStepIndex: 0,
+  selectedGraphNodeKey: null,
+  activeTracePanel: "steps",
+  tracePanelOpen: { graph: false, steps: true },
   traceQuery: "",
   refreshTimer: null,
+  loadingSnapshot: false,
+  caseFilters: { direct: true, standard: true, others: false },
+  metricGroupFilters: {
+    scope: true,
+    graph: true,
+    outcome: true,
+    dependency_path: true,
+    exploration_behavior: true,
+    purpose_blocks: true,
+    efficiency_cost: true,
+  },
+  showGraphContext: false,
+  graphEdgeFilters: { reward: true, call: false, agent: true },
 };
+
+const BONUS_MAP_METRIC_CASE_TYPES = new Set(["direct", "standard"]);
+
+const MACRO_METRIC_GROUPS = [
+  {
+    key: "scope",
+    title: "Scope",
+    items: [
+      ["Done", "Completed cases over planned cases."],
+      ["Errors", "Runs that ended with an execution or system error."],
+    ],
+  },
+  {
+    key: "graph",
+    title: "Graph",
+    items: [
+      ["Graph P.", "Parsed reads that hit a Graph node."],
+      ["Graph R.", "Graph nodes hit by the agent trace."],
+      ["Graph F1", "Harmonic mean of Graph P. and Graph R."],
+    ],
+  },
+  {
+    key: "outcome",
+    title: "Outcome",
+    items: [
+      ["First root cause", "Average first step that reached a root cause."],
+      ["First symptom", "Average first step that reached the symptom."],
+      ["Root cause hit", "Reached a precomputed cause or fix target."],
+      ["Symptom hit", "Reached the observed failure signal."],
+      ["Task success", "Evaluator-resolved pass rate."],
+    ],
+  },
+  {
+    key: "dependency_path",
+    title: "Path",
+    items: [
+      ["Path P.", "Unique hit nodes that are Path nodes."],
+      ["Path R.", "Unique Path nodes hit by the agent trace."],
+      ["Path F1", "Harmonic mean of Path P. and Path R."],
+    ],
+  },
+  {
+    key: "exploration_behavior",
+    title: "Pattern",
+    items: [
+      ["Order score", "Whether graph hits move from symptom toward root cause."],
+      ["Reverse rate", "Filtered trace share with reverse traversal marker."],
+      ["Miracle rate", "Filtered trace share with miracle marker."],
+      ["Loop trace", "Traces with repeated exploration behavior."],
+      ["Error spiral", "Long consecutive tool-error runs."],
+    ],
+  },
+  {
+    key: "purpose_blocks",
+    title: "Purpose Blocks",
+    items: [
+      ["Blocks", "Average intention blocks per trace."],
+      ["Achieved", "Read blocks that hit useful graph nodes."],
+      ["Wasted", "Read blocks with no map payoff."],
+      ["Loop blocks", "Blocks repeating the same exploration intent."],
+    ],
+  },
+  {
+    key: "efficiency_cost",
+    title: "Efficiency and Cost",
+    items: [
+      ["Turns/Tools/Wall", "Average turns, tool calls, and seconds."],
+      ["In/Out/Reason", "Average provider token counts."],
+      ["Cost", "Total reported API cost."],
+      ["Cache hit/write", "Provider prompt-cache token ratios."],
+    ],
+  },
+];
+
+const TRACE_LEGEND_GROUPS = [
+  {
+    title: "Trace Patterns",
+    items: [
+      { sample: '<span class="legend-icon">🔎</span>', text: "Hit symptom: observed failure signal." },
+      { sample: '<span class="legend-icon">🎯</span>', text: "Hit root cause: expected cause or fix target." },
+      { sample: '<span class="legend-icon">✎</span>', text: "Edited root cause: a write landed on a root-cause node." },
+      { sample: '<span class="legend-icon">🔁</span>', text: "Loop: repeated purpose block." },
+      { sample: '<span class="legend-icon">✨</span>', text: "Miracle: cause hit before enough graph evidence." },
+      { sample: '<span class="legend-icon">🌀</span>', text: "Reverse: traversal goes against dependency order." },
+    ],
+  },
+  {
+    title: "Read Step Colors",
+    items: [
+      { sample: '<span class="legend-step root"><span class="legend-step-num">7</span><span>root cause</span></span>', text: "This step hit root cause." },
+      { sample: '<span class="legend-step symptom"><span class="legend-step-num">3</span><span>symptom</span></span>', text: "This step hit symptom." },
+      { sample: '<span class="legend-step chain"><span class="legend-step-num">5</span><span>map hit</span></span>', text: "This step hit another dependency-path node." },
+      { sample: '<span class="legend-step multi-hit" style="--step-bg: linear-gradient(90deg, #dcfce7 0 33.33%, #dbeafe 33.33% 66.67%, #fee2e2 66.67% 100%);"><span class="legend-step-num">3</span><span>split</span></span>', text: "One step hit multiple map roles." },
+      { sample: '<span class="legend-step offmap"><span class="legend-step-num">9</span><span>off map</span></span>', text: "Parsed read outside the dependency path." },
+    ],
+  },
+  {
+    title: "Write / Execute / Other Step Colors",
+    items: [
+      { sample: '<span class="legend-step root-edit"><span class="legend-step-num">8</span><span>root edit</span></span>', text: "Write action modified root cause." },
+      { sample: '<span class="legend-step edit"><span class="legend-step-num">4</span><span>edit</span></span>', text: "Write action did not hit root cause." },
+      { sample: '<span class="legend-step neutral is-error"><span class="legend-step-num">6</span><span>failed</span></span>', text: "Tool or command execution failed." },
+      { sample: '<span class="legend-step exec-other"><span class="legend-step-num">2</span><span>exec / other</span></span>', text: "Exec or other tool without a parsed read hit." },
+    ],
+  },
+];
+
+const GRAPH_LEGEND_GROUPS = [
+  {
+    title: "Nodes",
+    items: [
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node symptom hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">7</text></g><text class="legend-graph-text" x="42" y="16">hit step</text><text class="legend-graph-sub" x="42" y="29">step 7</text></svg>', text: "Number is the first visited step." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node chain miss" transform="translate(20,19)"><circle r="14"></circle></g><text class="legend-graph-text" x="42" y="16">map node</text><text class="legend-graph-sub" x="42" y="29">not hit</text></svg>', text: "Faded node was not visited." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node chain hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">4</text></g><text class="legend-graph-text" x="42" y="16">save x3</text><text class="legend-graph-sub" x="42" y="29">same span</text></svg>', text: "Multiple symbols share one source span." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><linearGradient id="graph-symptom-root-cause-fill" x1="0" y1="1" x2="1" y2="0"><stop offset="50%" stop-color="#dcfce7"></stop><stop offset="50%" stop-color="#fee2e2"></stop></linearGradient></defs><g class="graph-node symptom-root-cause hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">2</text></g><text class="legend-graph-text" x="42" y="16">S+RC</text><text class="legend-graph-sub" x="42" y="29">same callable</text></svg>', text: "Same callable has both roles." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node root hit edited" transform="translate(20,19)"><circle r="14"></circle><circle class="graph-edit-ring" r="18"></circle><text class="graph-step" y="4">8</text></g><text class="legend-graph-text" x="42" y="16">final edit</text><text class="legend-graph-sub" x="42" y="29">purple ring</text></svg>', text: "Last edit landed on this node." },
+    ],
+  },
+  {
+    title: "Edges",
+    items: [
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-chain" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2563eb"></path></marker></defs><path class="graph-edge chain" d="M12 20 C42 6, 74 6, 108 20" marker-end="url(#legend-arrow-chain)"></path></svg>', text: "Path edge: fixed Graph edge on the symptom-to-root Path." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-context" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#667085"></path></marker></defs><path class="graph-edge context" d="M12 20 C42 32, 74 32, 108 20" marker-end="url(#legend-arrow-context)"></path></svg>', text: "Graph edge: fixed Graph edge outside the Path." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-agent" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#c2410c"></path></marker></defs><path class="graph-edge agent" d="M12 20 C42 6, 74 32, 108 20" marker-end="url(#legend-arrow-agent)"></path><text class="graph-agent-label" x="58" y="19">1</text></svg>', text: "Trace edge: observed jump between visited Graph nodes." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-order" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2563eb"></path></marker></defs><circle cx="16" cy="19" r="10" fill="#dcfce7" stroke="#15803d" stroke-width="2"></circle><path class="graph-edge chain" d="M28 19 C48 19, 62 19, 82 19" marker-end="url(#legend-arrow-order)"></path><circle cx="98" cy="19" r="10" fill="#fee2e2" stroke="#b42318" stroke-width="2"></circle></svg>', text: "Dependency direction: symptom to root cause." },
+    ],
+  },
+];
 
 function esc(value) {
   return String(value ?? "-")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function fmt(value, digits = 3) {
@@ -26,6 +172,34 @@ function fmt(value, digits = 3) {
 function pct(value) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   return `${(value * 100).toFixed(1)}%`;
+}
+
+function numeric(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function avg(values) {
+  const real = values.map(numeric).filter((value) => value !== null);
+  return real.length ? real.reduce((sum, value) => sum + value, 0) / real.length : null;
+}
+
+function rate(values) {
+  const real = values.filter((value) => value !== null && value !== undefined);
+  return real.length ? real.filter(Boolean).length / real.length : null;
+}
+
+function sum(values) {
+  return values.map(numeric).filter((value) => value !== null).reduce((total, value) => total + value, 0);
+}
+
+function f1(precision, recall) {
+  const p = numeric(precision);
+  const r = numeric(recall);
+  if (p === null || r === null) return null;
+  const denom = p + r;
+  return denom ? 2 * p * r / denom : 0;
 }
 
 function token(value) {
@@ -47,6 +221,140 @@ function badge(label, active = true, tone = "") {
 function table(headers, rows) {
   if (!rows.length) return '<div class="empty">No rows.</div>';
   return `<table><thead><tr>${headers.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>`;
+}
+
+function metricGroupClass(groupKey) {
+  return groupKey ? `metric-group-${String(groupKey).replaceAll("_", "-")}` : "";
+}
+
+function metricGroupLabel(groupKey) {
+  return MACRO_METRIC_GROUPS.find((group) => group.key === groupKey)?.title || groupKey;
+}
+
+function metricGroupEnabled(groupKey) {
+  return state.metricGroupFilters?.[groupKey] !== false;
+}
+
+function renderMetricGroupControls() {
+  return `<fieldset class="metric-group-filter" aria-label="KPI groups">
+    <legend>KPI groups</legend>
+    ${MACRO_METRIC_GROUPS.map((group) => `<label class="${metricGroupClass(group.key)}">
+      <input class="metric-group-checkbox" type="checkbox" data-metric-group="${esc(group.key)}" ${metricGroupEnabled(group.key) ? "checked" : ""}>
+      ${esc(group.title)}
+    </label>`).join("")}
+  </fieldset>`;
+}
+
+function renderKpiTable(columns, rows) {
+  if (!rows.length) return '<div class="empty">No rows.</div>';
+  const header = columns.map((column) => {
+    const groupClass = column.group ? metricGroupClass(column.group) : "";
+    const title = column.group ? ` title="${esc(metricGroupLabel(column.group))}"` : "";
+    return `<th class="${esc(groupClass)}"${title}>${esc(column.header)}</th>`;
+  }).join("");
+  const body = rows.map((row) => {
+    const key = cellKey(row);
+    const cells = columns.map((column) => {
+      const groupClass = column.group ? metricGroupClass(column.group) : "";
+      const value = column.value(row, key);
+      return `<td class="${esc(groupClass)}">${column.html ? value : esc(value)}</td>`;
+    }).join("");
+    return `<tr class="${key === state.selectedEvalCellKey ? "is-selected" : ""}" data-eval-cell-key="${esc(key)}">${cells}</tr>`;
+  }).join("");
+  return `<table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function glossaryItem(item) {
+  const term = Array.isArray(item) ? item[0] : item.term;
+  const text = Array.isArray(item) ? item[1] : item.text;
+  const sample = Array.isArray(item) ? "" : item.sample;
+  return `<div class="glossary-item ${sample ? "has-sample" : ""}">
+    ${sample ? `<div class="legend-sample">${sample}</div>` : ""}
+    <div class="glossary-copy"><strong>${esc(term)}</strong><span>${esc(text)}</span></div>
+  </div>`;
+}
+
+function glossary(title, items) {
+  return `<section class="glossary" aria-label="${esc(title)}">
+    <div class="glossary-title">${esc(title)}</div>
+    <div class="glossary-grid">${items.map(glossaryItem).join("")}</div>
+  </section>`;
+}
+
+function metricDefinitions(title, groups) {
+  return `<section class="metric-defs" aria-label="${esc(title)}">
+    <div class="glossary-title">${esc(title)}</div>
+    <div class="metric-def-grid">${groups.map((group) => `<section class="metric-def-group">
+      <h4>${esc(group.title)}</h4>
+      <div class="metric-def-rows">${[...group.items].sort(([a], [b]) => a.localeCompare(b)).map(([term, text]) => `<div class="metric-def-row">
+        <strong>${esc(term)}</strong>
+        <span>${esc(text)}</span>
+      </div>`).join("")}</div>
+    </section>`).join("")}</div>
+  </section>`;
+}
+
+function visualLegend(title, items) {
+  const groups = items.length && items[0].items ? items : [{ title: "", items }];
+  const titleHtml = title ? `<div class="glossary-title">${esc(title)}</div>` : "";
+  return `<section class="glossary visual-legend" aria-label="${esc(title || "Legend")}">
+    ${titleHtml}
+    ${groups.map((group) => `<div class="visual-legend-group">
+      ${group.title ? `<div class="visual-legend-group-title">${esc(group.title)}</div>` : ""}
+      <div class="visual-legend-grid">${group.items.map((item) => `<div class="visual-legend-item">
+        <div class="legend-sample">${item.sample || ""}</div>
+        <div class="visual-legend-text">${esc(item.text || "")}</div>
+      </div>`).join("")}</div>
+    </div>`).join("")}
+  </section>`;
+}
+
+function captureInspectorScroll() {
+  return {
+    left: document.getElementById("trace-left-pane")?.scrollTop || 0,
+    graph: document.getElementById("trace-graph-pane")?.scrollTop || 0,
+    middle: document.getElementById("trace-middle-pane")?.scrollTop || 0,
+    right: document.getElementById("trace-right-pane")?.scrollTop || 0,
+  };
+}
+
+function restoreInspectorScroll(scrollState) {
+  if (!scrollState) return;
+  const apply = () => {
+    const pairs = [
+      ["trace-left-pane", scrollState.left],
+      ["trace-graph-pane", scrollState.graph],
+      ["trace-middle-pane", scrollState.middle],
+      ["trace-right-pane", scrollState.right],
+    ];
+    pairs.forEach(([id, scrollTop]) => {
+      const el = document.getElementById(id);
+      if (el) el.scrollTop = scrollTop || 0;
+    });
+  };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(apply);
+  else apply();
+}
+
+function setGraphContext(show) {
+  state.showGraphContext = Boolean(show);
+  if (state.showGraphContext) state.graphEdgeFilters.call = true;
+}
+
+function resetTracePanels() {
+  state.activeTracePanel = "steps";
+  state.tracePanelOpen = { graph: false, steps: true };
+}
+
+function tracePanelOpen(panel) {
+  if (panel === "graph") return state.tracePanelOpen?.graph === true;
+  if (panel === "steps") return state.tracePanelOpen?.steps !== false;
+  return false;
+}
+
+function setTracePanelOpen(panel, open) {
+  state.tracePanelOpen = { graph: false, steps: true, ...(state.tracePanelOpen || {}), [panel]: Boolean(open) };
+  if (open) state.activeTracePanel = panel;
 }
 
 function rowKey(detail) {
@@ -73,6 +381,193 @@ function detailCellKey(detail) {
   return detail?.eval_cell_key || detail?.experiment_key || "";
 }
 
+function detailCaseType(detail) {
+  return String(detail?.bonus_case_type || detail?.chain_case_kind || "");
+}
+
+function detailCaseFilterBucket(detail) {
+  const caseType = detailCaseType(detail);
+  if (detail?.chain_evaluable === true && caseType === "direct") return "direct";
+  if (detail?.chain_evaluable === true && caseType === "standard") return "standard";
+  return "others";
+}
+
+function isBonusMapMetricDetail(detail) {
+  return detail?.chain_evaluable === true && BONUS_MAP_METRIC_CASE_TYPES.has(detailCaseType(detail));
+}
+
+function hasDualSymptomRoot(detail) {
+  const projection = detail?.chain_projection || {};
+  const roots = new Set(projection.roots || []);
+  return (projection.anchors || []).some((anchor) => roots.has(anchor));
+}
+
+function hasRewardPathEdges(detail) {
+  return (detail?.chain_projection?.chain_edges || []).length > 0;
+}
+
+function isOrderMetricDetail(detail) {
+  return isBonusMapMetricDetail(detail) && hasRewardPathEdges(detail) && !hasDualSymptomRoot(detail);
+}
+
+function caseFilterEnabled(detail) {
+  return state.caseFilters[detailCaseFilterBucket(detail)] !== false;
+}
+
+function activeCaseFilterLabels() {
+  return Object.entries(state.caseFilters)
+    .filter(([, enabled]) => enabled)
+    .map(([name]) => name)
+    .join(", ") || "none";
+}
+
+function allCaseFiltersEnabled() {
+  return Object.values(state.caseFilters).every(Boolean);
+}
+
+function activeCaseFilterKey() {
+  return ["direct", "standard", "others"].filter((name) => state.caseFilters[name] !== false).join(",");
+}
+
+function combinedReverseMarker(item) {
+  const order = numeric(item.order_score);
+  return order === null ? null : order < 0;
+}
+
+function combinedMiracleMarker(item) {
+  if (item.miracle_step === null || item.miracle_step === undefined) return null;
+  return item.miracle_step === true;
+}
+
+function blockReverseMarker(item) {
+  const blockOrder = numeric(item.block_order_score);
+  return blockOrder === null ? null : blockOrder < 0;
+}
+
+function blockMiracleMarker(item) {
+  if (item.block_miracle_step === null || item.block_miracle_step === undefined) return null;
+  return item.block_miracle_step === true;
+}
+
+function activeDetails(snapshot) {
+  const details = snapshot?.details || [];
+  return details.filter(caseFilterEnabled);
+}
+
+function chainNodePrecision(detail) {
+  const projection = detail?.chain_projection || {};
+  const chain = projection.chain_nodes || [];
+  const context = projection.context_nodes || [];
+  const hitChain = chain.filter((node) => node?.hit).length;
+  const hitContext = context.filter((node) => node?.hit).length;
+  const denom = hitChain + hitContext;
+  return denom ? hitChain / denom : null;
+}
+
+function chainNodeF1(detail) {
+  return f1(chainNodePrecision(detail), detail?.chain_node_recall);
+}
+
+function metricsFromDetails(details, snapshot) {
+  const cellLookup = new Map(experimentRows(snapshot).map((row) => [cellKey(row), row]));
+  const groups = new Map();
+  details.forEach((detail) => {
+    const key = detailCellKey(detail);
+    if (!key) return;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(detail);
+  });
+  return [...groups.entries()].map(([key, items]) => {
+    const cell = cellLookup.get(key) || {};
+    const first = items[0] || {};
+    const bonusItems = items.filter(isBonusMapMetricDetail);
+    const orderMetricItems = items.filter(isOrderMetricDetail);
+    const orderItems = orderMetricItems.filter((item) => item.order_defined === true);
+    const blockOrderItems = orderMetricItems.filter((item) => item.block_order_defined === true);
+    const scoredBlocks = sum(bonusItems.map((item) => item.n_scored_read_blocks));
+    const totalBlocks = sum(bonusItems.map((item) => item.n_blocks));
+    const cacheHit = sum(items.map((item) => item.cache_hit_tokens));
+    const cacheWrite = sum(items.map((item) => item.cache_write_tokens));
+    const inputTokens = sum(items.map((item) => item.input_tokens));
+    return {
+      eval_cell_key: key,
+      experiment_key: key,
+      source_kind: first.source_kind || cell.source_kind || "offline_artifact",
+      experiment_id: first.experiment_id || cell.experiment_id || "adhoc",
+      provider_source: first.provider_source || cell.provider_source || "unknown-provider",
+      dataset: first.dataset || first.data_source || cell.dataset || "unknown-dataset",
+      model_api_name: first.model_api_name || cell.model_api_name || first.model_label || cell.model_label || "unknown-model",
+      model_label: first.model_label || cell.model_label || first.model_api_name || cell.model_api_name || "unknown-model",
+      target: items.length,
+      done: items.length,
+      errors: items.filter((item) => item.error || item.system_error).length,
+      pending: 0,
+      resolved_rate: rate(items.map((item) => item.resolved)),
+      reward_rate: avg(items.map((item) => item.reward)),
+      avg_read_precision: avg(bonusItems.map((item) => item.hit_precision)),
+      avg_node_recall: avg(bonusItems.map((item) => item.hit_recall)),
+      avg_hit_f1: avg(bonusItems.map((item) => item.hit_f1)),
+      anchor_hit_rate: rate(bonusItems.map((item) => item.anchor_hit)),
+      root_hit_rate: rate(bonusItems.map((item) => item.root_hit)),
+      avg_chain_node_recall: avg(bonusItems.map((item) => item.chain_node_recall)),
+      avg_chain_node_precision: avg(bonusItems.map(chainNodePrecision)),
+      avg_chain_node_f1: avg(bonusItems.map(chainNodeF1)),
+      avg_chain_read_precision: avg(bonusItems.map((item) => item.chain_read_precision)),
+      avg_first_anchor_step: avg(bonusItems.map((item) => item.first_anchor_step)),
+      avg_first_root_step: avg(bonusItems.map((item) => item.first_root_step)),
+      avg_order_score: avg(orderItems.map((item) => item.order_score)),
+      reverse_order_rate: rate(orderMetricItems.map(combinedReverseMarker)),
+      miracle_rate: rate(orderMetricItems.map(combinedMiracleMarker)),
+      avg_blocks_per_trace: totalBlocks && bonusItems.length ? totalBlocks / bonusItems.length : null,
+      block_achieve_rate: scoredBlocks ? sum(bonusItems.map((item) => item.n_achieving_blocks)) / scoredBlocks : null,
+      block_waste_rate: scoredBlocks ? sum(bonusItems.map((item) => item.n_wasted_blocks)) / scoredBlocks : null,
+      block_loop_rate: totalBlocks ? sum(bonusItems.map((item) => item.n_loop_blocks)) / totalBlocks : null,
+      block_reverse_order_rate: rate(orderMetricItems.map(blockReverseMarker)),
+      block_miracle_rate: rate(orderMetricItems.map(blockMiracleMarker)),
+      loop_trace_rate: rate(items.map((item) => (item.bad_patterns || {}).has_loop)),
+      error_spiral_rate: rate(items.map((item) => (item.bad_patterns || {}).error_spiral)),
+      avg_turns: avg(items.map((item) => item.turns)),
+      avg_tool_calls: avg(items.map((item) => item.tool_calls)),
+      avg_wall_time: avg(items.map((item) => item.wall_time)),
+      avg_input_tokens: avg(items.map((item) => item.input_tokens)),
+      avg_output_tokens: avg(items.map((item) => item.output_tokens)),
+      avg_reasoning_tokens: avg(items.map((item) => item.reasoning_tokens)),
+      total_cost: sum(items.map((item) => item.cost)) || null,
+      cache_hit_rate: cacheHit && inputTokens + cacheHit ? cacheHit / (inputTokens + cacheHit) : null,
+      cache_write_rate: cacheWrite && inputTokens + cacheWrite ? cacheWrite / (inputTokens + cacheWrite) : null,
+    };
+  }).sort((a, b) => String(a.model_label).localeCompare(String(b.model_label)));
+}
+
+function mergeMissingMetricFields(rows, fallbackRows) {
+  if (!fallbackRows.length) return rows;
+  const fallbackByKey = new Map(fallbackRows.map((row) => [cellKey(row), row]));
+  return rows.map((row) => {
+    const fallback = fallbackByKey.get(cellKey(row));
+    if (!fallback) return row;
+    const merged = { ...row };
+    Object.entries(fallback).forEach(([key, value]) => {
+      if ((merged[key] === null || merged[key] === undefined) && value !== null && value !== undefined) {
+        merged[key] = value;
+      }
+    });
+    return merged;
+  });
+}
+
+function activeModelMetrics(snapshot) {
+  const details = activeDetails(snapshot);
+  const fallbackRows = details.length ? metricsFromDetails(details, snapshot) : [];
+  if (state.caseFilters.direct && state.caseFilters.standard && !state.caseFilters.others) {
+    const rows = snapshot?.dynamic_traceable_model_metrics || [];
+    if (rows.length) return mergeMissingMetricFields(rows, fallbackRows);
+  }
+  if (allCaseFiltersEnabled()) return mergeMissingMetricFields(snapshot?.model_metrics || [], fallbackRows);
+  const caseFilterRows = snapshot?.case_filter_model_metrics?.[activeCaseFilterKey()] || [];
+  if (caseFilterRows.length) return mergeMissingMetricFields(caseFilterRows, fallbackRows);
+  return fallbackRows;
+}
+
 function selectedDatasetRow(snapshot) {
   return datasetRows(snapshot).find((row) => row.dataset === state.selectedDataset) || null;
 }
@@ -88,6 +583,8 @@ function ensureSelection(snapshot) {
     state.selectedEvalCellKey = null;
     state.selectedExperimentKey = null;
     state.selectedTraceKey = null;
+    state.selectedGraphNodeKey = null;
+    resetTracePanels();
     return;
   }
   if (!state.selectedDataset || !datasets.some((row) => row.dataset === state.selectedDataset)) {
@@ -104,48 +601,68 @@ function ensureSelection(snapshot) {
   if (!state.selectedEvalCellKey) {
     state.selectedTraceKey = null;
     state.selectedStepIndex = 0;
+    state.selectedGraphNodeKey = null;
+    resetTracePanels();
     return;
   }
   const details = filteredDetails(snapshot);
   if (!details.length) {
     state.selectedTraceKey = null;
     state.selectedStepIndex = 0;
+    state.selectedGraphNodeKey = null;
+    resetTracePanels();
     return;
   }
   if (!state.selectedTraceKey || !details.some((detail) => rowKey(detail) === state.selectedTraceKey)) {
     state.selectedTraceKey = rowKey(details[0]);
     state.selectedStepIndex = 0;
+    state.selectedGraphNodeKey = null;
+    resetTracePanels();
   }
 }
 
 async function loadSnapshot() {
+  if (state.loadingSnapshot) return;
+  state.loadingSnapshot = true;
+  const scrollState = captureInspectorScroll();
+  let shouldRender = false;
   if (window.__P2A_DASHBOARD_SNAPSHOT__) {
     state.snapshot = window.__P2A_DASHBOARD_SNAPSHOT__;
     window.__P2A_DASHBOARD_SNAPSHOT__ = null;
-    render();
+    state.loadingSnapshot = false;
+    render({ scrollState });
     return;
   }
   try {
     const response = await fetch("/api/snapshot", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     state.snapshot = await response.json();
+    shouldRender = true;
   } catch (_error) {
     if (!state.snapshot) {
       try {
         const response = await fetch("snapshot.json", { cache: "no-store" });
-        if (response.ok) state.snapshot = await response.json();
+        if (response.ok) {
+          state.snapshot = await response.json();
+          shouldRender = true;
+        }
       } catch (_fallback) {
         state.snapshot = null;
+        shouldRender = true;
       }
     }
+  } finally {
+    state.loadingSnapshot = false;
   }
-  render();
+  if (!state.snapshot) shouldRender = true;
+  if (shouldRender) render({ scrollState });
 }
 
 function renderSources(snapshot) {
   const sources = snapshot?.sources || [];
   const text = sources.map((item) => `${item.kind}: ${item.path}`).join("  |  ");
-  document.getElementById("source-line").textContent = text || "No source loaded";
+  const status = snapshot?.snapshot_status?.stale ? `  |  stale: ${snapshot.snapshot_status.reason || "snapshot unavailable"}` : "";
+  document.getElementById("source-line").textContent = (text || "No source loaded") + status;
 }
 
 function metricCard(label, value, formatter = fmt) {
@@ -159,7 +676,9 @@ function renderSelectedExperiment(snapshot) {
     ? `${selected.source_kind || "-"} / ${selected.experiment_id || "-"} / ${selected.model_label || "-"}`
     : "None";
   const label = `Dataset: ${dataset} | Eval cell: ${cell}`;
-  document.getElementById("selected-experiment").textContent = label;
+  const filters = [];
+  if (!allCaseFiltersEnabled()) filters.push(`case types: ${activeCaseFilterLabels()}`);
+  document.getElementById("selected-experiment").textContent = label + (filters.length ? ` | Filter: ${filters.join("; ")}` : "");
 }
 
 function renderSummary(snapshot) {
@@ -224,6 +743,8 @@ function renderExperiments(snapshot) {
       state.selectedExperimentKey = null;
       state.selectedTraceKey = null;
       state.selectedStepIndex = 0;
+      state.selectedGraphNodeKey = null;
+      resetTracePanels();
       render();
     });
   });
@@ -237,6 +758,8 @@ function renderExperiments(snapshot) {
       if (cell?.dataset) state.selectedDataset = cell.dataset;
       state.selectedTraceKey = null;
       state.selectedStepIndex = 0;
+      state.selectedGraphNodeKey = null;
+      resetTracePanels();
       setTab(el.classList.contains("select-cell") ? "traces" : state.activeTab);
       render();
     });
@@ -295,90 +818,77 @@ function renderDistributions(snapshot) {
   ].join("");
 }
 
+function kpiColumns(hasCacheWrite) {
+  const columns = [
+    {
+      header: "",
+      fixed: true,
+      html: true,
+      value: (_row, key) => `<button class="select-kpi-cell" type="button" data-eval-cell-key="${esc(key)}">${key === state.selectedEvalCellKey ? "Selected" : "Select"}</button>`,
+    },
+    { header: "Model", fixed: true, value: (row) => row.model_label },
+    { header: "Kind", fixed: true, value: (row) => row.source_kind },
+    { header: "Experiment", fixed: true, value: (row) => row.experiment_id },
+    { header: "Done", group: "scope", value: (row) => progress(row) },
+    { header: "Graph P.", group: "graph", value: (row) => pct(row.avg_read_precision) },
+    { header: "Graph R.", group: "graph", value: (row) => pct(row.avg_node_recall) },
+    { header: "Graph F1", group: "graph", value: (row) => pct(row.avg_hit_f1) },
+    { header: "Task success", group: "outcome", value: (row) => pct(row.resolved_rate ?? row.reward_rate) },
+    { header: "Symptom hit", group: "outcome", value: (row) => pct(row.anchor_hit_rate) },
+    { header: "Root cause hit", group: "outcome", value: (row) => pct(row.root_hit_rate) },
+    { header: "First symptom", group: "outcome", value: (row) => fmt(row.avg_first_anchor_step, 1) },
+    { header: "First root cause", group: "outcome", value: (row) => fmt(row.avg_first_root_step, 1) },
+    { header: "Path P.", group: "dependency_path", value: (row) => pct(row.avg_chain_node_precision) },
+    { header: "Path R.", group: "dependency_path", value: (row) => pct(row.avg_chain_node_recall) },
+    { header: "Path F1", group: "dependency_path", value: (row) => pct(row.avg_chain_node_f1 ?? f1(row.avg_chain_node_precision, row.avg_chain_node_recall)) },
+    { header: "Order score", group: "exploration_behavior", value: (row) => fmt(row.avg_order_score) },
+    { header: "Reverse rate", group: "exploration_behavior", value: (row) => pct(row.reverse_order_rate) },
+    { header: "Miracle rate", group: "exploration_behavior", value: (row) => pct(row.miracle_rate) },
+    { header: "Loop trace", group: "exploration_behavior", value: (row) => pct(row.loop_trace_rate) },
+    { header: "Error spiral", group: "exploration_behavior", value: (row) => pct(row.error_spiral_rate) },
+    { header: "Blocks", group: "purpose_blocks", value: (row) => fmt(row.avg_blocks_per_trace, 1) },
+    { header: "Achieved", group: "purpose_blocks", value: (row) => pct(row.block_achieve_rate) },
+    { header: "Wasted", group: "purpose_blocks", value: (row) => pct(row.block_waste_rate) },
+    { header: "Loop blocks", group: "purpose_blocks", value: (row) => pct(row.block_loop_rate) },
+    { header: "Turns", group: "efficiency_cost", value: (row) => fmt(row.avg_turns, 1) },
+    { header: "Tools", group: "efficiency_cost", value: (row) => fmt(row.avg_tool_calls, 1) },
+    { header: "Wall", group: "efficiency_cost", value: (row) => fmt(row.avg_wall_time, 1) },
+    { header: "In", group: "efficiency_cost", value: (row) => token(row.avg_input_tokens) },
+    { header: "Out", group: "efficiency_cost", value: (row) => token(row.avg_output_tokens) },
+    { header: "Reason", group: "efficiency_cost", value: (row) => token(row.avg_reasoning_tokens) },
+    { header: "Cost", group: "efficiency_cost", value: (row) => money(row.total_cost) },
+    { header: "Cache hit", group: "efficiency_cost", value: (row) => pct(row.cache_hit_rate) },
+  ];
+  if (hasCacheWrite) {
+    columns.push({ header: "Cache write", group: "efficiency_cost", value: (row) => pct(row.cache_write_rate) });
+  }
+  return columns.filter((column) => column.fixed || metricGroupEnabled(column.group));
+}
+
 function renderModels(snapshot) {
   if (!state.selectedDataset) {
-    document.getElementById("model-table").innerHTML = '<div class="empty">Select a dataset in Overview before comparing Macro KPIs.</div>';
+    document.getElementById("model-table").innerHTML = '<div class="empty">Select a dataset in Overview before comparing Metrics.</div>';
     return;
   }
-  const rows = (snapshot?.model_metrics || []).filter((row) => row.dataset === state.selectedDataset);
+  const rows = activeModelMetrics(snapshot).filter((row) => row.dataset === state.selectedDataset);
   const hasCacheWrite = rows.some((row) => row.cache_write_rate !== null && row.cache_write_rate !== undefined);
-  const headers = [
-    "",
-    "Model",
-    "Kind",
-    "Experiment",
-    "Done",
-    "Task success",
-    "Read precision",
-    "Node recall",
-    "F1",
-    "Anchor",
-    "Root",
-    "Chain recall",
-    "Chain precision",
-    "First anchor",
-    "First root",
-    "Order",
-    "Reverse",
-    "Miracle",
-    "Blocks",
-    "Achieved",
-    "Wasted",
-    "Loop blocks",
-    "Loop trace",
-    "Error spiral",
-    "Turns",
-    "Tools",
-    "Wall",
-    "In",
-    "Out",
-    "Reason",
-    "Cost",
-    "Cache hit",
-  ];
-  if (hasCacheWrite) headers.push("Cache write");
-  const tableRows = rows.map((row) => {
-    const key = cellKey(row);
-    const cells = [
-      `<button class="select-kpi-cell" type="button" data-eval-cell-key="${esc(key)}">${key === state.selectedEvalCellKey ? "Selected" : "Select"}</button>`,
-      row.model_label,
-      row.source_kind,
-      row.experiment_id,
-      progress(row),
-      pct(row.resolved_rate ?? row.reward_rate),
-      pct(row.avg_chain_read_precision ?? row.avg_read_precision),
-      pct(row.avg_chain_node_recall ?? row.avg_node_recall),
-      pct(row.avg_hit_f1),
-      pct(row.anchor_hit_rate),
-      pct(row.root_hit_rate),
-      pct(row.avg_chain_node_recall),
-      pct(row.avg_chain_read_precision),
-      fmt(row.avg_first_anchor_step, 1),
-      fmt(row.avg_first_root_step, 1),
-      fmt(row.avg_order_score),
-      pct(row.reverse_order_rate),
-      pct(row.miracle_rate),
-      fmt(row.avg_blocks_per_trace, 1),
-      pct(row.block_achieve_rate),
-      pct(row.block_waste_rate),
-      pct(row.block_loop_rate),
-      pct(row.loop_trace_rate),
-      pct(row.error_spiral_rate),
-      fmt(row.avg_turns, 1),
-      fmt(row.avg_tool_calls, 1),
-      fmt(row.avg_wall_time, 1),
-      token(row.avg_input_tokens),
-      token(row.avg_output_tokens),
-      token(row.avg_reasoning_tokens),
-      money(row.total_cost),
-      pct(row.cache_hit_rate),
-    ];
-    if (hasCacheWrite) cells.push(pct(row.cache_write_rate));
-    return `<tr class="${key === state.selectedEvalCellKey ? "is-selected" : ""}" data-eval-cell-key="${esc(key)}">${cells.map((cell, index) => `<td>${index === 0 ? cell : esc(cell)}</td>`).join("")}</tr>`;
-  });
+  const columns = kpiColumns(hasCacheWrite);
+  const scopeBits = [];
+  scopeBits.push(`case types: ${activeCaseFilterLabels()}`);
+  const scopeNote = `Metrics and Traces both use the current global filters (${scopeBits.join("; ")}).`;
   document.getElementById("model-table").innerHTML = `
-    <div class="panel-note">Macro KPI is scoped to dataset <strong>${esc(state.selectedDataset)}</strong>. Effect and dependency-rigor metrics are placed before efficiency/cost metrics.</div>
-    <div class="table-wrap kpi-table">${table(headers, tableRows)}</div>`;
+    <div class="panel-note">Metrics are scoped to dataset <strong>${esc(state.selectedDataset)}</strong>. ${esc(scopeNote)} Trace metrics score the whole agent trace; dependency-path metrics score the fixed bonus-map path.</div>
+    ${renderMetricGroupControls()}
+    ${metricDefinitions("Metric definitions", MACRO_METRIC_GROUPS)}
+    <div class="table-wrap kpi-table">${renderKpiTable(columns, rows)}</div>`;
+  document.querySelectorAll(".metric-group-checkbox").forEach((input) => {
+    input.addEventListener("change", (event) => {
+      const group = event.target.dataset.metricGroup;
+      if (!group) return;
+      state.metricGroupFilters[group] = Boolean(event.target.checked);
+      renderModels(state.snapshot);
+    });
+  });
   document.querySelectorAll(".select-kpi-cell, #model-table tr[data-eval-cell-key]").forEach((el) => {
     el.addEventListener("click", () => {
       const key = el.dataset.evalCellKey;
@@ -389,6 +899,8 @@ function renderModels(snapshot) {
       if (cell?.dataset) state.selectedDataset = cell.dataset;
       state.selectedTraceKey = null;
       state.selectedStepIndex = 0;
+      state.selectedGraphNodeKey = null;
+      resetTracePanels();
       render();
     });
   });
@@ -421,7 +933,7 @@ function renderRuns(snapshot) {
     </article>`;
   }).join("");
   document.getElementById("run-list").innerHTML = `
-    <div class="panel-note">Run Provenance shows artifact-producing executions. Quality metrics live in Macro KPI; trajectories live in Trajectories.</div>
+    <div class="panel-note">Run Provenance maps metrics and traces back to the artifact-producing execution: run id, artifact path, linked eval cell, files, and log tail. Use it to debug where a metric came from or to reproduce a run; day-to-day analysis belongs in Metrics and Traces.</div>
     <h3>${selected ? "Linked to selected eval cell" : `Linked to dataset ${esc(state.selectedDataset)}`}</h3>
     <div class="run-grid">${renderCards(linked) || '<div class="empty">No explicitly linked runs for this scope.</div>'}</div>
     <h3>Unlinked runs</h3>
@@ -442,7 +954,7 @@ function traceBlob(detail) {
 function filteredDetails(snapshot) {
   const query = state.traceQuery.trim().toLowerCase();
   if (!state.selectedEvalCellKey) return [];
-  return (snapshot?.details || [])
+  return activeDetails(snapshot)
     .filter((detail) => detailCellKey(detail) === state.selectedEvalCellKey)
     .filter((detail) => !query || traceBlob(detail).includes(query));
 }
@@ -453,113 +965,840 @@ function selectedDetail(snapshot) {
 }
 
 function roleTone(node) {
+  if (isSymptomRootCauseNode(node)) return "symptom-root-cause";
   const role = node?.node_role || "";
+  if (role === "test_harness") return "test";
+  if (role === "pre_symptom") return "pre";
   if (role === "root_cause") return "root";
   if (role === "symptom") return "symptom";
   if (role === "intermediate") return "chain";
   return "context";
 }
 
-function stepTone(step, detail) {
+function nodeDistance(node) {
+  const distance = Number(node?.normalized_distance);
+  return Number.isFinite(distance) ? distance : null;
+}
+
+function graphLayer(node) {
+  const role = node?.node_role || "";
+  const distance = nodeDistance(node);
+  if (role === "test_harness") return 0;
+  if (role === "pre_symptom") return 1;
+  if (role === "symptom") return 2;
+  if (role === "root_cause") return 10;
+  if (role === "intermediate") {
+    if (distance === null) return 6;
+    return Math.max(3, Math.min(9, 3 + Math.round((1 - distance) * 6)));
+  }
+  if (distance === null) return 2;
+  return Math.max(0, Math.min(10, Math.round((1 - distance) * 10)));
+}
+
+function compareGraphNodes(a, b) {
+  const firstA = a.first_step === null || a.first_step === undefined ? Infinity : Number(a.first_step);
+  const firstB = b.first_step === null || b.first_step === undefined ? Infinity : Number(b.first_step);
+  if (firstA !== firstB) return firstA - firstB;
+  const distanceA = nodeDistance(a) ?? Infinity;
+  const distanceB = nodeDistance(b) ?? Infinity;
+  if (distanceA !== distanceB) return distanceB - distanceA;
+  return String(a.key || "").localeCompare(String(b.key || ""));
+}
+
+function detailRootKeys(detail) {
+  return new Set(detail?.chain_projection?.roots || []);
+}
+
+function detailSymptomKeys(detail) {
+  return new Set(detail?.chain_projection?.anchors || []);
+}
+
+function hitNodeIsRootCause(node, detail) {
+  return node?.node_role === "root_cause" || node?.root_cause === true || detailRootKeys(detail).has(node?.key);
+}
+
+function hitNodeIsSymptom(node, detail) {
+  return node?.node_role === "symptom" || node?.selected_issue_anchor === true || node?.anchor === true || detailSymptomKeys(detail).has(node?.key);
+}
+
+function hitNodeIsSymptomRootCause(node, detail) {
+  return hitNodeIsRootCause(node, detail) && hitNodeIsSymptom(node, detail);
+}
+
+const STEP_ROLE_COLORS = {
+  symptom: "#dcfce7",
+  chain: "#dbeafe",
+  root: "#fee2e2",
+};
+
+function stepRoleSegments(step, detail) {
   const scored = step?.scored || step || {};
   const nodes = scored.hit_nodes || [];
-  if (nodes.some((node) => node.node_role === "root_cause")) return "root";
-  if (nodes.some((node) => node.node_role === "symptom")) return "symptom";
-  if (nodes.length) return "chain";
-  if ((scored.n_reads || 0) > 0 || (step?.recovered_reads || []).length || step?.action_family === "read") return "offmap";
-  if ((detail?.bad_patterns || {}).error_spiral) return "bad";
-  return "neutral";
+  if (step?.edited_root_cause) return ["root-edit"];
+  if (step?.action_family === "edit" || (step?.write_actions || []).length || (scored.writes || []).length) return ["edit"];
+  if (nodes.some((node) => hitNodeIsSymptomRootCause(node, detail))) return ["symptom-root-cause"];
+  const roles = [];
+  if (nodes.some((node) => hitNodeIsSymptom(node, detail))) roles.push("symptom");
+  if (nodes.some((node) => !hitNodeIsSymptom(node, detail) && !hitNodeIsRootCause(node, detail))) roles.push("chain");
+  if (nodes.some((node) => hitNodeIsRootCause(node, detail))) roles.push("root");
+  if (roles.length) return roles;
+  if ((scored.n_reads || 0) > 0 || (step?.recovered_reads || []).length || step?.action_family === "read") return ["offmap"];
+  if (step?.action_family === "exec" || step?.action_family === "other" || scored.family === "exec" || scored.family === "other") return ["exec-other"];
+  if ((detail?.bad_patterns || {}).error_spiral) return ["bad"];
+  return ["neutral"];
 }
 
-function graphNodes(detail) {
+function stepSegmentsStyle(segments) {
+  const colorSegments = segments.filter((segment) => STEP_ROLE_COLORS[segment]);
+  if (colorSegments.length <= 1) return "";
+  const stops = colorSegments.map((segment, index) => {
+    const start = (index / colorSegments.length) * 100;
+    const end = ((index + 1) / colorSegments.length) * 100;
+    return `${STEP_ROLE_COLORS[segment]} ${start.toFixed(2)}% ${end.toFixed(2)}%`;
+  });
+  return ` style="--step-bg: linear-gradient(90deg, ${stops.join(", ")});"`;
+}
+
+function nodeKeysFromSummaries(nodes) {
+  return (nodes || [])
+    .map((node) => node?.key)
+    .filter(Boolean);
+}
+
+function finalEditNodeKeys(detail) {
+  const steps = [...(detail?.step_details || [])]
+    .map((step, index) => ({ ...step, __order: Number(step.trace_index ?? step.step_index ?? index) }))
+    .sort((a, b) => a.__order - b.__order);
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    const keys = nodeKeysFromSummaries(steps[index].write_hit_nodes);
+    if (keys.length) return new Set(keys);
+  }
+  const inspection = [...(detail?.step_inspection || [])]
+    .map((step, index) => ({ ...step, __order: Number(step.trace_index ?? step.step_index ?? index) }))
+    .sort((a, b) => a.__order - b.__order);
+  for (let index = inspection.length - 1; index >= 0; index -= 1) {
+    const keys = nodeKeysFromSummaries(inspection[index].write_hit_nodes || inspection[index].scored?.write_hit_nodes);
+    if (keys.length) return new Set(keys);
+  }
+  return new Set();
+}
+
+function stepTone(step, detail) {
+  const segments = stepRoleSegments(step, detail);
+  return segments.length > 1 ? "multi-hit" : segments[0];
+}
+
+function graphNodes(detail, { includeContext = state.showGraphContext } = {}) {
   const projection = detail?.chain_projection || {};
+  const chainNodes = projection.chain_nodes || [];
+  const contextNodes = projection.context_nodes || [];
+  const anchors = new Set(projection.anchors || []);
+  const roots = new Set(projection.roots || []);
+  const editedNodes = finalEditNodeKeys(detail);
+  const topologyByKey = new Map((detail?.graph_topology?.nodes || []).map((node) => [node?.key, node]));
+  const annotateNode = (node) => {
+    const topologyNode = topologyByKey.get(node?.key) || {};
+    return ({
+    ...topologyNode,
+    ...node,
+    source: node?.source || topologyNode?.source,
+    source_preview: node?.source_preview || topologyNode?.source_preview,
+    selected_issue_anchor: Boolean(node?.selected_issue_anchor || anchors.has(node?.key)),
+    root_cause: Boolean(node?.root_cause || roots.has(node?.key) || node?.node_role === "root_cause"),
+    final_edit: Boolean(editedNodes.has(node?.key)),
+  });
+  };
+  const topologyNodes = detail?.graph_topology?.nodes || [];
+  if (includeContext && topologyNodes.length) return topologyNodes.map((node) => annotateNode({ ...node, group: node.rewardable ? "chain" : "context" }));
+  const projected = includeContext ? [...contextNodes, ...chainNodes] : chainNodes;
+  if (projected.length) return projected.map(annotateNode);
+  return topologyNodes.map((node) => annotateNode({ ...node, group: node.rewardable ? "chain" : "context" }));
+}
+
+function normalizeGraphEdge(edge, edgeType = "chain") {
+  if (Array.isArray(edge)) {
+    return { caller: edge[0], callee: edge[1], source: edge[0], target: edge[1], edge_type: edgeType };
+  }
+  const caller = edge?.caller || edge?.source;
+  const callee = edge?.callee || edge?.target;
+  return { ...edge, caller, callee, source: caller, target: callee, edge_type: edge?.edge_type || edgeType };
+}
+
+function graphEdges(detail, { includeContext = state.showGraphContext, includeCallGraph = state.graphEdgeFilters.call === true } = {}) {
+  const projection = detail?.chain_projection || {};
+  const chainEdges = projection.chain_edges || [];
+  const contextEdges = projection.context_edges || [];
+  const topologyEdges = detail?.graph_topology?.edges || [];
+  if ((includeContext || includeCallGraph) && topologyEdges.length) {
+    const chainEdgeKeys = new Set(chainEdges.map((edge) => `${edge.caller || edge.source}->${edge.callee || edge.target}`));
+    return topologyEdges.map((edge) => {
+      const normalized = normalizeGraphEdge(edge, "context");
+      const key = `${normalized.caller}->${normalized.callee}`;
+      return { ...normalized, edge_type: chainEdgeKeys.has(key) ? "chain" : "context" };
+    });
+  }
+  const edges = includeContext ? [...contextEdges, ...chainEdges] : chainEdges;
   const projected = [...(projection.context_nodes || []), ...(projection.chain_nodes || [])];
-  if (projected.length) return projected;
-  return (detail?.graph_topology?.nodes || []).map((node) => ({ ...node, group: node.rewardable ? "chain" : "context" }));
+  if (projected.length) return edges.map((edge) => normalizeGraphEdge(edge, edge.edge_type || "chain"));
+  return topologyEdges.map((edge) => normalizeGraphEdge(edge, "chain"));
 }
 
-function graphEdges(detail) {
+function graphGroupKey(node) {
+  const distance = nodeDistance(node);
+  const filePath = node?.file_path || "";
+  const start = node?.start_line ?? "";
+  const end = node?.end_line ?? "";
+  const role = node?.node_role || node?.group || "";
+  if (!filePath || start === "" || end === "") return node?.key || "";
+  return `${filePath}:${start}:${end}:${role}:${distance ?? ""}`;
+}
+
+function compactMemberLabel(keys) {
+  const names = keys.map((key) => String(key || "").split("::").slice(-1)[0]);
+  const methodNames = new Set(names.map((name) => (name.includes(".") ? name.split(".").slice(-1)[0] : name)));
+  if (methodNames.size === 1) return `${[...methodNames][0]} x${keys.length}`;
+  return `${names[0]} +${keys.length - 1}`;
+}
+
+function aggregateGraph(nodes, edges) {
+  const groups = new Map();
+  nodes.forEach((node) => {
+    const key = graphGroupKey(node);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(node);
+  });
+  const nodeKeyMap = new Map();
+  const aggregateNodes = [];
+  groups.forEach((members, groupKey) => {
+    if (members.length === 1) {
+      aggregateNodes.push(members[0]);
+      nodeKeyMap.set(members[0].key, members[0].key);
+      return;
+    }
+    const first = members[0];
+    const memberKeys = members.map((member) => member.key);
+    const hitSteps = members
+      .map((member) => member.first_step)
+      .filter((step) => step !== null && step !== undefined)
+      .map((step) => Number(step))
+      .filter((step) => Number.isFinite(step));
+    const aggregateKey = `group::${groupKey}`;
+    memberKeys.forEach((key) => nodeKeyMap.set(key, aggregateKey));
+    aggregateNodes.push({
+      ...first,
+      key: aggregateKey,
+      label: compactMemberLabel(memberKeys),
+      member_keys: memberKeys,
+      member_count: members.length,
+      source: first.source || members.find((member) => member.source)?.source,
+      source_preview: first.source_preview || members.find((member) => member.source_preview)?.source_preview,
+      hit: members.some((member) => member.hit || member.first_step !== null && member.first_step !== undefined),
+      first_step: hitSteps.length ? Math.min(...hitSteps) : null,
+      selected_issue_anchor: members.some((member) => member.selected_issue_anchor),
+      root_cause: members.some((member) => member.root_cause),
+    });
+  });
+  const aggregateEdgeByKey = new Map();
+  edges.forEach((edge) => {
+    const caller = edge.caller || edge.source;
+    const callee = edge.callee || edge.target;
+    const source = nodeKeyMap.get(caller);
+    const target = nodeKeyMap.get(callee);
+    if (!source || !target) return;
+    if (source === target) return;
+    const key = `${source}->${target}`;
+    const aggregateEdge = { ...edge, caller: source, callee: target, source, target };
+    const existing = aggregateEdgeByKey.get(key);
+    if (!existing || existing.edge_type !== "chain" && aggregateEdge.edge_type === "chain") {
+      aggregateEdgeByKey.set(key, aggregateEdge);
+    }
+  });
+  return { nodes: aggregateNodes, edges: [...aggregateEdgeByKey.values()], nodeKeyMap };
+}
+
+function graphModel(detail, options = {}) {
+  return aggregateGraph(graphNodes(detail, options), graphEdges(detail, options));
+}
+
+function graphEdgeBucket(edge) {
+  if (edge.edge_type === "agent") return "agent";
+  if (edge.edge_type === "context") return "call";
+  return "reward";
+}
+
+function graphEdgeVisible(edge) {
+  return state.graphEdgeFilters[graphEdgeBucket(edge)] !== false;
+}
+
+function stepHitNodeKeys(step) {
+  const scored = step?.scored || step || {};
+  return (scored.hit_nodes || [])
+    .map((node) => node?.key)
+    .filter((key) => typeof key === "string" && key);
+}
+
+function firstHitNodeKeysFromProjection(detail) {
   const projection = detail?.chain_projection || {};
-  const edges = [...(projection.context_edges || []), ...(projection.chain_edges || [])];
-  if (edges.length) return edges.map((edge) => [edge.caller, edge.callee]);
-  return detail?.graph_topology?.edges || [];
+  const nodes = [...(projection.context_nodes || []), ...(projection.chain_nodes || [])];
+  return nodes
+    .filter((node) => node?.first_step !== null && node?.first_step !== undefined)
+    .sort((a, b) => Number(a.first_step) - Number(b.first_step))
+    .map((node) => node.key)
+    .filter((key) => typeof key === "string" && key);
+}
+
+function agentTraversalEdges(detail, model) {
+  const visible = new Set(model.nodes.map((node) => node.key));
+  const toVisibleKey = (rawKey) => {
+    const mapped = model.nodeKeyMap?.get(rawKey) || rawKey;
+    return visible.has(mapped) ? mapped : null;
+  };
+  const rawSteps = (detail.step_inspection || []).length ? detail.step_inspection : detail.step_details || [];
+  const steps = [...rawSteps]
+    .sort((a, b) => Number(a.trace_index ?? a.step_index ?? 0) - Number(b.trace_index ?? b.step_index ?? 0));
+  const sequence = [];
+  const pushKey = (rawKey) => {
+    const key = toVisibleKey(rawKey);
+    if (!key) return;
+    if (sequence[sequence.length - 1] !== key) sequence.push(key);
+  };
+  steps.forEach((step) => {
+    const seenInStep = new Set();
+    stepHitNodeKeys(step).forEach((key) => {
+      if (seenInStep.has(key)) return;
+      seenInStep.add(key);
+      pushKey(key);
+    });
+  });
+  if (!sequence.length) firstHitNodeKeysFromProjection(detail).forEach(pushKey);
+  const edgeByKey = new Map();
+  for (let index = 1; index < sequence.length; index += 1) {
+    const source = sequence[index - 1];
+    const target = sequence[index];
+    if (!source || !target || source === target) continue;
+    const key = `${source}->${target}`;
+    const current = edgeByKey.get(key) || { source, target, caller: source, callee: target, edge_type: "agent", first_hop: index, count: 0 };
+    current.count += 1;
+    edgeByKey.set(key, current);
+  }
+  return [...edgeByKey.values()];
+}
+
+function isSymptomRootCauseNode(node) {
+  return Boolean(node?.selected_issue_anchor && node?.root_cause);
+}
+
+function nodeRoleLabel(node) {
+  if (isSymptomRootCauseNode(node)) return "symptom + root cause";
+  return node?.node_role || node?.group || "-";
+}
+
+function graphEdgeMarker(edge) {
+  if (edge.edge_type === "agent") return "graph-arrow-agent";
+  return edge.edge_type === "context" ? "graph-arrow-context" : "graph-arrow-chain";
+}
+
+function graphEdgePath(a, b, edgeType = "chain") {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len = Math.sqrt(dx * dx + dy * dy) || 1;
+  const startPad = 22;
+  const endPad = 24;
+  const perpendicular = edgeType === "agent" ? 12 : 0;
+  const px = -dy / len * perpendicular;
+  const py = dx / len * perpendicular;
+  const sx = a.x + dx / len * startPad + px;
+  const sy = a.y + dy / len * startPad + py;
+  const tx = b.x - dx / len * endPad + px;
+  const ty = b.y - dy / len * endPad + py;
+  const direction = dx >= 0 ? 1 : -1;
+  const bendFactor = edgeType === "agent" ? 0.58 : 0.45;
+  const bend = Math.max(60, Math.abs(dx) * bendFactor);
+  const sameLayerBend = Math.abs(dx) < 12 ? 90 : bend;
+  const c1x = sx + direction * sameLayerBend;
+  const c2x = tx - direction * sameLayerBend;
+  return `M${sx.toFixed(1)} ${sy.toFixed(1)} C${c1x.toFixed(1)} ${sy.toFixed(1)}, ${c2x.toFixed(1)} ${ty.toFixed(1)}, ${tx.toFixed(1)} ${ty.toFixed(1)}`;
+}
+
+function graphEdgeLabelPosition(a, b) {
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 - 12 };
+}
+
+function detectCodeLanguage(filePath, source = "") {
+  const path = String(filePath || "").toLowerCase();
+  const ext = path.includes(".") ? path.split(".").pop() : "";
+  const byExt = {
+    py: "python",
+    js: "javascript",
+    jsx: "javascript",
+    ts: "typescript",
+    tsx: "typescript",
+    json: "json",
+    yaml: "yaml",
+    yml: "yaml",
+    sh: "shell",
+    bash: "shell",
+    sql: "sql",
+    diff: "diff",
+    patch: "diff",
+    md: "markdown",
+  };
+  if (byExt[ext]) return byExt[ext];
+  const text = String(source || "");
+  if (/^\s*(def|class|import|from)\s+/m.test(text)) return "python";
+  if (/^\s*(const|let|function|import|export)\s+/m.test(text)) return "javascript";
+  if (/^\s*[{[]/.test(text)) return "json";
+  if (/^\s*(select|with|insert|update)\s+/im.test(text)) return "sql";
+  return "text";
+}
+
+function highlightCode(source, language) {
+  const text = String(source || "");
+  if (!text) return "";
+  const span = (className, value) => `<span class="${className}">${esc(value)}</span>`;
+  const highlightPath = (value, className) => {
+    let out = "";
+    let last = 0;
+    String(value).replace(/[A-Za-z_$][\w$]*|\./g, (match, offset) => {
+      out += esc(value.slice(last, offset));
+      out += match === "." ? span("tok-dot", match) : span(className, match);
+      last = offset + match.length;
+      return match;
+    });
+    return out + esc(value.slice(last));
+  };
+  const emit = (regex, render) => {
+    let out = "";
+    let last = 0;
+    text.replace(regex, (match, ...args) => {
+      const offset = args[args.length - 2];
+      out += esc(text.slice(last, offset));
+      out += render(match);
+      last = offset + match.length;
+      return match;
+    });
+    return out + esc(text.slice(last));
+  };
+  if (language === "json") {
+    return emit(/"(?:\\.|[^"\\])*"(?=\s*:)|"(?:\\.|[^"\\])*"|\b(?:true|false|null)\b|-?\b\d+(?:\.\d+)?\b/g, (match) => {
+      if (/^".*"(?=\s*:)/.test(match)) return span("tok-key", match);
+      if (/^"/.test(match)) return span("tok-string", match);
+      if (/^-?\d/.test(match)) return span("tok-number", match);
+      return span("tok-keyword", match);
+    });
+  }
+  const commonKeywords = {
+    python: "def|class|return|if|elif|else|for|while|try|except|finally|with|as|import|from|pass|raise|yield|async|await|lambda|True|False|None",
+    javascript: "function|return|if|else|for|while|try|catch|finally|const|let|var|class|import|export|from|async|await|new|true|false|null|undefined",
+    typescript: "function|return|if|else|for|while|try|catch|finally|const|let|var|class|interface|type|import|export|from|async|await|new|true|false|null|undefined",
+    shell: "if|then|else|fi|for|do|done|case|esac|function|export|local|return|exit",
+    sql: "select|from|where|join|left|right|inner|outer|on|group|by|order|insert|update|delete|create|table|with|as|and|or|null|is",
+  };
+  const keywords = commonKeywords[language] || "";
+  if (!keywords) return esc(text);
+  const string = String.raw`"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|` + "`" + String.raw`(?:\\.|[^` + "`" + String.raw`\\])*` + "`";
+  const comment = language === "python" || language === "shell"
+    ? String.raw`#[^\n]*`
+    : language === "sql"
+      ? String.raw`--[^\n]*|/\*[\s\S]*?\*/`
+      : String.raw`//[^\n]*|/\*[\s\S]*?\*/`;
+  const lhs = String.raw`\b[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*(?=\s*(?://=|<<=|>>=|[-+*/%&|^:]?=(?!=)))`;
+  const member = String.raw`\.[A-Za-z_$][\w$]*`;
+  const defName = language === "python"
+    ? String.raw`\b(?:def|class)\s+[A-Za-z_]\w*`
+    : language === "javascript" || language === "typescript"
+      ? String.raw`\b(?:function|class)\s+[A-Za-z_$][\w$]*`
+      : "";
+  const operator = String.raw`==|!=|<=|>=|->|=>|//=|<<=|>>=|[-+*/%=<>:.,]`;
+  const parts = [comment, string];
+  if (defName) parts.push(defName);
+  parts.push(lhs, member, `\\b(?:${keywords})\\b`, String.raw`-?\b\d+(?:\.\d+)?\b`, operator);
+  const regex = new RegExp(parts.filter(Boolean).join("|"), "gim");
+  const keywordOnly = new RegExp(`^(?:${keywords})$`, "i");
+  return emit(regex, (match) => {
+    if (/^(#|\/\/|--|\/\*)/.test(match)) return span("tok-comment", match);
+    if (/^["'`]/.test(match)) return span("tok-string", match);
+    if (/^(def|class|function)\s+/i.test(match)) {
+      const pieces = match.match(/^(\S+)(\s+)(\S+)$/);
+      return pieces ? `${span("tok-keyword", pieces[1])}${esc(pieces[2])}${span("tok-symbol", pieces[3])}` : span("tok-keyword", match);
+    }
+    if (/^-?\d/.test(match)) return span("tok-number", match);
+    if (keywordOnly.test(match)) return span("tok-keyword", match);
+    if (/^\.[A-Za-z_$]/.test(match)) return `${span("tok-dot", ".")}${span("tok-property", match.slice(1))}`;
+    if (/[A-Za-z_$]/.test(match) && /(?:[A-Za-z_$][\w$]|\.)/.test(match) && !/[=<>:+\-*/%,]/.test(match)) {
+      return highlightPath(match, "tok-lhs");
+    }
+    if (match === ".") return span("tok-dot", match);
+    return span("tok-operator", match);
+  });
+}
+
+function safeLinkHref(value) {
+  const href = String(value || "").trim();
+  return /^(https?:\/\/|#)/i.test(href) ? href : "";
+}
+
+function renderInlineMarkdown(text) {
+  const placeholders = [];
+  let escaped = esc(String(text || "")).replace(/`([^`]+)`/g, (_match, code) => {
+    const token = `\u0000${placeholders.length}\u0000`;
+    placeholders.push(`<code>${code}</code>`);
+    return token;
+  });
+  escaped = escaped.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_match, label, href) => {
+    const safeHref = safeLinkHref(href);
+    return safeHref ? `<a href="${esc(safeHref)}" target="_blank" rel="noreferrer">${label}</a>` : label;
+  });
+  escaped = escaped
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  placeholders.forEach((value, index) => {
+    escaped = escaped.replaceAll(`\u0000${index}\u0000`, value);
+  });
+  return escaped;
+}
+
+function renderMarkdown(text) {
+  const source = String(text || "").replace(/\r\n/g, "\n");
+  if (!source.trim()) return '<div class="empty">No issue description was captured.</div>';
+  const lines = source.split("\n");
+  const out = [];
+  let paragraph = [];
+  let listItems = [];
+  let inFence = false;
+  let fenceLanguage = "";
+  let fenceLines = [];
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    out.push(`<p>${renderInlineMarkdown(paragraph.join(" "))}</p>`);
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (!listItems.length) return;
+    out.push(`<ul>${listItems.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</ul>`);
+    listItems = [];
+  };
+  const flushFence = () => {
+    const language = fenceLanguage || detectCodeLanguage("", fenceLines.join("\n"));
+    out.push(`<pre class="code-view language-${esc(language)}"><code>${highlightCode(fenceLines.join("\n"), language)}</code></pre>`);
+    fenceLanguage = "";
+    fenceLines = [];
+  };
+  lines.forEach((line) => {
+    const fence = line.match(/^\s*```\s*([A-Za-z0-9_+-]*)\s*$/);
+    if (fence) {
+      if (inFence) {
+        flushFence();
+        inFence = false;
+      } else {
+        flushParagraph();
+        flushList();
+        inFence = true;
+        fenceLanguage = fence[1] || "";
+      }
+      return;
+    }
+    if (inFence) {
+      fenceLines.push(line);
+      return;
+    }
+    if (!line.trim()) {
+      flushParagraph();
+      flushList();
+      return;
+    }
+    const heading = line.match(/^(#{1,4})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      const level = Math.min(heading[1].length + 1, 5);
+      out.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);
+      return;
+    }
+    const bullet = line.match(/^\s*[-*]\s+(.+)$/);
+    if (bullet) {
+      flushParagraph();
+      listItems.push(bullet[1]);
+      return;
+    }
+    const quote = line.match(/^\s*>\s?(.+)$/);
+    if (quote) {
+      flushParagraph();
+      flushList();
+      out.push(`<blockquote>${renderInlineMarkdown(quote[1])}</blockquote>`);
+      return;
+    }
+    flushList();
+    paragraph.push(line.trim());
+  });
+  if (inFence) flushFence();
+  flushParagraph();
+  flushList();
+  return `<div class="markdown-body">${out.join("")}</div>`;
+}
+
+function patchLineClass(line) {
+  if (/^(diff --git|index |new file mode |deleted file mode |similarity index |rename from |rename to )/.test(line)) return "diff-meta";
+  if (/^@@/.test(line)) return "diff-hunk";
+  if (/^\+\+\+|^---/.test(line)) return "diff-file";
+  if (/^\+/.test(line)) return "diff-add";
+  if (/^-/.test(line)) return "diff-del";
+  return "diff-ctx";
+}
+
+function renderPatch(text) {
+  const source = String(text || "").replace(/\r\n/g, "\n");
+  if (!source.trim()) return '<div class="empty">No golden patch was captured.</div>';
+  const rows = source.split("\n").map((line) => {
+    const cls = patchLineClass(line);
+    const sign = cls === "diff-add" ? "+" : cls === "diff-del" ? "-" : cls === "diff-hunk" ? "@" : " ";
+    const body = cls === "diff-add" || cls === "diff-del" ? line.slice(1) : line;
+    return `<div class="diff-line ${cls}"><span>${esc(sign)}</span><code>${esc(body)}</code></div>`;
+  });
+  return `<div class="diff-view patch-view">${rows.join("")}</div>`;
+}
+
+function nodeSourcePayload(node) {
+  const full = node?.source;
+  if (typeof full === "string" && full) return { text: full, truncated: false };
+  const preview = node?.source_preview || "";
+  return { text: preview, truncated: typeof preview === "string" && preview.trimEnd().endsWith("...") };
+}
+
+function renderGraphSourcePanel(model) {
+  const selected = model.nodes.find((node) => node.key === state.selectedGraphNodeKey);
+  if (!selected) {
+    return "";
+  }
+  const sourcePayload = nodeSourcePayload(selected);
+  const source = sourcePayload.text;
+  const language = detectCodeLanguage(selected.file_path, source);
+  const location = selected.file_path
+    ? `${selected.file_path}${selected.start_line ? `:${selected.start_line}${selected.end_line ? `-${selected.end_line}` : ""}` : ""}`
+    : "-";
+  const members = selected.member_keys?.length
+    ? `<div class="node-source-members">${selected.member_keys.map((key) => `<code>${esc(key)}</code>`).join("")}</div>`
+    : "";
+  return `<aside class="graph-source-panel">
+    <h4>Node Source</h4>
+    <div class="node-source-meta"><strong>${esc(selected.label || selected.key)}</strong><span>${esc(nodeRoleLabel(selected))}</span><span>${esc(location)}</span><span>${esc(language)}</span></div>
+    ${sourcePayload.truncated ? '<div class="node-source-warning">Full source was unavailable from bonus-map data; showing the stored preview.</div>' : ""}
+    ${members}
+    ${source ? `<div class="node-source-code"><pre class="code-view language-${esc(language)}"><code>${highlightCode(source, language)}</code></pre></div>` : '<div class="empty">No source was captured for this node.</div>'}
+  </aside>`;
+}
+
+function renderTraceTitleCard(detail) {
+  const issue = detail.issue_description || "";
+  const patch = detail.golden_patch || "";
+  return `<div class="trace-overview-stack">
+    <div class="trace-title-card">
+      <div>
+        <strong>${esc(detail.instance_id || `record-${detail.record_index}`)}</strong>
+        <div class="run-meta">${esc(detail.model_label || "-")} · ${esc(detail.run_id || "-")}</div>
+      </div>
+      <div>${traceStatusIcons(detail)}</div>
+    </div>
+    <details class="instance-overview-toggle">
+      <summary>Instance overview</summary>
+      <div class="instance-overview-body">
+        <section class="instance-issue-section">
+          <h4>Issue description</h4>
+          ${renderMarkdown(issue)}
+        </section>
+        <section>
+          <h4>Golden patch</h4>
+          ${renderPatch(patch)}
+        </section>
+      </div>
+    </details>
+  </div>`;
 }
 
 function renderGraph(detail) {
-  const nodes = graphNodes(detail);
+  const projection = detail?.chain_projection || {};
+  const contextNodeCount = (projection.context_nodes || []).length;
+  const contextEdgeCount = (projection.context_edges || []).length;
+  const model = graphModel(detail);
+  const nodes = model.nodes;
   if (!nodes.length) return '<div class="empty">No bonus-map graph available for this instance.</div>';
-  const edges = graphEdges(detail);
+  const fixedEdges = model.edges;
+  const edges = fixedEdges.filter(graphEdgeVisible);
   const layers = new Map();
   nodes.forEach((node) => {
-    const raw = node.normalized_distance;
-    const distance = typeof raw === "number" ? raw : 1;
-    const layer = Math.max(0, Math.min(5, Math.round(distance * 5)));
+    const layer = graphLayer(node);
     if (!layers.has(layer)) layers.set(layer, []);
     layers.get(layer).push(node);
   });
-  const sortedLayers = [...layers.entries()].sort((a, b) => b[0] - a[0]);
+  const sortedLayers = [...layers.entries()].sort((a, b) => a[0] - b[0]);
   const maxLayerSize = Math.max(...sortedLayers.map((entry) => entry[1].length), 1);
-  const rowGap = 70;
-  const colGap = 190;
-  const width = Math.max(760, 220 + sortedLayers.length * colGap);
-  const height = Math.max(260, 90 + maxLayerSize * rowGap);
+  const rowGap = 82;
+  const colGap = 230;
+  const width = Math.max(980, 220 + sortedLayers.length * colGap);
+  const height = Math.max(360, 110 + maxLayerSize * rowGap);
   const positions = new Map();
   sortedLayers.forEach(([_layer, layerNodes], layerIndex) => {
     const x = 80 + layerIndex * colGap;
-    const sortedNodes = [...layerNodes].sort((a, b) => String(a.key).localeCompare(String(b.key)));
+    const sortedNodes = [...layerNodes].sort(compareGraphNodes);
     sortedNodes.forEach((node, index) => positions.set(node.key, { x, y: 55 + index * rowGap }));
   });
-  const edgeSvg = edges.map(([caller, callee]) => {
+  const sortedEdges = [...edges].sort((a, b) => String(a.edge_type || "").localeCompare(String(b.edge_type || "")));
+  const edgeSvg = sortedEdges.map((edge) => {
+    const caller = edge.caller || edge.source;
+    const callee = edge.callee || edge.target;
     const a = positions.get(caller);
     const b = positions.get(callee);
     if (!a || !b) return "";
-    return `<line class="graph-edge" x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}"><title>${esc(caller)} -> ${esc(callee)}</title></line>`;
+    const edgeType = edge.edge_type === "context" ? "context" : "chain";
+    return `<path class="graph-edge ${esc(edgeType)}" d="${graphEdgePath(a, b, edgeType)}" marker-end="url(#${graphEdgeMarker(edge)})"><title>${esc(caller)} -> ${esc(callee)} (${esc(edgeType)})</title></path>`;
+  }).join("");
+  const allTraversalEdges = agentTraversalEdges(detail, model);
+  const traversalEdges = state.graphEdgeFilters.agent ? allTraversalEdges : [];
+  const traversalSvg = traversalEdges.map((edge) => {
+    const a = positions.get(edge.source);
+    const b = positions.get(edge.target);
+    if (!a || !b) return "";
+    const label = graphEdgeLabelPosition(a, b);
+    const hopLabel = edge.count > 1 ? `${edge.first_hop}x${edge.count}` : String(edge.first_hop);
+    return `<path class="graph-edge agent graph-agent-edge" d="${graphEdgePath(a, b, "agent")}" marker-end="url(#graph-arrow-agent)"><title>Trace edge ${esc(edge.source)} -> ${esc(edge.target)} first hop ${esc(edge.first_hop)}${edge.count > 1 ? ` repeated ${esc(edge.count)} times` : ""}</title></path><text class="graph-agent-label" x="${label.x.toFixed(1)}" y="${label.y.toFixed(1)}">${esc(hopLabel)}</text>`;
   }).join("");
   const nodeSvg = nodes.map((node) => {
     const pos = positions.get(node.key);
     if (!pos) return "";
     const tone = roleTone(node);
     const hit = node.hit || node.first_step !== null && node.first_step !== undefined;
-    const label = String(node.key || "").split("::").slice(-1)[0].slice(0, 28);
-    return `<g class="graph-node ${tone} ${hit ? "hit" : "miss"}" transform="translate(${pos.x},${pos.y})">
+    const distance = nodeDistance(node);
+    const roleLabel = nodeRoleLabel(node);
+    const label = String(node.label || node.key || "").split("::").slice(-1)[0].slice(0, 30);
+    const members = node.member_keys ? ` members: ${node.member_keys.slice(0, 8).join(", ")}${node.member_keys.length > 8 ? ", ..." : ""}` : "";
+    const selected = node.key === state.selectedGraphNodeKey;
+    return `<g class="graph-node ${tone} ${hit ? "hit" : "miss"} ${node.final_edit ? "edited" : ""} ${selected ? "is-selected" : ""}" transform="translate(${pos.x},${pos.y})" data-node-key="${esc(node.key)}" role="button" tabindex="0" aria-label="${esc(`Inspect ${node.label || node.key}`)}">
       <circle r="18"></circle>
+      ${node.final_edit ? '<circle class="graph-edit-ring" r="22"></circle>' : ""}
       ${hit ? `<text class="graph-step" y="4">${esc(node.first_step)}</text>` : ""}
       <text class="graph-label" x="26" y="-2">${esc(label)}</text>
-      <text class="graph-sub" x="26" y="13">${esc(node.node_role || node.group || "-")}</text>
-      <title>${esc(node.key)} ${node.first_step !== null && node.first_step !== undefined ? `first step ${node.first_step}` : "not visited"}</title>
+      <text class="graph-sub" x="26" y="13">${esc(roleLabel)}${node.member_count ? ` · x${esc(node.member_count)}` : ""}</text>
+      ${isSymptomRootCauseNode(node) ? '<rect class="graph-dual-pill" x="-24" y="20" width="48" height="14" rx="4"></rect><text class="graph-dual-text" y="31">S+RC</text>' : ""}
+      <title>${esc(node.member_count ? node.label : node.key)} role ${esc(roleLabel)} ${distance === null ? "" : `distance ${fmt(distance)}`} ${node.first_step !== null && node.first_step !== undefined ? `first step ${esc(node.first_step)}` : "not visited"}${esc(members)}</title>
     </g>`;
   }).join("");
-  return `<div class="graph-wrap"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Bonus map graph">${edgeSvg}${nodeSvg}</svg></div>`;
+  const hiddenFixedEdgeCount = fixedEdges.length - edges.length;
+  const hiddenTraversalEdgeCount = allTraversalEdges.length - traversalEdges.length;
+  const edgeFilterSummary = [
+    state.graphEdgeFilters.reward ? "Path edges" : null,
+    state.graphEdgeFilters.call ? "Graph edges" : null,
+    state.graphEdgeFilters.agent ? "Trace edges" : null,
+  ].filter(Boolean).join(", ") || "none";
+  const scope = state.showGraphContext
+    ? `Full Graph: ${nodes.length} visual nodes, ${edges.length}/${fixedEdges.length} fixed edges, ${traversalEdges.length}/${allTraversalEdges.length} Trace edges.`
+    : `Core Path: ${nodes.length} visual nodes, ${edges.length}/${fixedEdges.length} fixed edges, ${traversalEdges.length}/${allTraversalEdges.length} Trace edges. ${contextNodeCount} context/harness nodes and ${contextEdgeCount} context edges are hidden.`;
+  const hiddenNote = hiddenFixedEdgeCount || hiddenTraversalEdgeCount
+    ? ` Hidden by arrow filter: ${hiddenFixedEdgeCount} fixed, ${hiddenTraversalEdgeCount} agent.`
+    : "";
+  const note = edges.length || traversalEdges.length
+    ? `${scope} Showing edges: ${edgeFilterSummary}. Blue edges are Path edges; gray edges are Graph edges outside the Path; orange dashed edges are Trace edges over visible Graph nodes.${hiddenNote}`
+    : `${scope} Showing edges: ${edgeFilterSummary}. No edges are visible under the current edge filter.`;
+  const hasSelectedSource = model.nodes.some((node) => node.key === state.selectedGraphNodeKey);
+  return `<section class="graph-panel" aria-label="Dependency graph">
+    <div class="graph-head">
+      <div class="graph-controls">
+        ${contextNodeCount || contextEdgeCount || (detail?.graph_topology?.nodes || []).length ? `<label class="graph-toggle"><input id="graph-context-toggle" type="checkbox" ${state.showGraphContext ? "checked" : ""}> Show full Graph</label>` : ""}
+        <fieldset class="graph-edge-filter" aria-label="Graph edge filter">
+          <legend>Edges</legend>
+          <label><input class="graph-edge-filter-checkbox" type="checkbox" data-edge-filter="reward" ${state.graphEdgeFilters.reward ? "checked" : ""}> Path edges</label>
+          <label><input class="graph-edge-filter-checkbox" type="checkbox" data-edge-filter="call" ${state.graphEdgeFilters.call ? "checked" : ""}> Graph edges</label>
+          <label><input class="graph-edge-filter-checkbox" type="checkbox" data-edge-filter="agent" ${state.graphEdgeFilters.agent ? "checked" : ""}> Trace edges</label>
+        </fieldset>
+      </div>
+    </div>
+    <div class="graph-note">${esc(note)}</div>
+    <div class="graph-content ${hasSelectedSource ? "has-source" : ""}">
+      <div class="graph-wrap"><svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Bonus map graph">
+        <defs>
+          <linearGradient id="graph-symptom-root-cause-fill" x1="0" y1="1" x2="1" y2="0">
+            <stop offset="50%" stop-color="#dcfce7"></stop>
+            <stop offset="50%" stop-color="#fee2e2"></stop>
+          </linearGradient>
+          <marker id="graph-arrow-chain" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z"></path></marker>
+          <marker id="graph-arrow-context" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z"></path></marker>
+          <marker id="graph-arrow-agent" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z"></path></marker>
+        </defs>
+        ${edgeSvg}${traversalSvg}${nodeSvg}
+      </svg></div>
+      ${renderGraphSourcePanel(model)}
+    </div>
+  </section>`;
 }
 
-function traceBadges(detail) {
-  const chainBad = detail.chain_bad_patterns || {};
-  const bad = detail.bad_patterns || {};
-  const items = [
-    ["anchor", detail.anchor_hit, "ok"],
-    ["root", detail.root_hit, "ok"],
-    ["chain", detail.chain_hit, "ok"],
-    ["miracle", detail.miracle_step === true || detail.block_miracle_step === true, "warn"],
-    ["reverse", (detail.order_score ?? 0) < 0 || (detail.block_order_score ?? 0) < 0, "warn"],
-    ["loop", bad.has_loop || chainBad.chain_read_loop, "bad"],
-    ["error spiral", bad.error_spiral || chainBad.error_spiral_on_chain, "bad"],
-    ["missed anchor", chainBad.missed_anchor, "bad"],
-    ["missed root", chainBad.missed_root_after_anchor, "bad"],
+function traceResolved(detail) {
+  if (detail?.resolved !== null && detail?.resolved !== undefined) return Boolean(detail.resolved);
+  const reward = numeric(detail?.reward);
+  return reward !== null ? reward > 0 : false;
+}
+
+function traceStatusItems(detail) {
+  const canShowOrderMetrics = isOrderMetricDetail(detail);
+  const hasLoopBlock = (detail.purpose_blocks || []).some((block) => block?.loop);
+  const editedRootCause = detail.edited_root_cause === true || (detail.step_inspection || []).some((step) => step?.edited_root_cause);
+  const orderScore = numeric(detail.order_score);
+  return [
+    { key: "symptom", label: "hit symptom", icon: "🔎", active: detail.anchor_hit },
+    { key: "root", label: "hit root cause", icon: "🎯", active: detail.root_hit },
+    { key: "root-edit", label: "edited root cause", icon: "✎", active: editedRootCause },
+    { key: "loop", label: "loop", icon: "🔁", active: hasLoopBlock },
+    { key: "miracle", label: "miracle", icon: "✨", active: canShowOrderMetrics && detail.miracle_step === true },
+    { key: "reverse", label: "reverse", icon: "🌀", active: canShowOrderMetrics && orderScore !== null && orderScore < 0 },
   ];
-  return items.filter((item) => item[1]).map((item) => badge(item[0], true, item[2])).join("");
+}
+
+function traceStatusIcons(detail) {
+  const icons = traceStatusItems(detail).filter((item) => item.active);
+  if (!icons.length) return '<span class="trace-status-empty">-</span>';
+  const label = icons.map((item) => item.label).join(", ");
+  return `<span class="trace-status-icons" aria-label="${esc(label)}">${icons.map((item) => `<span class="trace-status-icon trace-icon-${esc(item.key)}" title="${esc(item.label)}">${item.icon}</span>`).join("")}</span>`;
+}
+
+function traceSummary(detail) {
+  const steps = (detail.step_inspection || detail.step_details || []).length;
+  const blocks = (detail.purpose_blocks || []).length;
+  const mapHits = detail.n_chain_nodes ? ` · map ${fmt(detail.n_hit_chain_nodes ?? 0)}/${fmt(detail.n_chain_nodes)}` : "";
+  return `${fmt(steps)} steps · ${fmt(blocks)} blocks${mapHits}`;
 }
 
 function renderTraceList(snapshot) {
   const details = filteredDetails(snapshot);
   const rows = details.map((detail) => {
     const selected = rowKey(detail) === state.selectedTraceKey;
-    return `<button class="trace-row ${selected ? "is-selected" : ""}" type="button" data-trace-key="${esc(rowKey(detail))}">
+    const resolved = traceResolved(detail);
+    const id = detail.instance_id || `record-${detail.record_index}`;
+    return `<button class="trace-row ${selected ? "is-selected" : ""} ${resolved ? "is-resolved" : "is-unresolved"}" type="button" data-trace-key="${esc(rowKey(detail))}" aria-label="${esc(`${id} ${resolved ? "resolved" : "unresolved"}`)}">
       <span class="trace-id">${esc(detail.instance_id || `record-${detail.record_index}`)}</span>
-      <span class="trace-meta">root ${pct(detail.root_hit ? 1 : 0)} · recall ${pct(detail.chain_node_recall ?? detail.hit_recall)}</span>
-      <span>${traceBadges(detail)}</span>
+      <span class="trace-meta">${esc(traceSummary(detail))}</span>
+      ${traceStatusIcons(detail)}
     </button>`;
   });
   return rows.join("") || '<div class="empty">No trajectories in the selected experiment.</div>';
+}
+
+function renderTraceLegend() {
+  return `${visualLegend("", TRACE_LEGEND_GROUPS)}${visualLegend("Dependency graph", GRAPH_LEGEND_GROUPS)}`;
+}
+
+function renderTraceWorkspacePanels(detail) {
+  return `<details id="trace-graph-section" class="trace-section trace-graph-section" data-trace-panel="graph" ${tracePanelOpen("graph") ? "open" : ""}>
+    <summary>Graph</summary>
+    <section id="trace-graph-pane" class="trace-panel trace-graph-top">${renderGraph(detail)}</section>
+  </details>
+  <details id="trace-step-section" class="trace-section trace-step-section" data-trace-panel="steps" ${tracePanelOpen("steps") ? "open" : ""}>
+    <summary>Trace</summary>
+    <section class="trace-panel trace-step-panel">
+      <section id="trace-middle-pane" class="trace-middle">
+        <h3>Purpose blocks and step timeline</h3>
+        ${renderTimeline(detail)}
+      </section>
+      <aside id="trace-right-pane" class="trace-right">${renderStepDetail(detail)}</aside>
+    </section>
+  </details>`;
 }
 
 function blockSteps(block) {
@@ -584,12 +1823,10 @@ function renderTimeline(detail) {
     return `<div class="timeline-grid">${[...byIndex.values()].map((step) => renderStepThumb(step, detail)).join("")}</div>`;
   }
   return blocks.map((block) => {
-    const tone = block.achieved ? "ok" : block.loop || block.wasted ? "bad" : "";
     const steps = blockSteps(block).map((idx) => byIndex.get(Number(idx))).filter(Boolean);
-    return `<section class="purpose-block ${tone}">
+    return `<section class="purpose-block">
       <div class="block-head">
         <strong>Block ${esc(block.block_index)}</strong>
-        ${badge(block.achieved ? "achieved" : block.loop ? "loop" : block.wasted ? "wasted" : "neutral", true, tone)}
         <span>${esc(block.family || "-")} ${esc(block.target_path || "")}</span>
       </div>
       <div class="timeline-grid">${steps.map((step) => renderStepThumb(step, detail)).join("") || '<span class="muted">No captured step in this block.</span>'}</div>
@@ -601,10 +1838,13 @@ function renderStepThumb(step, detail) {
   const traceIndex = Number(step.trace_index ?? step.step_index ?? 0);
   const selected = traceIndex === state.selectedStepIndex;
   const tone = stepTone(step, detail);
+  const segments = stepRoleSegments(step, detail);
+  const style = stepSegmentsStyle(segments);
+  const failed = step.execution_error === true || step.status === "error";
   const tool = step.tool_name || (step.tool_names || [step.scored?.family || "step"]).join("+");
   const family = step.action_family && step.action_family !== "other" ? `${step.action_family}: ` : "";
   const target = step.target_path || step.path || step.scored?.target_path || "";
-  return `<button type="button" class="step-thumb ${tone} ${selected ? "is-selected" : ""}" data-step-index="${traceIndex}">
+  return `<button type="button" class="step-thumb ${tone} ${failed ? "is-error" : ""} ${selected ? "is-selected" : ""}" data-step-index="${traceIndex}" data-step-tone="${esc(tone)}" data-step-roles="${esc(segments.join(","))}"${style}>
     <span class="step-num">${esc(step.step_index ?? traceIndex)}</span>
     <span class="step-tool">${esc(`${family}${tool}`)}</span>
     <span class="step-target">${esc(target.split("/").slice(-2).join("/") || step.command || "no target")}</span>
@@ -616,50 +1856,146 @@ function jsonBlock(value) {
   return `<pre class="detail-pre">${esc(text || "-")}</pre>`;
 }
 
-function commandLine(step) {
-  const parts = [step.tool_name || (step.tool_names || []).join("+") || "step"];
-  if (step.command) parts.push(step.command);
-  if (step.path) parts.push(step.path);
-  if (step.view_range) parts.push(Array.isArray(step.view_range) ? `[${step.view_range.join(", ")}]` : step.view_range);
-  return parts.filter(Boolean).join(" ");
+function argValue(value) {
+  if (value === null || value === undefined) return "-";
+  if (typeof value === "string") return value;
+  return JSON.stringify(value);
 }
 
-function renderReadList(reads) {
-  const rows = (reads || []).map((read) => `<tr><td>${esc(read.file_path || read.path)}</td><td>${esc(read.start_line ?? "-")}</td><td>${esc(read.end_line ?? "-")}</td></tr>`);
-  return table(["File", "Start", "End"], rows);
+function renderArgumentPairs(args) {
+  const rows = (args || []).map((item) => `<tr><td>${esc(item.key)}</td><td><code>${esc(argValue(item.value))}</code></td></tr>`);
+  return table(["Argument", "Value"], rows);
+}
+
+function displayToolCalls(step) {
+  if ((step.parsed_tool_calls || []).length) return step.parsed_tool_calls;
+  const names = step.tool_names || (step.tool_name ? [step.tool_name] : []);
+  return names.map((name, index) => ({
+    name,
+    arguments: Object.entries((step.tool_args || [])[index] || {}).map(([key, value]) => ({ key, value })),
+  }));
 }
 
 function renderDiff(oldText, newText) {
   if (oldText === undefined && newText === undefined) return "";
   const oldLines = String(oldText || "").split("\n");
   const newLines = String(newText || "").split("\n");
+  const dp = Array.from({ length: oldLines.length + 1 }, () => Array(newLines.length + 1).fill(0));
+  for (let i = oldLines.length - 1; i >= 0; i -= 1) {
+    for (let j = newLines.length - 1; j >= 0; j -= 1) {
+      dp[i][j] = oldLines[i] === newLines[j]
+        ? dp[i + 1][j + 1] + 1
+        : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
   const rows = [];
-  const maxLen = Math.max(oldLines.length, newLines.length);
-  for (let i = 0; i < maxLen; i += 1) {
-    if (oldLines[i] !== undefined && oldLines[i] !== newLines[i]) {
-      rows.push(`<div class="diff-line diff-del"><span>-</span><code>${esc(oldLines[i])}</code></div>`);
-    }
-    if (newLines[i] !== undefined && oldLines[i] !== newLines[i]) {
-      rows.push(`<div class="diff-line diff-add"><span>+</span><code>${esc(newLines[i])}</code></div>`);
-    }
-    if (oldLines[i] !== undefined && oldLines[i] === newLines[i]) {
+  let i = 0;
+  let j = 0;
+  while (i < oldLines.length || j < newLines.length) {
+    if (i < oldLines.length && j < newLines.length && oldLines[i] === newLines[j]) {
       rows.push(`<div class="diff-line diff-ctx"><span> </span><code>${esc(oldLines[i])}</code></div>`);
+      i += 1;
+      j += 1;
+      continue;
+    }
+    if (i < oldLines.length && (j >= newLines.length || dp[i + 1][j] >= dp[i][j + 1])) {
+      rows.push(`<div class="diff-line diff-del"><span>-</span><code>${esc(oldLines[i])}</code></div>`);
+      i += 1;
+      continue;
+    }
+    if (j < newLines.length) {
+      rows.push(`<div class="diff-line diff-add"><span>+</span><code>${esc(newLines[j])}</code></div>`);
+      j += 1;
     }
   }
   return `<section><h4>Inline diff</h4><div class="diff-view">${rows.join("") || '<div class="muted">No textual difference.</div>'}</div></section>`;
 }
 
-function renderToolCallSummary(step) {
-  const args = (step.tool_args || [])[0] || {};
-  const fields = {
-    tool: step.tool_name || (step.tool_names || []).join("+") || "-",
-    family: step.action_family || "-",
-    command: step.command || args.command || "-",
-    path: step.path || step.target_path || args.path || args.file || "-",
-    view_range: step.view_range || args.view_range || "-",
-    status: step.status || "-",
-  };
-  return table(["Field", "Value"], Object.entries(fields).map(([key, value]) => `<tr><td>${esc(key)}</td><td>${esc(Array.isArray(value) ? value.join(", ") : value)}</td></tr>`));
+function renderToolCalls(step) {
+  const calls = displayToolCalls(step);
+  if (!calls.length) return '<div class="empty">No tool call captured.</div>';
+  return calls.map((call, index) => `<article class="tool-call">
+    <div class="tool-call-name">${esc(index + 1)}. ${esc(call.name || "unknown")}</div>
+    ${renderArgumentPairs(call.arguments || [])}
+  </article>`).join("");
+}
+
+function stepHitNodes(step) {
+  const nodes = [
+    ...((step?.scored || {}).hit_nodes || []),
+    ...(step?.hit_nodes || []),
+  ];
+  const seen = new Set();
+  return nodes.filter((node) => {
+    const key = node?.key || `${node?.file_path || ""}:${node?.start_line || ""}:${node?.end_line || ""}:${node?.node_role || ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function nodePath(node) {
+  if (node?.file_path) return node.file_path;
+  const key = String(node?.key || "");
+  return key.includes("::") ? key.split("::")[0] : key || "-";
+}
+
+function nodeCallable(node) {
+  if (node?.callable_name) return node.callable_name;
+  if (node?.qualified_name) return node.qualified_name;
+  if (node?.symbol) return node.symbol;
+  if (node?.name) return node.name;
+  const key = String(node?.key || "");
+  return key.includes("::") ? key.split("::").slice(1).join("::") : "-";
+}
+
+function nodeLineRange(node) {
+  if (node?.start_line === undefined || node?.start_line === null) return "";
+  if (node?.end_line === undefined || node?.end_line === null || node.end_line === node.start_line) return `:${node.start_line}`;
+  return `:${node.start_line}-${node.end_line}`;
+}
+
+function groupedStepHitNodes(step, detail) {
+  const groups = [
+    { key: "symptom", label: "symptom", nodes: [] },
+    { key: "chain", label: "map hit", nodes: [] },
+    { key: "root", label: "root cause", nodes: [] },
+  ];
+  for (const node of stepHitNodes(step)) {
+    const isSymptom = hitNodeIsSymptom(node, detail);
+    const isRoot = hitNodeIsRootCause(node, detail);
+    if (isSymptom) groups[0].nodes.push(node);
+    if (!isSymptom && !isRoot) groups[1].nodes.push(node);
+    if (isRoot) groups[2].nodes.push(node);
+  }
+  return groups;
+}
+
+function renderStepNodeHits(step, detail) {
+  const groups = groupedStepHitNodes(step, detail).filter((group) => group.nodes.length);
+  if (!groups.length) {
+    return `<section class="step-node-hits"><h4>Visited bonus-map nodes</h4><div class="empty">No bonus-map node hit in this step.</div></section>`;
+  }
+  const groupHtml = groups.map((group) => `<div class="node-hit-group ${esc(group.key)}">
+    <div class="node-hit-group-title"><span class="node-hit-swatch"></span><span>${esc(group.label)}</span></div>
+    <ul class="node-hit-list">
+      ${group.nodes.map((node) => `<li>
+        <code class="node-hit-path">${esc(nodePath(node))}</code>
+        <span class="node-hit-callable">${esc(nodeCallable(node))}</span>
+        ${nodeLineRange(node) ? `<span class="node-hit-lines">${esc(nodeLineRange(node))}</span>` : ""}
+      </li>`).join("")}
+    </ul>
+  </div>`).join("");
+  return `<section class="step-node-hits"><h4>Visited bonus-map nodes</h4><div class="node-hit-groups">${groupHtml}</div></section>`;
+}
+
+function renderToggle(title, value, className = "", open = false) {
+  return `<details class="detail-toggle ${esc(className)}" ${open ? "open" : ""}><summary>${esc(title)}</summary>${jsonBlock(value || "(empty)")}</details>`;
+}
+
+function hasInlineDiff(step) {
+  const isWrite = step.action_family === "edit" || ["str_replace", "create", "insert"].includes(String(step.command || ""));
+  return isWrite && (step.old_str !== undefined || step.new_str !== undefined);
 }
 
 function renderStepDetail(detail) {
@@ -668,25 +2004,21 @@ function renderStepDetail(detail) {
   if (!step) {
     return `<section class="step-detail"><h3>Trajectory detail</h3><div class="empty">Raw step content was not captured for this artifact.</div></section>`;
   }
-  const scored = step.scored || {};
-  const hitNodes = (scored.hit_nodes || []).map((node) => `${node.node_role || "node"}: ${node.key}`).join("\n");
-  const reads = scored.reads || step.recovered_reads || [];
   return `<section class="step-detail">
     <h3>Step ${esc(step.step_index ?? step.trace_index)}</h3>
     <div class="detail-badges">
-      ${badge(commandLine(step))}
+      ${step.execution_error || step.status === "error" ? badge("execution error", true, "bad") : ""}
       ${step.parse_error ? badge("parse error", true, "bad") : ""}
       ${step.exit_reason ? badge(step.exit_reason) : ""}
-      ${reads.length ? badge(`${reads.length} recovered reads`, true, "ok") : badge("no recovered read", true, "warn")}
     </div>
     <div class="detail-grid">
-      <section><h4>Tool summary</h4>${renderToolCallSummary(step)}</section>
-      <section><h4>Think / assistant text</h4>${jsonBlock(step.thought || step.response_text || "(empty)")}</section>
-      <section><h4>Action</h4>${jsonBlock(step.raw_action || step.tool_calls || [])}</section>
-      ${renderDiff(step.old_str, step.new_str)}
-      <section><h4>Observation</h4>${jsonBlock(step.observation || step.tool_results || [])}</section>
-      <section><h4>Recovered reads</h4>${renderReadList(reads)}</section>
-      <section><h4>Matched bonus-map nodes</h4>${jsonBlock(hitNodes || "No matched bonus-map node.")}</section>
+      ${renderStepNodeHits(step, detail)}
+      <section><h4>Tool calls</h4>${renderToolCalls(step)}</section>
+      ${renderToggle("Reasoning", step.reasoning_text || "(empty)")}
+      ${renderToggle("Chat", step.chat_text || step.response_text || "(empty)")}
+      ${hasInlineDiff(step) ? renderDiff(step.old_str, step.new_str) : ""}
+      ${renderToggle("Action", step.raw_action || step.tool_calls || [])}
+      ${renderToggle("Observation", step.observation || step.tool_results || [], "observation-toggle", true)}
     </div>
   </section>`;
 }
@@ -707,33 +2039,72 @@ function renderTraceInspector(snapshot) {
     state.selectedStepIndex = Number([...selectedSteps.keys()][0] ?? 0);
   }
   document.getElementById("trace-inspector").innerHTML = `
-    <aside class="trace-left">${renderTraceList(snapshot)}</aside>
-    <section class="trace-middle">
-      <div class="trace-title-line">
-        <div><strong>${esc(detail.instance_id || `record-${detail.record_index}`)}</strong><div class="run-meta">${esc(detail.model_label || "-")} · ${esc(detail.run_id || "-")}</div></div>
-        <div>${traceBadges(detail)}</div>
-      </div>
-      ${renderGraph(detail)}
-      <h3>Purpose blocks and step timeline</h3>
-      ${renderTimeline(detail)}
-    </section>
-    <aside class="trace-right">${renderStepDetail(detail)}</aside>`;
+    <aside id="trace-left-pane" class="trace-left">${renderTraceList(snapshot)}</aside>
+    <section class="trace-workspace">
+      <div class="trace-overview">${renderTraceTitleCard(detail)}</div>
+      ${renderTraceWorkspacePanels(detail)}
+    </section>`;
+  document.querySelectorAll(".trace-section[data-trace-panel]").forEach((section) => {
+    section.addEventListener("toggle", () => {
+      setTracePanelOpen(section.dataset.tracePanel, section.open);
+    });
+  });
   document.querySelectorAll(".trace-row").forEach((button) => {
     button.addEventListener("click", () => {
+      const leftScroll = document.getElementById("trace-left-pane")?.scrollTop || 0;
       state.selectedTraceKey = button.dataset.traceKey;
       state.selectedStepIndex = 0;
+      state.selectedGraphNodeKey = null;
+      resetTracePanels();
       renderTraceInspector(state.snapshot);
+      restoreInspectorScroll({ left: leftScroll, middle: 0, right: 0 });
     });
   });
   document.querySelectorAll(".step-thumb").forEach((button) => {
     button.addEventListener("click", () => {
+      const scrollState = captureInspectorScroll();
       state.selectedStepIndex = Number(button.dataset.stepIndex || 0);
       renderTraceInspector(state.snapshot);
+      restoreInspectorScroll({ ...scrollState, right: 0 });
+    });
+  });
+  const graphContextToggle = document.getElementById("graph-context-toggle");
+  if (graphContextToggle) {
+    graphContextToggle.addEventListener("change", (event) => {
+      const scrollState = captureInspectorScroll();
+      setGraphContext(event.target.checked);
+      renderTraceInspector(state.snapshot);
+      restoreInspectorScroll(scrollState);
+    });
+  }
+  document.querySelectorAll(".graph-edge-filter-checkbox").forEach((input) => {
+    input.addEventListener("change", (event) => {
+      const bucket = event.target.dataset.edgeFilter;
+      if (!bucket) return;
+      const scrollState = captureInspectorScroll();
+      state.graphEdgeFilters[bucket] = Boolean(event.target.checked);
+      renderTraceInspector(state.snapshot);
+      restoreInspectorScroll(scrollState);
+    });
+  });
+  document.querySelectorAll(".graph-node[data-node-key]").forEach((node) => {
+    const selectNode = () => {
+      const scrollState = captureInspectorScroll();
+      state.selectedGraphNodeKey = state.selectedGraphNodeKey === node.dataset.nodeKey ? null : node.dataset.nodeKey;
+      renderTraceInspector(state.snapshot);
+      restoreInspectorScroll(scrollState);
+    };
+    node.addEventListener("click", selectNode);
+    node.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectNode();
+      }
     });
   });
 }
 
-function render() {
+function render(options = {}) {
   const snapshot = state.snapshot;
   if (!snapshot) {
     document.getElementById("summary-grid").innerHTML = '<div class="empty">Dashboard data is not available.</div>';
@@ -748,7 +2119,9 @@ function render() {
   renderDistributions(snapshot);
   renderModels(snapshot);
   renderRuns(snapshot);
+  document.getElementById("trace-legend").innerHTML = renderTraceLegend();
   renderTraceInspector(snapshot);
+  restoreInspectorScroll(options.scrollState);
 }
 
 function setTab(tabName) {
@@ -760,18 +2133,34 @@ function setTab(tabName) {
 function configureEvents() {
   document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => setTab(tab.dataset.tab)));
   document.getElementById("refresh-button").addEventListener("click", loadSnapshot);
+  document.querySelectorAll(".case-filter-checkbox").forEach((input) => {
+    input.addEventListener("change", (event) => {
+      const bucket = event.target.dataset.caseFilter;
+      if (!bucket) return;
+      state.caseFilters[bucket] = Boolean(event.target.checked);
+      state.selectedTraceKey = null;
+      state.selectedStepIndex = 0;
+      state.selectedGraphNodeKey = null;
+      resetTracePanels();
+      render();
+    });
+  });
   document.getElementById("clear-experiment").addEventListener("click", () => {
     state.selectedDataset = null;
     state.selectedEvalCellKey = null;
     state.selectedExperimentKey = null;
     state.selectedTraceKey = null;
     state.selectedStepIndex = 0;
+    state.selectedGraphNodeKey = null;
+    resetTracePanels();
     render();
   });
   document.getElementById("trace-search").addEventListener("input", (event) => {
     state.traceQuery = event.target.value;
     state.selectedTraceKey = null;
     state.selectedStepIndex = 0;
+    state.selectedGraphNodeKey = null;
+    resetTracePanels();
     renderTraceInspector(state.snapshot);
   });
   document.getElementById("auto-refresh").addEventListener("change", (event) => {
@@ -792,4 +2181,4 @@ function stopAutoRefresh() {
 
 configureEvents();
 loadSnapshot();
-startAutoRefresh();
+if (document.getElementById("auto-refresh").checked) startAutoRefresh();

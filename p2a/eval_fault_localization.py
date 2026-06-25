@@ -25,6 +25,7 @@ from p2a.core import (
     parse_read_actions_from_tool_calls,
     reads_from_step_trace,
     segment_purpose_blocks,
+    writes_from_step_trace,
 )
 
 SUMMARY_SCHEMA_VERSION = "p2a_eval_fault_localization_v1"
@@ -37,7 +38,14 @@ TEXT_FIELDS = (
     "text",
 )
 STEP_FIELDS = ("global_step", "trainer_step", "validation_step", "training_step", "step", "iteration")
-ERROR_PATTERN = re.compile(r"\b(traceback|exception|error|failed|failure|cannot|invalid)\b", re.IGNORECASE)
+EXECUTION_ERROR_LINE_PATTERN = re.compile(
+    r"^\s*(traceback\b|error:|exception:|command failed\b|failed:|failure:|no such file\b|bash:|sh:)",
+    re.IGNORECASE,
+)
+EXECUTION_ERROR_TEXT_PATTERN = re.compile(
+    r"\b(exit status|exit code|returned non-zero|command not found|segmentation fault)\b",
+    re.IGNORECASE,
+)
 CHAIN_CASE_TYPES = {"standard", "direct"}
 CHAIN_NODE_ROLES = {"symptom", "intermediate", "root_cause"}
 CHAIN_CONTEXT_ROLES = {"test_harness", "pre_symptom"}
@@ -415,6 +423,10 @@ def _read_hit_nodes(read: dict, bonus_map: dict, *, rewardable_only: bool = True
     return hits
 
 
+def _write_hit_nodes(write: dict, bonus_map: dict, *, rewardable_only: bool = True) -> set[str]:
+    return _read_hit_nodes(write, bonus_map, rewardable_only=rewardable_only)
+
+
 def _step_node_first_hits(
     step_reads: list[list[dict]],
     bonus_map: dict,
@@ -465,23 +477,46 @@ def _kendall_order(first_hits: dict[str, int], bonus_map: dict) -> tuple[float |
     return tau, True
 
 
-def _miracle_stats(first_hits: dict[str, int], bonus_map: dict) -> tuple[bool | None, int | None]:
+def _first_hit_for_nodes(first_hits: dict[str, int], node_keys: Iterable[str]) -> int | None:
+    steps = [first_hits[node_key] for node_key in node_keys if node_key in first_hits]
+    return min(steps) if steps else None
+
+
+def _miracle_stats(
+    first_hits: dict[str, int],
+    bonus_map: dict,
+    *,
+    anchor_nodes: Iterable[str] | None = None,
+    root_nodes: Iterable[str] | None = None,
+) -> tuple[bool | None, int | None]:
     nodes = bonus_map.get("call_graph_nodes", {})
     intermediate = {
         node_key: node
         for node_key, node in nodes.items()
-        if 0.0 < float(node.get("normalized_distance", -1.0)) < 1.0
+        if node.get("node_role") == "intermediate" or 0.0 < float(node.get("normalized_distance", -1.0)) < 1.0
     }
-    if not intermediate:
-        return None, None
+    root_candidates = set(root_nodes or [])
+    if not root_candidates:
+        root_candidates = {
+            node_key
+            for node_key, node in nodes.items()
+            if float(node.get("normalized_distance", -1.0)) == 0.0
+        }
     gt_steps = [
         first_hits[node_key]
-        for node_key, node in nodes.items()
-        if float(node.get("normalized_distance", -1.0)) == 0.0 and node_key in first_hits
+        for node_key in root_candidates
+        if node_key in first_hits
     ]
     if not gt_steps:
         return False, 0
     first_gt = min(gt_steps)
+    anchor_candidates = set(anchor_nodes or [])
+    first_anchor = _first_hit_for_nodes(first_hits, anchor_candidates) if anchor_candidates else None
+    if first_anchor is not None and first_anchor == first_gt:
+        return False, 0
+    if not intermediate:
+        skipped_anchor = bool(anchor_candidates) and (first_anchor is None or first_gt < first_anchor)
+        return (True, 1) if skipped_anchor else (None, None)
     visited_intermediate_levels = {
         float(intermediate[node_key]["normalized_distance"])
         for node_key, step in first_hits.items()
@@ -489,7 +524,8 @@ def _miracle_stats(first_hits: dict[str, int], bonus_map: dict) -> tuple[bool | 
     }
     all_intermediate_levels = {float(node["normalized_distance"]) for node in intermediate.values()}
     missing_levels = all_intermediate_levels - visited_intermediate_levels
-    is_miracle = not visited_intermediate_levels
+    skipped_anchor = bool(anchor_candidates) and (first_anchor is None or first_gt < first_anchor)
+    is_miracle = skipped_anchor or not visited_intermediate_levels
     return is_miracle, len(missing_levels) if is_miracle else 0
 
 
@@ -506,15 +542,18 @@ def _block_step_reads(record: dict, tracking_mode: str) -> list[list[dict]]:
     return [reads for reads in block_reads if reads]
 
 
-def _source_preview(node: dict, max_chars: int = 500) -> str | None:
-    if node.get("node_role") in CHAIN_CONTEXT_ROLES:
-        return None
+def _source_preview(node: dict, max_chars: int = 4000) -> str | None:
     source = node.get("source")
     if not isinstance(source, str) or not source:
         return None
     if len(source) <= max_chars:
         return source
     return source[:max_chars].rstrip() + "\n..."
+
+
+def _source_text(node: dict) -> str | None:
+    source = node.get("source")
+    return source if isinstance(source, str) and source else None
 
 
 def _node_role(node_key: str, nodes: dict[str, dict]) -> str | None:
@@ -633,7 +672,7 @@ def _chain_evaluability(bonus_map: dict | None) -> tuple[bool, str | None]:
     if case_type not in CHAIN_CASE_TYPES:
         return False, str(bonus_map.get("reason_code") or case_type or "missing_case_type")
     if not anchors:
-        return False, str(bonus_map.get("reason_code") or "traceable_no_anchor")
+        return False, "traceable_no_anchor"
     return True, None
 
 
@@ -697,6 +736,10 @@ def _chain_projection(
             "file_path": node.get("file_path"),
             "start_line": node.get("start_line"),
             "end_line": node.get("end_line"),
+            "normalized_distance": node.get("normalized_distance"),
+            "rewardable": node.get("rewardable"),
+            "excluded_from_hop_max": node.get("excluded_from_hop_max"),
+            "exclusion_reason": node.get("exclusion_reason"),
             "node_role": role,
             "group": group,
             "selected_issue_anchor": node_key in anchors,
@@ -705,6 +748,7 @@ def _chain_projection(
             "first_step": first_hits.get(node_key),
         }
         if role in CHAIN_NODE_ROLES:
+            summary["source"] = _source_text(node)
             summary["source_preview"] = _source_preview(node)
         return summary
 
@@ -727,6 +771,22 @@ def _chain_projection(
         "context_nodes": context_nodes,
         "context_edges": [_edge_dict(caller, callee, "context", nodes) for caller, callee in context_edge_keys],
     }
+
+
+def _is_bonus_metric_evaluable(item: dict[str, Any]) -> bool:
+    case_kind = item.get("chain_case_kind") or item.get("bonus_case_type")
+    return item.get("chain_evaluable") is True and case_kind in CHAIN_CASE_TYPES
+
+
+def _is_order_metric_evaluable(item: dict[str, Any]) -> bool:
+    if not _is_bonus_metric_evaluable(item):
+        return False
+    projection = item.get("chain_projection") or {}
+    anchors = set(projection.get("anchors") or [])
+    roots = set(projection.get("roots") or [])
+    if anchors & roots:
+        return False
+    return bool(projection.get("chain_edges") or [])
 
 
 def _chain_step_hits(
@@ -842,6 +902,7 @@ def _graph_topology(bonus_map: dict, hit_nodes: set[str], first_hits: dict[str, 
                 "exclusion_reason": node.get("exclusion_reason"),
                 "hit": node_key in hit_nodes,
                 "first_step": first_hits.get(node_key),
+                "source": _source_text(node),
                 "source_preview": _source_preview(node),
             }
         )
@@ -885,10 +946,15 @@ def _normalized_trace(trace: Any) -> dict:
 
 def _step_details(step_items: list[Any], step_reads: list[list[dict]], bonus_map: dict, tracking_mode: str) -> list[dict]:
     details = []
+    root_nodes = set(bonus_map.get("root_cause_nodes") or [])
     for step_idx, trace in enumerate(step_items):
         trace = _normalized_trace(trace)
         reads = step_reads[step_idx] if step_idx < len(step_reads) else []
+        writes = writes_from_step_trace(trace)
         hit_nodes = _all_read_hit_nodes(reads, bonus_map)
+        write_hit_nodes: set[str] = set()
+        for write in writes:
+            write_hit_nodes.update(_write_hit_nodes(write, bonus_map, rewardable_only=False))
         action = normalize_action(trace, tracking_mode=tracking_mode)
         details.append(
             {
@@ -898,7 +964,11 @@ def _step_details(step_items: list[Any], step_reads: list[list[dict]], bonus_map
                 "target_path": action.get("target_path"),
                 "n_reads": len(reads),
                 "reads": reads,
+                "writes": writes,
                 "hit_nodes": _node_summaries(hit_nodes, bonus_map),
+                "write_hit_nodes": _node_summaries(write_hit_nodes, bonus_map),
+                "edited_root_cause": bool(write_hit_nodes & root_nodes),
+                "execution_error": _trace_has_error(trace),
                 "min_distance": _min_node_distance(hit_nodes, bonus_map),
             }
         )
@@ -938,11 +1008,34 @@ def _trace_has_error(trace: Any) -> bool:
     trace = _maybe_json(trace)
     if not trace:
         return False
-    try:
-        text = json.dumps(trace, default=str)[:6000]
-    except TypeError:
-        text = str(trace)[:6000]
-    return ERROR_PATTERN.search(text) is not None
+    if isinstance(trace, dict):
+        if trace.get("error") or trace.get("system_error"):
+            return True
+        for result_value in trace.get("tool_results") or []:
+            result = _maybe_json(result_value)
+            if not isinstance(result, dict):
+                continue
+            if result.get("error"):
+                return True
+            status = str(result.get("status") or result.get("state") or "").lower()
+            if status in {"error", "failed", "failure"}:
+                return True
+            exit_code = result.get("exit_code", result.get("returncode"))
+            if isinstance(exit_code, (int, float)) and int(exit_code) != 0:
+                return True
+            for key in ("stderr", "observation", "content", "result", "output"):
+                value = result.get(key)
+                if isinstance(value, str) and _looks_like_execution_error(value):
+                    return True
+        return False
+    return isinstance(trace, str) and _looks_like_execution_error(trace)
+
+
+def _looks_like_execution_error(text: str) -> bool:
+    sample = str(text or "")[:6000]
+    if EXECUTION_ERROR_TEXT_PATTERN.search(sample):
+        return True
+    return any(EXECUTION_ERROR_LINE_PATTERN.search(line) for line in sample.splitlines()[:80])
 
 
 def _max_error_run(step_items: list[Any]) -> int:
@@ -1136,6 +1229,7 @@ def score_record(
         "n_hit_chain_nodes": 0,
         "chain_bad_patterns": {key: False for key in CHAIN_BAD_PATTERN_KEYS},
         "step_details": step_details,
+        "edited_root_cause": any(bool(step.get("edited_root_cause")) for step in step_details),
         "purpose_blocks": purpose_blocks,
         "bad_patterns": bad_patterns,
         **block_stats,
@@ -1226,13 +1320,24 @@ def score_record(
     if step_reads:
         result["first_hit_step"] = _first_matching_step(step_reads, bonus_map, require_gt=False)
         result["first_ground_truth_step"] = _first_matching_step(step_reads, bonus_map, require_gt=True)
-        result["order_score"], result["order_defined"] = _kendall_order(step_first_hits, bonus_map)
-        result["miracle_step"], result["miracle_severity"] = _miracle_stats(step_first_hits, bonus_map)
+        if _is_order_metric_evaluable(result):
+            result["order_score"], result["order_defined"] = _kendall_order(step_first_hits, bonus_map)
+            result["miracle_step"], result["miracle_severity"] = _miracle_stats(
+                step_first_hits,
+                bonus_map,
+                anchor_nodes=anchor_nodes,
+                root_nodes=root_nodes,
+            )
         block_reads = _block_step_reads(record, tracking_mode)
-        if block_reads:
+        if block_reads and _is_order_metric_evaluable(result):
             block_hits = _step_node_first_hits(block_reads, bonus_map)
             result["block_order_score"], result["block_order_defined"] = _kendall_order(block_hits, bonus_map)
-            result["block_miracle_step"], result["block_miracle_severity"] = _miracle_stats(block_hits, bonus_map)
+            result["block_miracle_step"], result["block_miracle_severity"] = _miracle_stats(
+                block_hits,
+                bonus_map,
+                anchor_nodes=anchor_nodes,
+                root_nodes=root_nodes,
+            )
     else:
         result["first_hit_step"] = 0
         if distance == 0.0:
@@ -1344,27 +1449,29 @@ def summarize(details: list[dict], *, source: Path, bonus_map_dir: Path, trackin
         for node in (item.get("graph_topology") or {}).get("nodes", []):
             if node.get("hit") and node.get("normalized_distance") is not None:
                 hop_coverage[f"{float(node['normalized_distance']):.3f}"] += 1
-        if item["order_defined"]:
+        if _is_order_metric_evaluable(item) and item["order_defined"]:
             counts["n_order_defined"] += 1
             order_scores.append(item["order_score"])
             if item["order_score"] is not None and item["order_score"] < 0:
                 counts["n_reverse_order"] += 1
-        if item["block_order_defined"]:
+        if _is_order_metric_evaluable(item) and item["block_order_defined"]:
             counts["n_block_order_defined"] += 1
             block_order_scores.append(item["block_order_score"])
             if item["block_order_score"] is not None and item["block_order_score"] < 0:
                 counts["n_block_reverse_order"] += 1
-        if item["hit_ground_truth"]:
+        if item["hit_ground_truth"] and _is_order_metric_evaluable(item):
             counts["n_hit_ground_truth"] += 1
             if item["miracle_step"] is not None:
                 counts["n_miracle_denominator"] += 1
             if item["block_miracle_step"] is not None:
                 counts["n_block_miracle_denominator"] += 1
+        elif item["hit_ground_truth"]:
+            counts["n_hit_ground_truth"] += 1
         if item["hit_near"]:
             counts["n_hit_near"] += 1
-        if item["miracle_step"] is True:
+        if _is_order_metric_evaluable(item) and item["miracle_step"] is True:
             counts["n_miracle"] += 1
-        if item["block_miracle_step"] is True:
+        if _is_order_metric_evaluable(item) and item["block_miracle_step"] is True:
             counts["n_block_miracle"] += 1
 
         case_type = item["bonus_case_type"] or "missing_bonus_map"
