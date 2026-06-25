@@ -9,6 +9,7 @@ internal_api``. The private API client, credentials, and model lists remain in
 from __future__ import annotations
 
 import asyncio
+import copy
 import importlib.util
 import logging
 import os
@@ -27,6 +28,27 @@ from p2a.internal_api_native import (
 
 
 DEFAULT_API_MODULE = ".secrets/internal_api_eval.py"
+_CALL_PROTOCOL_KEYS = {
+    "model_name",
+    "prompt",
+    "history",
+    "tools",
+    "tools_mode",
+    "history_process",
+    "save_id",
+}
+_MAX_TOKEN_KEYS = (
+    "max_tokens",
+    "max_completion_tokens",
+    "max_output_tokens",
+    "output_seq_len",
+)
+_NESTED_SAMPLING_KEYS = (
+    "thinking",
+    "output_config",
+    "generation_config",
+    "chat_template_kwargs",
+)
 
 
 class InternalApiAdapterError(RuntimeError):
@@ -97,6 +119,96 @@ def check_available(
     load_api_module(provider_cfg, repo_root=repo_root)
 
 
+def _normalized_sampling_params(sampling_params: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(sampling_params, dict):
+        return {}
+    sampling = {
+        str(key): copy.deepcopy(value)
+        for key, value in sampling_params.items()
+        if value is not None
+    }
+    if not sampling:
+        return {}
+    reserved = sorted(set(sampling) & _CALL_PROTOCOL_KEYS)
+    if reserved:
+        joined = ", ".join(reserved)
+        raise InternalApiAdapterError(
+            f"model.sampling_params must not override internal API call fields: {joined}"
+        )
+    return sampling
+
+
+def _override_max_token_aliases(target: dict[str, Any], value: Any) -> bool:
+    changed = False
+    for key in _MAX_TOKEN_KEYS:
+        if key in target:
+            target[key] = copy.deepcopy(value)
+            changed = True
+    for key in _NESTED_SAMPLING_KEYS:
+        nested = target.get(key)
+        if isinstance(nested, dict):
+            changed = _override_max_token_aliases(nested, value) or changed
+    return changed
+
+
+def _merge_sampling_params(
+    target: dict[str, Any], sampling_params: dict[str, Any]
+) -> dict[str, Any]:
+    merged = copy.deepcopy(target)
+    sampling = _normalized_sampling_params(sampling_params)
+    for key, value in sampling.items():
+        if key == "max_tokens":
+            if not _override_max_token_aliases(merged, value):
+                merged[key] = copy.deepcopy(value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _copy_instance_model_configs(api: Any) -> None:
+    configs = getattr(api, "MODEL_CONFIGS", None)
+    if isinstance(configs, dict):
+        api.MODEL_CONFIGS = copy.deepcopy(configs)
+
+
+def _apply_sampling_params_to_model_configs(
+    api: Any,
+    *,
+    model_name: str,
+    sampling_params: dict[str, Any],
+) -> None:
+    sampling = _normalized_sampling_params(sampling_params)
+    if not sampling:
+        return
+    configs = getattr(api, "MODEL_CONFIGS", None)
+    if not isinstance(configs, dict):
+        return
+    for value in configs.values():
+        if not isinstance(value, dict):
+            continue
+        target = value.get(model_name)
+        if isinstance(target, dict):
+            value[model_name] = _merge_sampling_params(target, sampling)
+
+
+def _install_sampling_request_hook(api: Any, sampling_params: dict[str, Any]) -> None:
+    sampling = _normalized_sampling_params(sampling_params)
+    if not sampling:
+        return
+    original_request = getattr(api, "_make_request_with_retry", None)
+    if not callable(original_request):
+        return
+
+    def request_with_sampling(*args: Any, **kwargs: Any) -> Any:
+        body = kwargs.get("json")
+        if isinstance(body, dict):
+            kwargs = dict(kwargs)
+            kwargs["json"] = _merge_sampling_params(body, sampling)
+        return original_request(*args, **kwargs)
+
+    api._make_request_with_retry = request_with_sampling
+
+
 class InternalApiChatModel:
     """Chat-model protocol implementation consumed by Uni-Agent."""
 
@@ -120,6 +232,8 @@ class InternalApiChatModel:
             api_module.user_name,
             api_module.user_token,
         )
+        _copy_instance_model_configs(self.api)
+        _install_sampling_request_hook(self.api, self.sampling_params)
         if hasattr(self.api, "timeout"):
             self.api.timeout = timeout
         retry_config = getattr(self.api, "set_retry_config", None)
@@ -163,6 +277,11 @@ class InternalApiChatModel:
             "internal_api_assistant_metadata", {}
         )
         model_name = normalize_model_name(self.api, self.model_name)
+        _apply_sampling_params_to_model_configs(
+            self.api,
+            model_name=model_name,
+            sampling_params=self.sampling_params,
+        )
         prompt, history = to_prompt_history(
             messages,
             model_name=model_name,

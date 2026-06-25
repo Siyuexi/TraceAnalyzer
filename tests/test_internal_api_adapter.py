@@ -54,6 +54,13 @@ class Api:
     MODEL_CONFIGS = {
         "passthrough_models": ["deepseek-v4-flash-passthrough"],
         "passthrough_chat_completions_models": {"deepseek-v4-flash-passthrough"},
+        "passthrough_extra_body_map": {
+            "deepseek-v4-flash-passthrough": {
+                "max_completion_tokens": 384000,
+                "temperature": 0.7,
+                "thinking": {"max_completion_tokens": 128000},
+            }
+        },
     }
 
     def __init__(self, host, user_name, user_token):
@@ -61,12 +68,17 @@ class Api:
         self.user_name = user_name
         self.user_token = user_token
         self.calls = []
+        self.requests = []
 
     def set_retry_config(self, **kwargs):
         self.retry_config = kwargs
 
     def _normalize_model_name(self, model_name):
         return model_name
+
+    def _make_request_with_retry(self, method, url, **kwargs):
+        self.requests.append({"method": method, "url": url, **kwargs})
+        return Response(len(self.calls))
 
     def call_data_eval(self, model_name, prompt, **kwargs):
         self.calls.append({
@@ -75,7 +87,11 @@ class Api:
             **kwargs,
             "save_id_snapshot": dict(kwargs.get("save_id") or {}),
         })
-        return Response(len(self.calls))
+        body = {
+            "model": model_name,
+            **self.MODEL_CONFIGS["passthrough_extra_body_map"][model_name],
+        }
+        return self._make_request_with_retry("POST", "http://provider.example", json=body)
 
 
 HOST = "http://internal.example"
@@ -140,7 +156,7 @@ def test_tracked_internal_api_adapter_queries_private_api_module(tmp_path, monke
     model = make_chat_model(
         {
             "model_name": "deepseek-v4-flash-passthrough",
-            "sampling_params": {"max_tokens": 16},
+            "sampling_params": {"max_tokens": 16, "temperature": 0.2, "top_p": 0.95},
         },
         {"source": "internal_api", "api_module": api_module.name},
         repo_root=tmp_path,
@@ -174,6 +190,11 @@ def test_tracked_internal_api_adapter_queries_private_api_module(tmp_path, monke
     assert call["tools"] == [
         {"type": "function", "function": {"name": "str_replace_editor"}}
     ]
+    request_body = model.inner.api.requests[0]["json"]
+    assert request_body["max_completion_tokens"] == 16
+    assert request_body["thinking"]["max_completion_tokens"] == 16
+    assert request_body["temperature"] == 0.2
+    assert request_body["top_p"] == 0.95
 
 
 def test_internal_api_passes_save_id_on_follow_up_requests(tmp_path, monkeypatch):
