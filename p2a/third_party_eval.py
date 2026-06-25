@@ -28,17 +28,43 @@ from p2a.eval_fault_localization import (
 from p2a.precompute.uni_agent_sandbox import build_agent_env_config, extract_tools_kwargs
 
 
-DEFAULT_MODEL_ENV = {
-    "base_url": "P2A_THIRD_PARTY_BASE_URL",
-    "api_key": "P2A_THIRD_PARTY_API_KEY",
-    "model_name": "P2A_THIRD_PARTY_MODEL",
+DEFAULT_CONFIG = {
+    "model": {
+        "base_url_env": "P2A_THIRD_PARTY_BASE_URL",
+        "api_key_env": "P2A_THIRD_PARTY_API_KEY",
+        "model_name_env": "P2A_THIRD_PARTY_MODEL",
+        "base_url": "",
+        "model_name": "",
+        "timeout": 300,
+        "sampling_params": {
+            "temperature": 0.0,
+            "max_tokens": 4096,
+        },
+    },
+    "agent": {
+        "deployment": "arl",
+        "tool_parser": "qwen3_coder",
+        "tools": [
+            {"name": "str_replace_editor"},
+            {"name": "execute_bash"},
+            {"name": "submit"},
+        ],
+        "interaction": {
+            "action_timeout": 300,
+            "timeout_budget": 3,
+            "max_turns": 100,
+        },
+        "tool_install_timeout": 300,
+        "skip_tool_install_commands": [],
+        "reward_eval_timeout": 600,
+        "log_dir": "/tmp/p2a_third_party_eval",
+    },
+    "analysis": {
+        "tracking_mode": "view_and_bash",
+        "near_threshold": 0.5,
+        "m_max": 3.0,
+    },
 }
-DEFAULT_TOOLS = [
-    {"name": "str_replace_editor"},
-    {"name": "execute_bash"},
-    {"name": "submit"},
-]
-DEFAULT_TOOL_PARSER = "qwen3_coder"
 _REDACT_KEYS = ("api_key", "apikey", "token", "secret", "password", "authorization")
 SYSTEM_ERROR_KINDS = {
     "arl_config_missing",
@@ -74,6 +100,16 @@ def is_system_error_kind(kind: str | None) -> bool:
     return kind in SYSTEM_ERROR_KINDS
 
 
+def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    result = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
 def _redact_config(value: Any) -> Any:
     if isinstance(value, dict):
         redacted = {}
@@ -91,11 +127,11 @@ def _redact_config(value: Any) -> Any:
 
 def load_config(path: Path | None) -> dict[str, Any]:
     if path is None:
-        return {}
+        return copy.deepcopy(DEFAULT_CONFIG)
     payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(payload, dict):
         raise ValueError(f"{path} must contain a YAML mapping")
-    return payload
+    return _deep_merge(DEFAULT_CONFIG, payload)
 
 
 def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
@@ -129,14 +165,8 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dic
     return config
 
 
-def _env_or_value(
-    config: dict[str, Any],
-    key: str,
-    env_key: str | None = None,
-    *,
-    default_env: str | None = None,
-) -> str:
-    env_name = str(config.get(env_key or f"{key}_env") or default_env or "")
+def _env_or_value(config: dict[str, Any], key: str, env_key: str | None = None) -> str:
+    env_name = str(config.get(env_key or f"{key}_env") or "")
     if env_name:
         value = os.getenv(env_name)
         if value:
@@ -148,21 +178,9 @@ def _env_or_value(
 def resolve_model_config(config: dict[str, Any]) -> dict[str, Any]:
     model_cfg = dict(config.get("model") or {})
     provider_cfg = normalize_provider_config(config.get("provider"))
-    base_url = _env_or_value(
-        model_cfg,
-        "base_url",
-        default_env=DEFAULT_MODEL_ENV["base_url"],
-    )
-    api_key = _env_or_value(
-        model_cfg,
-        "api_key",
-        default_env=DEFAULT_MODEL_ENV["api_key"],
-    )
-    model_name = _env_or_value(
-        model_cfg,
-        "model_name",
-        default_env=DEFAULT_MODEL_ENV["model_name"],
-    )
+    base_url = _env_or_value(model_cfg, "base_url")
+    api_key = _env_or_value(model_cfg, "api_key")
+    model_name = _env_or_value(model_cfg, "model_name")
     if provider_cfg["source"] == "openai_compatible" and not base_url:
         raise ValueError("model.base_url is required, either directly or via model.base_url_env")
     if provider_cfg["source"] == "openai_compatible" and not api_key:
@@ -211,42 +229,6 @@ def _as_jsonable(value: Any) -> Any:
     if hasattr(value, "__dict__"):
         return {str(k): _as_jsonable(v) for k, v in vars(value).items() if not k.startswith("_")}
     return value
-
-
-def _content_text(value: Any) -> str:
-    value = _as_jsonable(value)
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        parts = []
-        for item in value:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                block_type = str(item.get("type") or "")
-                if block_type in {"text", "output_text", "message"} and item.get("value") is not None:
-                    parts.append(str(item["value"]))
-                elif block_type in {"text", "output_text", "message"} and item.get("text") is not None:
-                    parts.append(str(item["text"]))
-        return "".join(parts)
-    return ""
-
-
-def _block_text(blocks: Any, *, block_type: str | None = None) -> str:
-    blocks = _as_jsonable(blocks)
-    if not isinstance(blocks, list):
-        return ""
-    parts = []
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        if block_type is not None and block.get("type") != block_type:
-            continue
-        if block.get("value") is not None:
-            parts.append(str(block["value"]))
-        elif block.get("text") is not None:
-            parts.append(str(block["text"]))
-    return "".join(parts)
 
 
 def _load_rows(path: Path) -> list[dict[str, Any]]:
@@ -343,8 +325,8 @@ def _make_tools(agent_cfg: dict[str, Any]):
 
     return ToolsManager(
         ToolsManagerConfig(
-            tools=agent_cfg.get("tools") or copy.deepcopy(DEFAULT_TOOLS),
-            parser=agent_cfg.get("tool_parser") or DEFAULT_TOOL_PARSER,
+            tools=agent_cfg.get("tools") or DEFAULT_CONFIG["agent"]["tools"],
+            parser=agent_cfg.get("tool_parser", "qwen3_coder"),
         )
     )
 
@@ -411,51 +393,20 @@ async def _install_tools(
 
 def build_step_traces(interaction_result: dict[str, Any]) -> list[dict[str, Any]]:
     messages = interaction_result.get("messages") or []
-    assistant_messages = [
-        (index, message)
-        for index, message in enumerate(messages)
-        if isinstance(message, dict) and message.get("role") == "assistant"
-    ]
-    rollout_cache = interaction_result.get("rollout_cache") or {}
-    assistant_metadata = rollout_cache.get("internal_api_assistant_metadata") or {}
+    assistant_messages = [message for message in messages if isinstance(message, dict) and message.get("role") == "assistant"]
     traces = []
     for idx, step in enumerate(interaction_result.get("trajectory") or []):
         step_data = _as_jsonable(step)
-        message_index, message = assistant_messages[idx] if idx < len(assistant_messages) else (-1, {})
-        metadata = {}
-        if isinstance(assistant_metadata, dict):
-            metadata = assistant_metadata.get(str(message_index)) or assistant_metadata.get(message_index) or {}
-            metadata = _as_jsonable(metadata) if isinstance(metadata, dict) else {}
-        text_blocks = metadata.get("text_blocks") or message.get("text_blocks") or []
-        reasoning_blocks = metadata.get("reasoning_blocks") or message.get("reasoning_blocks") or []
-        reasoning_content = (
-            metadata.get("reasoning_content")
-            or message.get("reasoning_content")
-            or _block_text(reasoning_blocks)
-            or ""
-        )
-        response_text = (
-            step_data.get("response")
-            or _content_text(message.get("content"))
-            or _block_text(text_blocks)
-            or ""
-        )
-        trace = {
-            "step_idx": int(step_data.get("step_idx", idx + 1)),
-            "response_text": response_text,
-            "thought": step_data.get("thought") or "",
-            "tool_calls": _as_jsonable(message.get("tool_calls") or []),
-            "tool_results": _as_jsonable(step_data.get("tool_results") or []),
-            "exit_reason": step_data.get("exit_reason"),
-        }
-        if reasoning_content:
-            trace["reasoning_content"] = reasoning_content
-        if reasoning_blocks:
-            trace["reasoning_blocks"] = _as_jsonable(reasoning_blocks)
-        if text_blocks:
-            trace["text_blocks"] = _as_jsonable(text_blocks)
+        message = assistant_messages[idx] if idx < len(assistant_messages) else {}
         traces.append(
-            trace
+            {
+                "step_idx": int(step_data.get("step_idx", idx + 1)),
+                "response_text": step_data.get("response") or message.get("content") or "",
+                "thought": step_data.get("thought") or "",
+                "tool_calls": _as_jsonable(message.get("tool_calls") or []),
+                "tool_results": _as_jsonable(step_data.get("tool_results") or []),
+                "exit_reason": step_data.get("exit_reason"),
+            }
         )
     return traces
 
@@ -481,7 +432,6 @@ def build_dump_record(
 
     trajectory = _as_jsonable((interaction_result or {}).get("trajectory") or [])
     messages = _as_jsonable((interaction_result or {}).get("messages") or [])
-    rollout_cache = (interaction_result or {}).get("rollout_cache", {}) if isinstance(interaction_result, dict) else {}
     traces = build_step_traces(interaction_result or {})
     responses = [trace["response_text"] for trace in traces if trace.get("response_text")]
     termination_reason = trajectory[-1].get("exit_reason") if trajectory else "error" if error else "unknown"
@@ -502,9 +452,8 @@ def build_dump_record(
         "resolved": bool(reward_details.get("resolved")) if isinstance(reward_details, dict) else None,
         "termination_reason": termination_reason,
         "execution_time": (interaction_result or {}).get("execution_time"),
-        "metrics": _as_jsonable(rollout_cache.get("metrics", {})),
-        "token_usage": _as_jsonable(rollout_cache.get("token_usage", {})),
-        "assistant_metadata": _as_jsonable(rollout_cache.get("internal_api_assistant_metadata", {})),
+        "metrics": _as_jsonable((interaction_result or {}).get("rollout_cache", {}).get("metrics", {})),
+        "token_usage": _as_jsonable((interaction_result or {}).get("rollout_cache", {}).get("token_usage", {})),
         "extra_info": extra_info,
         "error": error,
         "error_kind": error_kind,

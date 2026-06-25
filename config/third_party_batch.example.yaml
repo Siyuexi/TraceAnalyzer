@@ -1,15 +1,19 @@
 # Example batch config for API-backed Uni-Agent/P2A evaluation.
-# Keep internal API credentials and private model lists under ignored .secrets/.
-# The model below demonstrates per-model sampling params consumed by the tracked adapter.
+# All model names are dummy placeholders. Keep internal API credentials and
+# private model lists under ignored .secrets/.
 provider:
-  source: internal_api
-  api_module: .secrets/internal_api_eval.py
+  source: openai_compatible  # openai_compatible | internal_api
+  # For internal_api, the tracked adapter loads the private client from:
+  # api_module: .secrets/internal_api_eval.py
+  # Or set P2A_INTERNAL_API_MODULE when this field is omitted.
 
 model:
+  base_url_env: P2A_THIRD_PARTY_BASE_URL
+  api_key_env: P2A_THIRD_PARTY_API_KEY
   timeout: 300
   sampling_params:
-    temperature: null
-    max_tokens: null
+    temperature: 0.0
+    max_tokens: 4096
 
 dataset:
   name: swebench-hard
@@ -17,26 +21,21 @@ dataset:
 experiment:
   id: public-swebench-hard-demo
   stage: smoke
-  limit: all
+  limit: 500
   offset: 0
-  max_turns: 100
+  max_turns: 20
   run_timeout: 15m
   per_model_concurrency: 8
   model_parallelism: 2
 
 models:
-  - api_name: deepseek-v4-flash-passthrough
-    label: deepseek-v4-flash-passthrough
-    sampling_params:
-      temperature: null
-      max_tokens: null
-      thinking:
-        type: enabled
-      reasoning_effort: max
-      max_completion_tokens: 384000
+  - api_name: dummy-model-a
+    label: dummy-model-a
+  - api_name: dummy-model-b
+    label: dummy-model-b
 
 storage:
-  # Relative storage paths are project artifacts, resolved under:
-  # ${P2A_ARTIFACTS_DIR:-<src>/data}.
+  # Relative storage paths are resolved under the shared P2A data directory
+  # (${DATA:-<src>/../../datasets/p2a}), not under this source checkout.
   db: data/evals/traces.sqlite
   artifacts_dir: data/third_party

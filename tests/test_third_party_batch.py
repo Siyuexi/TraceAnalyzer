@@ -7,26 +7,22 @@ import pytest
 from p2a.third_party_batch import SYSTEM_ERROR_STATUS, _system_error_summary, load_batch_config, run_batch, sanitized_config_snapshot
 
 
-def test_load_batch_config_loads_public_internal_api_example(monkeypatch, tmp_path):
+def test_load_batch_config_defaults_and_dummy_models(monkeypatch, tmp_path):
     shared_root = tmp_path / "shared"
-    artifacts_root = tmp_path / "artifacts"
     monkeypatch.setenv("P2A_SHARED_ROOT", str(shared_root))
-    monkeypatch.setenv("P2A_ARTIFACTS_DIR", str(artifacts_root))
     config = load_batch_config(Path("config/third_party_batch.example.yaml"))
 
-    assert config.provider["source"] == "internal_api"
-    assert config.provider["api_module"] == ".secrets/internal_api_eval.py"
+    assert config.provider["source"] == "openai_compatible"
     assert config.dataset_name == "swebench-hard"
     assert config.experiment_id == "public-swebench-hard-demo"
     assert config.stage == "smoke"
-    assert config.limit is None
-    assert config.max_turns == 100
+    assert config.limit == 500
     assert [model.api_name for model in config.models] == [
-        "deepseek-v4-flash-passthrough",
+        "dummy-model-a",
+        "dummy-model-b",
     ]
-    assert config.models[0].overrides["sampling_params"]["max_completion_tokens"] == 384000
-    assert config.db_path == artifacts_root / "evals" / "traces.sqlite"
-    assert config.artifacts_dir == artifacts_root / "third_party"
+    assert config.db_path == shared_root / "datasets" / "p2a" / "evals" / "traces.sqlite"
+    assert config.artifacts_dir == shared_root / "datasets" / "p2a" / "third_party"
 
 
 def test_sanitized_config_snapshot_redacts_secret_like_keys(monkeypatch, tmp_path):
@@ -57,9 +53,7 @@ storage:
 
 def test_existing_bonus_map_dir_can_be_used_without_precompute(monkeypatch, tmp_path):
     shared_root = tmp_path / "shared"
-    artifacts_root = tmp_path / "artifacts"
     monkeypatch.setenv("P2A_SHARED_ROOT", str(shared_root))
-    monkeypatch.setenv("P2A_ARTIFACTS_DIR", str(artifacts_root))
     path = tmp_path / "batch.yaml"
     path.write_text(
         """
@@ -71,7 +65,7 @@ models:
   - api_name: dummy-model
 storage:
   precompute_maps: false
-  bonus_map_dir: data/bonus_maps/swebench-hard
+  bonus_map_dir: data/eval_bonus_maps/swebench-hard
 """,
         encoding="utf-8",
     )
@@ -79,7 +73,7 @@ storage:
     config = load_batch_config(path)
 
     assert config.precompute_maps is False
-    assert config.bonus_map_dir == artifacts_root / "bonus_maps" / "swebench-hard"
+    assert config.bonus_map_dir == shared_root / "datasets" / "p2a" / "eval_bonus_maps" / "swebench-hard"
 
 
 def test_batch_config_requires_explicit_models(tmp_path):

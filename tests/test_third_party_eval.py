@@ -1,5 +1,4 @@
 import json
-import sqlite3
 from types import SimpleNamespace
 
 import numpy as np
@@ -93,25 +92,6 @@ def test_resolve_model_config_uses_environment(monkeypatch):
     assert model_config["base_url"] == "https://example.test"
     assert model_config["api_key"] == "secret"
     assert model_config["model_name"] == "demo-model"
-    assert model_config["sampling_params"] == {}
-
-
-def test_load_config_does_not_inject_sampling_defaults(tmp_path):
-    config_path = tmp_path / "third_party.yaml"
-    config_path.write_text(
-        """
-provider:
-  source: internal_api
-model:
-  model_name: demo-model
-""",
-        encoding="utf-8",
-    )
-
-    config = load_config(config_path)
-
-    assert config["model"] == {"model_name": "demo-model"}
-    assert "sampling_params" not in config["model"]
 
 
 def test_apply_cli_overrides_bounds_smoke_run():
@@ -192,27 +172,6 @@ def test_build_step_traces_preserves_structured_tool_calls():
             "exit_reason": "completed",
         }
     ]
-
-
-def test_build_step_traces_preserves_api_reasoning_and_text_blocks():
-    interaction = _interaction_result()
-    interaction["trajectory"][0].response = ""
-    interaction["trajectory"][0].thought = ""
-    interaction["messages"][2]["content"] = ""
-    interaction["rollout_cache"]["internal_api_assistant_metadata"] = {
-        "2": {
-            "reasoning_content": "inspect the expression tree",
-            "reasoning_blocks": [{"type": "reasoning", "value": "inspect the expression tree"}],
-            "text_blocks": [{"type": "text", "value": "I will inspect expressions.py."}],
-        }
-    }
-
-    traces = build_step_traces(interaction)
-
-    assert traces[0]["response_text"] == "I will inspect expressions.py."
-    assert traces[0]["reasoning_content"] == "inspect the expression tree"
-    assert traces[0]["reasoning_blocks"] == [{"type": "reasoning", "value": "inspect the expression tree"}]
-    assert traces[0]["text_blocks"] == [{"type": "text", "value": "I will inspect expressions.py."}]
 
 
 def test_classify_error_marks_arl_websocket_forbidden_as_system_error():
@@ -357,20 +316,3 @@ def test_cache_rollouts_upserts_standard_third_party_artifacts(tmp_path):
     )
 
     assert n_cached == 1
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            """
-            SELECT c.artifact_details, q.p2a_read, q.call_graph_hit, q.ground_truth_hit,
-                   q.near_hit, q.min_distance, q.metrics_json
-            FROM run_cells c
-            JOIN quantitative_metrics q ON q.cell_id = c.id
-            """
-        ).fetchone()
-    assert row["artifact_details"] == str(details_path)
-    assert row["p2a_read"] is None
-    assert row["call_graph_hit"] is None
-    assert row["ground_truth_hit"] is None
-    assert row["near_hit"] is None
-    assert row["min_distance"] is None
-    assert "detail" not in json.loads(row["metrics_json"])

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "p2a-arl"
 version = "0.1.0"
 description = "P2A on uni-agent with an ARL-native sandbox backend (env/) + bonus-map process supervision (p2a/)."
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.11,<3.13"
 
 # ── core: ARL sandbox runtime + data build + bonus-map precompute ──────────────
 # Everything to run scripts/build_data.py and p2a/precompute on a CPU box.
@@ -15,7 +15,7 @@ requires-python = ">=3.11,<3.12"
 # These are plain PyPI deps PLUS the uni-agent submodule (declares no deps of its own).
 dependencies = [
     # ARL sandbox backend (env/: a swe-rex AbstractRuntime backed by the arl-env SDK)
-    "arl-env==0.4.1",
+    "arl-env==0.9.0",
     "swe-rex>=1.4.0",
     "websockets",
     "loguru",
@@ -51,16 +51,12 @@ dependencies = [
 train = ["verl"]
 
 # ── gpu: training accelerators ────────────────────────────────────────────────
-# Keep verl's GPU/Megatron/math extras. Pin vLLM to a torch-2.9-compatible
-# manylinux1 wheel; torch itself is sourced from the CUDA 13 PyTorch index below.
+# GPU packages are installed via pip on GPU nodes (not resolved by uv).
+# Versions: torch==2.10.0 (PyPI cu128), vllm==0.18.0, megatron-core==0.16.0,
+#   mbridge==0.15.1, cupy-cuda12x, flash-attn (source), TE (source), APEX (source).
+# See docs/gpu-cluster-training-guide.md for install instructions.
 gpu = [
     "verl[gpu,geo,mcore,math]",
-    "megatron-core>=0.12.0",
-    "torch>=2.9.0",
-    "torchvision>=0.24.0",
-    "torchaudio>=2.9.0",
-    "vllm==0.11.2",
-    "cupy-cuda13x==13.6.0",
 ]
 
 dev = ["pytest", "ruff", "mypy"]
@@ -76,9 +72,9 @@ dev = ["pytest", "ruff", "mypy"]
 # package build requirements while building the shared .venv.
 [tool.uv]
 environments = [
-    "sys_platform == 'linux' and platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and python_full_version >= '3.11' and python_full_version < '3.12'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and python_full_version >= '3.11' and python_full_version < '3.13'",
 ]
-exclude-dependencies = [
+override-dependencies = [
     "cupy-cuda12x",
 ]
 
@@ -108,9 +104,9 @@ requires-dist = [
     "pyarrow>=19.0.0",
     "pybind11",
     "pylatexenc",
-    "ray[default]>=2.41.0",
+    "ray[default]>=2.54.0",
     "torchdata",
-    "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
+    "tensordict>=0.8.0",
     "transformers",
     "wandb",
     "packaging>=20.0",
@@ -127,8 +123,8 @@ requires-dist = [
     "liger-kernel; extra == 'gpu'",
     "flash-attn; extra == 'gpu'",
     "math-verify; extra == 'math'",
-    "vllm>=0.8.5,<=0.12.0; extra == 'vllm'",
-    "tensordict>=0.8.0,<=0.10.0,!=0.9.0; extra == 'vllm'",
+    "vllm>=0.18.0; extra == 'vllm'",
+    "tensordict>=0.8.0; extra == 'vllm'",
     "sglang[srt,openai]==0.5.8; extra == 'sglang'",
     "torch==2.9.1; extra == 'sglang'",
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0; extra == 'sglang'",
@@ -154,27 +150,12 @@ provides-extra = [
 [tool.uv.extra-build-dependencies]
 flash-attn = ["torch"]
 
-# ── sources: local editables plus CUDA 13 torch wheels ────────────────────────
-# The editable packages use the resolver metadata above; torch packages are
-# pinned to PyTorch's CUDA 13 index for the GPU training environment.
+# ── sources: local editables ─────────────────────────────────────────────────
+# torch from PyPI default (cu128, matches CUDA 12.8 toolkit on H20 cluster).
 [tool.uv.sources]
 uni-agent = { path = "uni-agent", editable = true }
 verl = { path = "uni-agent/verl", editable = true }
 r2e-gym = { git = "https://github.com/R2E-Gym/R2E-Gym.git", rev = "0d94c4eb9431cd195c55a7ea3abd54006c9a1735" }
-torch = [
-    { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
-]
-torchvision = [
-    { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
-]
-torchaudio = [
-    { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
-explicit = true
 
 # ── deps-only project: we ship no modules; p2a/ env/ scripts/ stay on PYTHONPATH ─
 [tool.setuptools]

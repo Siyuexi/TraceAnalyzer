@@ -28,115 +28,31 @@ from p2a.internal_api_native import (
 
 
 DEFAULT_API_MODULE = ".secrets/internal_api_eval.py"
-TOKEN_PARAM_KEYS = (
+_CALL_PROTOCOL_KEYS = {
+    "model_name",
+    "prompt",
+    "history",
+    "tools",
+    "tools_mode",
+    "history_process",
+    "save_id",
+}
+_MAX_TOKEN_KEYS = (
     "max_tokens",
     "max_completion_tokens",
     "max_output_tokens",
     "output_seq_len",
-    "maxOutputTokens",
 )
-MODEL_PARAM_MAP_SUFFIXES = ("_params", "_extra_body_map")
-MODEL_PARAM_MAP_KEYS = {"special_models", "model_param_models"}
+_NESTED_SAMPLING_KEYS = (
+    "thinking",
+    "output_config",
+    "generation_config",
+    "chat_template_kwargs",
+)
 
 
 class InternalApiAdapterError(RuntimeError):
     """Raised when the private internal API module cannot be used."""
-
-
-def _without_none(value: Any) -> Any:
-    if isinstance(value, dict):
-        cleaned = {
-            key: _without_none(item)
-            for key, item in value.items()
-            if item is not None
-        }
-        return {key: item for key, item in cleaned.items() if item is not None}
-    if isinstance(value, list):
-        return [_without_none(item) for item in value if item is not None]
-    return value
-
-
-def _normalized_sampling_params(params: dict[str, Any] | None) -> dict[str, Any]:
-    cleaned = _without_none(params or {})
-    return copy.deepcopy(cleaned) if isinstance(cleaned, dict) else {}
-
-
-def _merge_token_params(target: dict[str, Any], params: dict[str, Any]) -> None:
-    token_values = {key: params[key] for key in TOKEN_PARAM_KEYS if key in params}
-    if not token_values:
-        return
-
-    if set(token_values) == {"max_tokens"}:
-        existing_keys = [key for key in TOKEN_PARAM_KEYS if key in target]
-        if existing_keys:
-            for key in existing_keys:
-                target[key] = copy.deepcopy(token_values["max_tokens"])
-            return
-
-    for key, value in token_values.items():
-        target[key] = copy.deepcopy(value)
-
-
-def _merge_sampling_dict(target: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
-    merged = copy.deepcopy(target)
-    for key, value in params.items():
-        if key in TOKEN_PARAM_KEYS:
-            continue
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _merge_sampling_dict(merged[key], value)
-        else:
-            merged[key] = copy.deepcopy(value)
-    _merge_token_params(merged, params)
-    return merged
-
-
-def _models_for_param_map(configs: dict[str, Any], map_key: str) -> set[str]:
-    prefixes = []
-    if map_key.endswith("_extra_body_map"):
-        prefixes.append(map_key.removesuffix("_extra_body_map"))
-    if map_key.endswith("_params"):
-        prefixes.append(map_key.removesuffix("_params"))
-
-    models: set[str] = set()
-    for prefix in prefixes:
-        values = configs.get(f"{prefix}_models") or []
-        if isinstance(values, dict):
-            models.update(str(key) for key in values)
-        else:
-            models.update(str(item) for item in values)
-    return models
-
-
-def _apply_sampling_to_model_configs(
-    configs: dict[str, Any],
-    model_name: str,
-    params: dict[str, Any],
-) -> None:
-    if not params:
-        return
-
-    for key, value in configs.items():
-        if not isinstance(value, dict):
-            continue
-        if key.endswith("_effort_map") and "reasoning_effort" in params:
-            prefix = key.removesuffix("_effort_map")
-            route_models = configs.get(f"{prefix}_models") or []
-            if model_name in value or model_name in route_models:
-                value[model_name] = copy.deepcopy(params["reasoning_effort"])
-            continue
-        if not (key in MODEL_PARAM_MAP_KEYS or key.endswith(MODEL_PARAM_MAP_SUFFIXES)):
-            continue
-        if model_name not in value and model_name not in _models_for_param_map(configs, key):
-            continue
-        current = value.get(model_name) or {}
-        if isinstance(current, dict):
-            value[model_name] = _merge_sampling_dict(current, params)
-
-
-def _merge_sampling_into_request_body(body: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
-    if not params:
-        return body
-    return _merge_sampling_dict(body, params)
 
 
 def resolve_api_module_path(
@@ -203,6 +119,96 @@ def check_available(
     load_api_module(provider_cfg, repo_root=repo_root)
 
 
+def _normalized_sampling_params(sampling_params: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(sampling_params, dict):
+        return {}
+    sampling = {
+        str(key): copy.deepcopy(value)
+        for key, value in sampling_params.items()
+        if value is not None
+    }
+    if not sampling:
+        return {}
+    reserved = sorted(set(sampling) & _CALL_PROTOCOL_KEYS)
+    if reserved:
+        joined = ", ".join(reserved)
+        raise InternalApiAdapterError(
+            f"model.sampling_params must not override internal API call fields: {joined}"
+        )
+    return sampling
+
+
+def _override_max_token_aliases(target: dict[str, Any], value: Any) -> bool:
+    changed = False
+    for key in _MAX_TOKEN_KEYS:
+        if key in target:
+            target[key] = copy.deepcopy(value)
+            changed = True
+    for key in _NESTED_SAMPLING_KEYS:
+        nested = target.get(key)
+        if isinstance(nested, dict):
+            changed = _override_max_token_aliases(nested, value) or changed
+    return changed
+
+
+def _merge_sampling_params(
+    target: dict[str, Any], sampling_params: dict[str, Any]
+) -> dict[str, Any]:
+    merged = copy.deepcopy(target)
+    sampling = _normalized_sampling_params(sampling_params)
+    for key, value in sampling.items():
+        if key == "max_tokens":
+            if not _override_max_token_aliases(merged, value):
+                merged[key] = copy.deepcopy(value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _copy_instance_model_configs(api: Any) -> None:
+    configs = getattr(api, "MODEL_CONFIGS", None)
+    if isinstance(configs, dict):
+        api.MODEL_CONFIGS = copy.deepcopy(configs)
+
+
+def _apply_sampling_params_to_model_configs(
+    api: Any,
+    *,
+    model_name: str,
+    sampling_params: dict[str, Any],
+) -> None:
+    sampling = _normalized_sampling_params(sampling_params)
+    if not sampling:
+        return
+    configs = getattr(api, "MODEL_CONFIGS", None)
+    if not isinstance(configs, dict):
+        return
+    for value in configs.values():
+        if not isinstance(value, dict):
+            continue
+        target = value.get(model_name)
+        if isinstance(target, dict):
+            value[model_name] = _merge_sampling_params(target, sampling)
+
+
+def _install_sampling_request_hook(api: Any, sampling_params: dict[str, Any]) -> None:
+    sampling = _normalized_sampling_params(sampling_params)
+    if not sampling:
+        return
+    original_request = getattr(api, "_make_request_with_retry", None)
+    if not callable(original_request):
+        return
+
+    def request_with_sampling(*args: Any, **kwargs: Any) -> Any:
+        body = kwargs.get("json")
+        if isinstance(body, dict):
+            kwargs = dict(kwargs)
+            kwargs["json"] = _merge_sampling_params(body, sampling)
+        return original_request(*args, **kwargs)
+
+    api._make_request_with_retry = request_with_sampling
+
+
 class InternalApiChatModel:
     """Chat-model protocol implementation consumed by Uni-Agent."""
 
@@ -217,7 +223,7 @@ class InternalApiChatModel:
     ):
         self.model_name = model_name
         self.api_module = api_module
-        self.sampling_params = _normalized_sampling_params(sampling_params)
+        self.sampling_params = sampling_params or {}
         self.timeout = timeout
         self.tools_schemas: list[dict] | None = None
         self.logger = logging.getLogger("p2a.internal_api_adapter")
@@ -226,8 +232,8 @@ class InternalApiChatModel:
             api_module.user_name,
             api_module.user_token,
         )
-        self._apply_sampling_params()
-        self._wrap_request_body_sampling()
+        _copy_instance_model_configs(self.api)
+        _install_sampling_request_hook(self.api, self.sampling_params)
         if hasattr(self.api, "timeout"):
             self.api.timeout = timeout
         retry_config = getattr(self.api, "set_retry_config", None)
@@ -238,33 +244,6 @@ class InternalApiChatModel:
                 backoff_factor=1.5,
                 enable_logging=True,
             )
-
-    def _apply_sampling_params(self) -> None:
-        configs = getattr(self.api, "MODEL_CONFIGS", None)
-        if not isinstance(configs, dict):
-            return
-        self.api.MODEL_CONFIGS = copy.deepcopy(configs)
-        _apply_sampling_to_model_configs(
-            self.api.MODEL_CONFIGS,
-            normalize_model_name(self.api, self.model_name),
-            self.sampling_params,
-        )
-
-    def _wrap_request_body_sampling(self) -> None:
-        request = getattr(self.api, "_make_request_with_retry", None)
-        if not callable(request):
-            return
-
-        def wrapped_request(method: str, url: str, *args: Any, **kwargs: Any):
-            body = kwargs.get("json")
-            if isinstance(body, dict):
-                kwargs["json"] = _merge_sampling_into_request_body(
-                    body,
-                    self.sampling_params,
-                )
-            return request(method, url, *args, **kwargs)
-
-        self.api._make_request_with_retry = wrapped_request
 
     def set_tools_schemas(self, tools_schemas: list[dict]) -> None:
         self.tools_schemas = tools_schemas
@@ -298,6 +277,11 @@ class InternalApiChatModel:
             "internal_api_assistant_metadata", {}
         )
         model_name = normalize_model_name(self.api, self.model_name)
+        _apply_sampling_params_to_model_configs(
+            self.api,
+            model_name=model_name,
+            sampling_params=self.sampling_params,
+        )
         prompt, history = to_prompt_history(
             messages,
             model_name=model_name,

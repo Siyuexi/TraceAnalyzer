@@ -26,14 +26,13 @@ from p2a.eval_cache import (
     utc_now,
 )
 from p2a.eval_fault_localization import iter_records
-from p2a.hf_assets import project_artifacts_dir
+from p2a.hf_assets import shared_p2a_data_dir
 from p2a.third_party_eval import _instance_id, _load_rows, _select_rows, is_system_error_kind, parse_limit_arg
 
 
 SUPPORTED_DATASETS = {"swebench-hard", "swebench-verified", "r2e-gym-subset"}
 REDACT_KEYS = ("api_key", "apikey", "token", "secret", "password", "authorization")
 SYSTEM_ERROR_STATUS = "system_error"
-DEFAULT_BATCH_MAX_TURNS = 100
 
 
 @dataclass(frozen=True)
@@ -166,7 +165,7 @@ def load_batch_config(path: Path) -> BatchConfig:
         stage=stage,
         limit=_parse_limit(experiment_cfg.get("limit"), default=500),
         offset=int(experiment_cfg.get("offset") or 0),
-        max_turns=int(experiment_cfg.get("max_turns") or DEFAULT_BATCH_MAX_TURNS),
+        max_turns=int(experiment_cfg.get("max_turns") or 20),
         run_timeout=str(experiment_cfg["run_timeout"]) if experiment_cfg.get("run_timeout") else None,
         per_model_concurrency=max(1, int(experiment_cfg.get("per_model_concurrency") or 1)),
         model_parallelism=max(1, int(experiment_cfg.get("model_parallelism") or len(models))),
@@ -176,7 +175,7 @@ def load_batch_config(path: Path) -> BatchConfig:
         bonus_map_dir=(
             _resolve_storage_path(
                 storage_cfg["bonus_map_dir"],
-                default_relative=f"bonus_maps/{dataset_name}",
+                default_relative=f"eval_bonus_maps/{dataset_name}",
             )
             if storage_cfg.get("bonus_map_dir")
             else None
@@ -217,7 +216,7 @@ def _resolve_storage_path(value: Any, *, default_relative: str) -> Path:
     parts = path.parts
     if parts and parts[0] == "data":
         path = Path(*parts[1:]) if len(parts) > 1 else Path(".")
-    return project_artifacts_dir() / path
+    return shared_p2a_data_dir() / path
 
 
 def _run_setup(args: list[str], *, env: dict[str, str]) -> str:
@@ -249,7 +248,7 @@ def resolve_bonus_map_dir(config: BatchConfig, data_file: Path, *, env: dict[str
     if config.bonus_map_dir is not None:
         output_dir = config.bonus_map_dir
     else:
-        output_dir = project_artifacts_dir() / "bonus_maps" / config.dataset_name
+        output_dir = shared_p2a_data_dir() / "eval_bonus_maps" / config.dataset_name
     setup_env = dict(env)
     if config.limit is not None:
         setup_env.setdefault("P2A_SETUP_BONUS_LIMIT", str(config.limit))
