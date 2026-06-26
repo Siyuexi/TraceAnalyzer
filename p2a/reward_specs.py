@@ -75,12 +75,19 @@ def _ordered_unique(items: list[str]) -> list[str]:
     return out
 
 
+def _selector_file(selector: str) -> str:
+    return str(selector or "").split("::", 1)[0].strip()
+
+
 def _reward_test_args(metadata: dict[str, Any]) -> list[str]:
     f2p = parse_string_list(metadata.get("FAIL_TO_PASS") or metadata.get("fail_to_pass"))
     p2p = parse_string_list(metadata.get("PASS_TO_PASS") or metadata.get("pass_to_pass"))
-    if f2p or p2p:
-        return _ordered_unique([*f2p, *p2p])
-    return _ordered_unique(parse_string_list(metadata.get("selected_test_files_to_run")))
+    selected_files = _ordered_unique(
+        [_selector_file(item) for item in parse_string_list(metadata.get("selected_test_files_to_run"))]
+    )
+    if not selected_files:
+        selected_files = _ordered_unique([_selector_file(item) for item in [*f2p, *p2p]])
+    return [",".join(selected_files)] if selected_files else []
 
 
 @register_reward_spec("swe_bench_pro")

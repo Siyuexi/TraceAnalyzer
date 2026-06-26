@@ -202,15 +202,10 @@ def _selector_file(selector: str) -> str:
     return str(selector or "").split("::", 1)[0].strip()
 
 
-def _validate_swebench_pro_selected_tests(instance_id: str, selected_tests: list[str], expected_nodeids: list[str]) -> None:
+def _swebench_pro_missing_selected_files(selected_tests: list[str], expected_nodeids: list[str]) -> list[str]:
     selected_files = {_selector_file(item) for item in selected_tests if _selector_file(item)}
     expected_files = {_selector_file(item) for item in expected_nodeids if _selector_file(item)}
-    missing = sorted(expected_files - selected_files)
-    if missing:
-        raise ValueError(
-            f"SWE-Bench-Pro selected_test_files_to_run for {instance_id} does not cover "
-            f"FAIL_TO_PASS/PASS_TO_PASS files: {missing}"
-        )
+    return sorted(expected_files - selected_files)
 
 
 def _read_swebench_pro_scripts(scripts_dir: str | None, instance_id: str) -> dict[str, str]:
@@ -240,7 +235,7 @@ def cmd_swebench_pro(args) -> int:
         raise ValueError("Phase 1 supports only --language python")
 
     scripts_dir = args.scripts_dir or os.getenv("P2A_SWEBENCH_PRO_SCRIPTS_DIR") or os.getenv("SWEBENCH_PRO_SCRIPTS_DIR")
-    rows, total, skipped_language, scripts_hit, scripts_miss = [], 0, 0, 0, 0
+    rows, total, skipped_language, skipped_invalid_selected, scripts_hit, scripts_miss = [], 0, 0, 0, 0, 0
     for raw in load_shared_dataset("ScaleAI/SWE-bench_Pro", split="test"):
         total += 1
         ex = dict(raw)
@@ -255,7 +250,15 @@ def cmd_swebench_pro(args) -> int:
         f2p = parse_string_list(ex.get("fail_to_pass"))
         p2p = parse_string_list(ex.get("pass_to_pass"))
         selected_tests = parse_string_list(ex.get("selected_test_files_to_run"))
-        _validate_swebench_pro_selected_tests(iid, selected_tests, [*f2p, *p2p])
+        missing_selected = _swebench_pro_missing_selected_files(selected_tests, [*f2p, *p2p])
+        if missing_selected:
+            skipped_invalid_selected += 1
+            print(
+                f"WARNING: skipping {iid}: selected_test_files_to_run does not cover "
+                f"FAIL_TO_PASS/PASS_TO_PASS files {missing_selected}",
+                file=sys.stderr,
+            )
+            continue
         script_fields = _read_swebench_pro_scripts(scripts_dir, iid)
         if script_fields:
             scripts_hit += 1
@@ -315,7 +318,8 @@ def cmd_swebench_pro(args) -> int:
     pd.DataFrame(rows).to_parquet(args.out, index=False)
     print(
         f"swebench-pro phase1 language={language}: {len(rows)}/{total} "
-        f"(skipped_language={skipped_language}, scripts {scripts_hit} hit / {scripts_miss} miss) -> {args.out}",
+        f"(skipped_language={skipped_language}, skipped_invalid_selected={skipped_invalid_selected}, "
+        f"scripts {scripts_hit} hit / {scripts_miss} miss) -> {args.out}",
         flush=True,
     )
     if scripts_miss:

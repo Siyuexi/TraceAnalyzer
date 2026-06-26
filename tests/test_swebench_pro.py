@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -84,6 +85,27 @@ def test_training_guard_scans_all_rows(tmp_path):
         assert_training_data_sources_allowed(path)
 
 
+def test_training_guard_scans_nested_eval_only_markers(tmp_path):
+    path = tmp_path / "nested_eval_marker.parquet"
+    pd.DataFrame(
+        [
+            {
+                "data_source": "r2e-gym-subset",
+                "extra_info": {
+                    "tools_kwargs": {
+                        "reward": {
+                            "metadata": {"data_source": "swebench-pro"},
+                        }
+                    }
+                },
+            }
+        ]
+    ).to_parquet(path, index=False)
+
+    with pytest.raises(ValueError, match="swebench-pro"):
+        assert_training_data_sources_allowed(path)
+
+
 def test_cmd_swebench_pro_builds_python_subset_with_scripts(monkeypatch, tmp_path):
     build_data = _load_build_data_module()
 
@@ -120,15 +142,18 @@ def test_cmd_swebench_pro_builds_python_subset_with_scripts(monkeypatch, tmp_pat
     assert tools["reward"]["metadata"]["swebench_pro_restore_tests_cmd"] == "git checkout f91ace -- tests/unit/utils/test_qtlog.py"
 
 
-def test_cmd_swebench_pro_rejects_selected_tests_that_do_not_cover_p2p(monkeypatch, tmp_path):
+def test_cmd_swebench_pro_skips_selected_tests_that_do_not_cover_p2p(monkeypatch, tmp_path):
     build_data = _load_build_data_module()
     sample = _sample()
     sample["selected_test_files_to_run"] = '["tests/unit/utils/test_qtlog.py"]'
+    out = tmp_path / "out.parquet"
 
     monkeypatch.setattr("p2a.hf_assets.load_shared_dataset", lambda *_args, **_kwargs: [sample])
 
-    with pytest.raises(ValueError, match="does not cover FAIL_TO_PASS/PASS_TO_PASS files"):
-        build_data.cmd_swebench_pro(SimpleNamespace(out=str(tmp_path / "out.parquet"), language="python", scripts_dir=None))
+    rc = build_data.cmd_swebench_pro(SimpleNamespace(out=str(out), language="python", scripts_dir=None))
+
+    assert rc == 0
+    assert pd.read_parquet(out).empty
 
 
 def test_swebench_pro_reward_grades_f2p_and_p2p():
@@ -181,14 +206,14 @@ def test_swebench_pro_reward_eval_script_uses_app_repo_path():
     assert "/testbed" not in script
 
 
-def test_swebench_pro_reward_eval_script_runs_f2p_and_p2p_nodeids():
+def test_swebench_pro_reward_eval_script_runs_selected_files_as_one_comma_arg():
     from p2a.reward_specs import SWEBenchProRewardSpec
 
     spec = object.__new__(SWEBenchProRewardSpec)
     spec.metadata = {
-        "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_fail"]),
+        "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_valid[1,1-expected0]"]),
         "PASS_TO_PASS": json.dumps(["tests/test_other.py::test_pass"]),
-        "selected_test_files_to_run": json.dumps(["tests/test_demo.py"]),
+        "selected_test_files_to_run": json.dumps(["tests/test_demo.py", "tests/test_other.py"]),
         "swebench_pro_repo_path": "/app",
     }
 
@@ -202,8 +227,8 @@ def test_swebench_pro_reward_eval_script_runs_f2p_and_p2p_nodeids():
         }
     )
 
-    assert "tests/test_demo.py::test_fail tests/test_other.py::test_pass" in script
-    assert "bash /tmp/run.sh tests/test_demo.py >" not in script
+    assert "bash /tmp/run.sh tests/test_demo.py,tests/test_other.py >" in script
+    assert "test_valid[1,1-expected0]" not in script
 
 
 def test_swebench_pro_reward_eval_script_stops_when_restore_fails(tmp_path):
@@ -314,7 +339,7 @@ def test_swebench_pro_create_sandbox_does_not_mark_verified(monkeypatch):
     assert adapter.repo_path == "/app"
 
 
-def test_swebench_pro_precompute_runner_uses_official_script_with_f2p_only():
+def test_swebench_pro_precompute_runner_uses_official_script_with_selected_files():
     from p2a.precompute.precompute_bonus_maps import _prepare_swebench_pro_test_script
 
     writes = {}
@@ -332,8 +357,9 @@ def test_swebench_pro_precompute_runner_uses_official_script_with_f2p_only():
 
     task = {
         "run_tests": "pytest \"$@\"\n",
-        "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_fail", "tests/test_demo.py::test_param[a b]"]),
+        "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_valid[1,1-expected0]"]),
         "PASS_TO_PASS": json.dumps(["tests/test_other.py::test_pass"]),
+        "selected_test_files_to_run": json.dumps(["tests/test_demo.py", "tests/test_other.py"]),
     }
 
     diag = _prepare_swebench_pro_test_script(FakeEnv(), task, "/tmp/p2a_runner.sh")
@@ -342,11 +368,59 @@ def test_swebench_pro_precompute_runner_uses_official_script_with_f2p_only():
     assert diag["swebench_pro_run_tests_source"] == "metadata"
     assert "cd /app" in wrapper
     assert "/opt/miniconda3/envs/testbed" not in wrapper
-    assert "tests/test_demo.py::test_fail" in wrapper
-    assert "'tests/test_demo.py::test_param[a b]'" in wrapper
-    assert "tests/test_other.py::test_pass" not in wrapper
+    assert "tests/test_demo.py,tests/test_other.py" in wrapper
+    assert "test_valid[1,1-expected0]" not in wrapper
     assert writes["/tmp/p2a_swebench_pro_official_run.sh"] == "pytest \"$@\"\n"
     assert any("chmod +x /tmp/p2a_runner.sh /tmp/p2a_swebench_pro_official_run.sh" in command for command in commands)
+
+
+def test_swebench_pro_precompute_short_circuits_empty_f2p():
+    from p2a.precompute import precompute_bonus_maps as bonus_maps
+
+    modified = [
+        {
+            "name": "demo",
+            "qualified_name": "demo",
+            "file_path": "pkg/demo.py",
+            "start_line": 10,
+            "end_line": 12,
+        }
+    ]
+
+    class FakeEnv:
+        swebench_verified = False
+        swebench_pro = True
+        repo_path = "/app"
+        alt_path = "/root"
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+        def checkout_buggy_commit(self, task, *, instance_id):
+            return {"buggy_checkout_ref": "abc123^", "buggy_checkout_exit": 0}
+
+        def _run(self, command, timeout=None):
+            raise AssertionError("empty F2P Pro rows must not run tests")
+
+    with (
+        patch.object(bonus_maps, "find_modified_callables_from_task", return_value=modified),
+        patch.object(bonus_maps, "find_newly_created_callables", return_value=[]),
+        patch("p2a.precompute.uni_agent_sandbox.create_uni_agent_sandbox", return_value=FakeEnv()),
+    ):
+        result = bonus_maps.compute_dynamic_bonus_map(
+            {
+                "instance_id": "demo",
+                "data_source": "swebench-pro",
+                "patch": "diff --git a/pkg/demo.py b/pkg/demo.py\n",
+                "FAIL_TO_PASS": json.dumps([]),
+            }
+        )
+
+    assert result["case_type"] == "no_f2p"
+    assert result["reason_code"] == "missing_fail_to_pass"
 
 
 def test_swebench_pro_task_detection_does_not_match_generic_python_docker_rows():

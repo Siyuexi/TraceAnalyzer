@@ -95,10 +95,19 @@ def swebench_pro_repo_path(*sources: Any) -> str:
     return "/app"
 
 
+def _canonical_or_raw_data_source(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    return canonical_dataset(text) if text in DATASET_ALIASES else text
+
+
 def _row_data_source(row: dict[str, Any]) -> str:
+    sources: list[str] = []
     for value in (row.get("data_source"), row.get("dataset")):
-        if isinstance(value, str) and value:
-            return canonical_dataset(value) if value in DATASET_ALIASES else value
+        source = _canonical_or_raw_data_source(value)
+        if source:
+            sources.append(source)
 
     extra = row.get("extra_info")
     if isinstance(extra, str):
@@ -107,16 +116,22 @@ def _row_data_source(row: dict[str, Any]) -> str:
         except (json.JSONDecodeError, TypeError):
             extra = {}
     if isinstance(extra, dict):
-        value = extra.get("data_source") or extra.get("dataset")
-        if isinstance(value, str) and value:
-            return canonical_dataset(value) if value in DATASET_ALIASES else value
+        for value in (extra.get("data_source"), extra.get("dataset")):
+            source = _canonical_or_raw_data_source(value)
+            if source:
+                sources.append(source)
         tools = extra.get("tools_kwargs")
         reward = tools.get("reward") if isinstance(tools, dict) else None
         metadata = reward.get("metadata") if isinstance(reward, dict) else None
-        value = metadata.get("data_source") if isinstance(metadata, dict) else None
-        if isinstance(value, str) and value:
-            return canonical_dataset(value) if value in DATASET_ALIASES else value
-    return ""
+        if isinstance(metadata, dict):
+            for value in (metadata.get("data_source"), metadata.get("dataset")):
+                source = _canonical_or_raw_data_source(value)
+                if source:
+                    sources.append(source)
+    for source in sources:
+        if source in EVAL_ONLY_DATASETS:
+            return source
+    return sources[0] if sources else ""
 
 
 def assert_training_data_sources_allowed(paths: str | Path | Iterable[str | Path]) -> None:
@@ -138,13 +153,9 @@ def assert_training_data_sources_allowed(paths: str | Path | Iterable[str | Path
             df = pd.read_parquet(path, columns=["data_source", "extra_info"])
         except Exception:  # noqa: BLE001 - older/synthetic files may not carry both helper columns
             df = pd.read_parquet(path)
-        if "data_source" in df.columns and df["data_source"].notna().all():
-            sources = {
-                canonical_dataset(value) if value in DATASET_ALIASES else value
-                for value in df["data_source"].astype(str).unique()
-            }
-        else:
-            sources = {_row_data_source(row) for row in df.to_dict(orient="records")}
+        # Always derive sources through _row_data_source so nested eval-only markers are
+        # enforced even when a top-level data_source column is present.
+        sources = {_row_data_source(row) for row in df.to_dict(orient="records")}
         bad = {source for source in sources if source in EVAL_ONLY_DATASETS}
         if bad:
             disallowed[str(path)] = bad
