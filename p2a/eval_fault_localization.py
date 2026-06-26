@@ -842,6 +842,8 @@ def _path_projection(
             "group": group,
             "selected_issue_anchor": node_key in anchors,
             "root_cause": node_key in roots,
+            "patched_callable": node.get("patched_callable"),
+            "patch_role": node.get("patch_role"),
             "hit": node_key in hit_nodes,
             "first_step": first_hits.get(node_key),
         }
@@ -1017,6 +1019,8 @@ def _graph_topology(bonus_map: dict, hit_nodes: set[str], first_hits: dict[str, 
                 "node_role": _node_role(node_key, nodes),
                 "excluded_from_hop_max": node.get("excluded_from_hop_max"),
                 "exclusion_reason": node.get("exclusion_reason"),
+                "patched_callable": node.get("patched_callable"),
+                "patch_role": node.get("patch_role"),
                 "hit": node_key in hit_nodes,
                 "first_step": first_hits.get(node_key),
                 "source": _source_text(node),
@@ -1041,6 +1045,8 @@ def _node_summaries(node_keys: Iterable[str], bonus_map: dict) -> list[dict]:
                 "normalized_distance": node.get("normalized_distance"),
                 "rewardable": node.get("rewardable", True),
                 "node_role": _node_role(node_key, nodes),
+                "patched_callable": node.get("patched_callable"),
+                "patch_role": node.get("patch_role"),
             }
         )
     return summaries
