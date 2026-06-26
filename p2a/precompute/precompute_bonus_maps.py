@@ -47,7 +47,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from p2a.datasets import parse_string_list
+from p2a.datasets import parse_string_list, selector_files
 from p2a.trace import (
     TRACE_FILE_PATH,
     _is_test_file,
@@ -170,17 +170,6 @@ def _env_positive_int_or_none(name: str) -> int | None:
 
 def _looks_like_bare_hash(value: str) -> bool:
     return len(value) >= 20 and all(ch in "0123456789abcdef" for ch in value)
-
-
-def _ordered_unique(items: list[str]) -> list[str]:
-    out = []
-    seen = set()
-    for item in items:
-        text = str(item or "").strip()
-        if text and text not in seen:
-            seen.add(text)
-            out.append(text)
-    return out
 
 
 def normalize_task(task: dict) -> dict:
@@ -1120,14 +1109,9 @@ def _prepare_swebench_pro_test_script(env, task: dict, test_script: str) -> dict
     diag: dict[str, object] = {}
     run_tests = task.get("run_tests")
     f2p_nodeids = _swebench_f2p_nodeids(task)
-    selected_files = _ordered_unique(
-        [
-            str(item or "").split("::", 1)[0].strip()
-            for item in parse_string_list(task.get("selected_test_files_to_run"))
-        ]
-    )
+    selected_files = selector_files(parse_string_list(task.get("selected_test_files_to_run")))
     if not selected_files:
-        selected_files = _ordered_unique([str(item or "").split("::", 1)[0].strip() for item in f2p_nodeids])
+        selected_files = selector_files(f2p_nodeids)
     diag["swebench_pro_f2p_nodeids"] = f2p_nodeids
     diag["swebench_pro_selected_files"] = selected_files
     diag["swebench_f2p_nodeids"] = f2p_nodeids

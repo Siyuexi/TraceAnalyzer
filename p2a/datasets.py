@@ -77,6 +77,27 @@ def parse_string_list(value: Any) -> list[str]:
     return [text]
 
 
+def ordered_unique_strings(items: Iterable[Any]) -> list[str]:
+    out = []
+    seen = set()
+    for item in items:
+        text = str(item or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
+def selector_file(selector: Any) -> str:
+    """Return the test file part of a pytest selector."""
+    return str(selector or "").split("::", 1)[0].strip()
+
+
+def selector_files(selectors: Iterable[Any]) -> list[str]:
+    """Return ordered unique files for pytest file or node-id selectors."""
+    return ordered_unique_strings(selector_file(selector) for selector in selectors)
+
+
 def last_nonempty_line(text: Any) -> str | None:
     """Return the last non-empty, stripped line of ``text`` (or None)."""
     lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]

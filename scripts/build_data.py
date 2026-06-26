@@ -48,6 +48,7 @@ from p2a.datasets import (  # noqa: E402
     SWEBENCH_VERIFIED_DATA_SOURCE,
     last_nonempty_line,
     parse_string_list,
+    selector_files,
 )
 
 
@@ -198,13 +199,11 @@ def _swebench_pro_post_setup_cmd(before_repo_set_cmd: str, *, repo_path: str = "
     )
 
 
-def _selector_file(selector: str) -> str:
-    return str(selector or "").split("::", 1)[0].strip()
-
-
 def _swebench_pro_missing_selected_files(selected_tests: list[str], expected_nodeids: list[str]) -> list[str]:
-    selected_files = {_selector_file(item) for item in selected_tests if _selector_file(item)}
-    expected_files = {_selector_file(item) for item in expected_nodeids if _selector_file(item)}
+    selected_files = set(selector_files(selected_tests))
+    if not selected_files:
+        return []
+    expected_files = set(selector_files(expected_nodeids))
     return sorted(expected_files - selected_files)
 
 

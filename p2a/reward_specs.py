@@ -20,7 +20,7 @@ from uni_agent.reward.base import AbstractRewardSpec
 from uni_agent.reward.registry import register_reward_spec
 from uni_agent.utils import auto_await
 
-from p2a.datasets import last_nonempty_line, parse_string_list, swebench_pro_repo_path
+from p2a.datasets import last_nonempty_line, parse_string_list, selector_files, swebench_pro_repo_path
 
 
 def _script_from_metadata_or_dir(metadata: dict[str, Any], *, name: str, key: str) -> str:
@@ -64,29 +64,12 @@ def _safe_json_loads(raw: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _ordered_unique(items: list[str]) -> list[str]:
-    out = []
-    seen = set()
-    for item in items:
-        text = str(item or "").strip()
-        if text and text not in seen:
-            seen.add(text)
-            out.append(text)
-    return out
-
-
-def _selector_file(selector: str) -> str:
-    return str(selector or "").split("::", 1)[0].strip()
-
-
 def _reward_test_args(metadata: dict[str, Any]) -> list[str]:
     f2p = parse_string_list(metadata.get("FAIL_TO_PASS") or metadata.get("fail_to_pass"))
     p2p = parse_string_list(metadata.get("PASS_TO_PASS") or metadata.get("pass_to_pass"))
-    selected_files = _ordered_unique(
-        [_selector_file(item) for item in parse_string_list(metadata.get("selected_test_files_to_run"))]
-    )
+    selected_files = selector_files(parse_string_list(metadata.get("selected_test_files_to_run")))
     if not selected_files:
-        selected_files = _ordered_unique([_selector_file(item) for item in [*f2p, *p2p]])
+        selected_files = selector_files([*f2p, *p2p])
     return [",".join(selected_files)] if selected_files else []
 
 

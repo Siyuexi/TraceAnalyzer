@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from p2a.datasets import assert_training_data_sources_allowed, canonical_dataset, parse_string_list
+from p2a.datasets import assert_training_data_sources_allowed, canonical_dataset, parse_string_list, selector_files
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +54,13 @@ def test_parse_string_list_accepts_python_repr_and_json():
     assert parse_string_list("['a', 'b']") == ["a", "b"]
     assert parse_string_list('["a", "b"]') == ["a", "b"]
     assert parse_string_list(["a", "b"]) == ["a", "b"]
+
+
+def test_selector_files_strips_nodeids_and_deduplicates():
+    assert selector_files(["tests/a.py::test_param[1,1]", "tests/a.py::test_other", " tests/b.py::test "]) == [
+        "tests/a.py",
+        "tests/b.py",
+    ]
 
 
 def test_canonical_dataset_accepts_swebench_pro_alias():
@@ -156,6 +163,22 @@ def test_cmd_swebench_pro_skips_selected_tests_that_do_not_cover_p2p(monkeypatch
     assert pd.read_parquet(out).empty
 
 
+def test_cmd_swebench_pro_keeps_empty_selected_tests_for_runtime_fallback(monkeypatch, tmp_path):
+    build_data = _load_build_data_module()
+    sample = _sample()
+    sample["selected_test_files_to_run"] = "[]"
+    out = tmp_path / "out.parquet"
+
+    monkeypatch.setattr("p2a.hf_assets.load_shared_dataset", lambda *_args, **_kwargs: [sample])
+
+    rc = build_data.cmd_swebench_pro(SimpleNamespace(out=str(out), language="python", scripts_dir=None))
+
+    assert rc == 0
+    rows = pd.read_parquet(out).to_dict(orient="records")
+    assert len(rows) == 1
+    assert json.loads(rows[0]["selected_test_files_to_run"]) == []
+
+
 def test_swebench_pro_reward_grades_f2p_and_p2p():
     from p2a.reward_specs import SWEBenchProRewardSpec
 
@@ -214,6 +237,30 @@ def test_swebench_pro_reward_eval_script_runs_selected_files_as_one_comma_arg():
         "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_valid[1,1-expected0]"]),
         "PASS_TO_PASS": json.dumps(["tests/test_other.py::test_pass"]),
         "selected_test_files_to_run": json.dumps(["tests/test_demo.py", "tests/test_other.py"]),
+        "swebench_pro_repo_path": "/app",
+    }
+
+    script = spec._build_eval_script(
+        {
+            "run_script": Path("/tmp/run.sh"),
+            "parser": Path("/tmp/parser.py"),
+            "stdout": Path("/tmp/stdout.log"),
+            "stderr": Path("/tmp/stderr.log"),
+            "output": Path("/tmp/output.json"),
+        }
+    )
+
+    assert "bash /tmp/run.sh tests/test_demo.py,tests/test_other.py >" in script
+    assert "test_valid[1,1-expected0]" not in script
+
+
+def test_swebench_pro_reward_eval_script_falls_back_to_nodeid_files():
+    from p2a.reward_specs import SWEBenchProRewardSpec
+
+    spec = object.__new__(SWEBenchProRewardSpec)
+    spec.metadata = {
+        "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_valid[1,1-expected0]"]),
+        "PASS_TO_PASS": json.dumps(["tests/test_other.py::test_pass"]),
         "swebench_pro_repo_path": "/app",
     }
 
@@ -371,6 +418,44 @@ def test_swebench_pro_precompute_runner_uses_official_script_with_selected_files
     assert "tests/test_demo.py,tests/test_other.py" in wrapper
     assert "test_valid[1,1-expected0]" not in wrapper
     assert writes["/tmp/p2a_swebench_pro_official_run.sh"] == "pytest \"$@\"\n"
+    assert any("chmod +x /tmp/p2a_runner.sh /tmp/p2a_swebench_pro_official_run.sh" in command for command in commands)
+
+
+def test_swebench_pro_precompute_runner_falls_back_to_f2p_files():
+    from p2a.precompute.precompute_bonus_maps import _prepare_swebench_pro_test_script
+
+    writes = {}
+    commands = []
+
+    class FakeEnv:
+        repo_path = "/app"
+
+        def write_file(self, path, text):
+            writes[path] = text
+
+        def _run(self, command, timeout=None):
+            commands.append(command)
+            return "", ""
+
+    task = {
+        "run_tests": "pytest \"$@\"\n",
+        "FAIL_TO_PASS": json.dumps(
+            [
+                "tests/test_demo.py::test_valid[1,1-expected0]",
+                "tests/test_second.py::test_fail",
+                "tests/test_demo.py::test_other",
+            ]
+        ),
+        "PASS_TO_PASS": json.dumps(["tests/test_p2p.py::test_pass"]),
+        "selected_test_files_to_run": "[]",
+    }
+
+    diag = _prepare_swebench_pro_test_script(FakeEnv(), task, "/tmp/p2a_runner.sh")
+    wrapper = writes["/tmp/p2a_runner.sh"]
+
+    assert diag["swebench_pro_selected_files"] == ["tests/test_demo.py", "tests/test_second.py"]
+    assert "tests/test_demo.py,tests/test_second.py" in wrapper
+    assert "tests/test_p2p.py" not in wrapper
     assert any("chmod +x /tmp/p2a_runner.sh /tmp/p2a_swebench_pro_official_run.sh" in command for command in commands)
 
 
