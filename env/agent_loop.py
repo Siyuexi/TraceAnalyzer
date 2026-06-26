@@ -9,6 +9,8 @@ from typing import Any
 from uni_agent.agent_loop import UniAgentLoop
 from uni_agent.interaction import AgentEnv
 
+import p2a.reward_specs  # noqa: F401 - registers P2A-local Uni-Agent reward specs
+
 from .deployment import make_env_config
 
 

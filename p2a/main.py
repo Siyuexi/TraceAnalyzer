@@ -81,6 +81,8 @@ def main(config):
     from verl.trainer.main_ppo import run_ppo
     from verl.utils.device import auto_set_device
 
+    from p2a.datasets import assert_training_data_sources_allowed
+
     if not hasattr(config, "async_training"):
         raise RuntimeError("must set async_training config")
 
@@ -96,6 +98,7 @@ def main(config):
     from time import time
 
     start_time = time()
+    assert_training_data_sources_allowed(config.data.train_files)
     auto_set_device(config)
     config.actor_rollout_ref.rollout.nnodes = config.rollout.nnodes
     config.actor_rollout_ref.rollout.n_gpus_per_node = config.rollout.n_gpus_per_node

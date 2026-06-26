@@ -56,7 +56,7 @@ This repo now has four mostly independent surfaces:
 
 | Surface | Use it for | Primary entry points |
 |---|---|---|
-| Data setup | Build R2E-Gym subset, SWE-bench Verified, and the default SWE-bench hard validation split. | `scripts/setup.sh data ...`, `scripts/build_data.py` |
+| Data setup | Build R2E-Gym subset, SWE-bench Verified, the default SWE-bench hard validation split, and the optional SWE-Bench-Pro Python eval subset. | `scripts/setup.sh data ...`, `scripts/build_data.py` |
 | P2A training | Run Uni-Agent baseline or P2A advantage reshaping on ARL/Ray. | `scripts/main.sh`, `scripts/train_p2a.sh` |
 | Graph diagnostics | Precompute dynamic/static bonus maps and score whether rollouts read the fault-propagation graph. | `scripts/precompute_eval_bonus_maps.sh`, `p2a.eval_fault_localization`, live `val-p2a/*` validation metrics |
 | Third-party baselines | Run an OpenAI-compatible external model through the same Uni-Agent + ARL SWE/R2E environment and produce rollout/localization artifacts. | `scripts/main_3rd.sh`, `scripts/third_party_eval.sh`, `config/third_party_eval.deepseek.example.yaml` |
@@ -75,7 +75,7 @@ src/
     bad_instances.json        #   R2E instances to exclude from training (skip-list)
     third_party_eval.deepseek.example.yaml # third-party OpenAI-compatible model config template
   scripts/
-    build_data.py             # SINGLE data builder: r2e | swebench-verified | swebench-hard | skip-list
+    build_data.py             # SINGLE data builder: r2e | swebench-verified | swebench-hard | swebench-pro | skip-list
     uni_agent_arl.sh          # prepare/data/smoke/debug launcher (ARL config)
     setup.sh                  # idempotent data/dependency/eval-map setup helpers
     ray_setup.sh              # bring up Ray and smoke-check Ray Jobs
@@ -186,11 +186,35 @@ PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
 
 PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py swebench-hard --out $DATA/swe_bench_verified_hard.parquet
+
+# Optional Phase 1 SWE-Bench-Pro eval subset: Python repos only, never training.
+export P2A_SWEBENCH_PRO_SCRIPTS_DIR=/path/to/SWE-bench_Pro-os/run_scripts
+PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
+  uv run python scripts/build_data.py swebench-pro \
+    --out $DATA/swe_bench_pro.parquet \
+    --scripts-dir "$P2A_SWEBENCH_PRO_SCRIPTS_DIR"
 ```
 
 `swebench-hard` is a filtered parquet, not a separate HuggingFace cache directory.
 The two upstream cache directories are expected: `SWE-Bench-Verified/` carries
 R2E-Gym eval rows, while `SWE-bench_Verified/` carries Princeton difficulty labels.
+`swebench-pro` stores the upstream `repo_language`, normalized `FAIL_TO_PASS` /
+`PASS_TO_PASS`, the mirrored `jefzda/sweap-images:{dockerhub_tag}` image, and
+the per-instance SWE-Bench-Pro run script/parser when `--scripts-dir` points at
+the official open-source `run_scripts/` checkout. Pro images use `/app` as the
+repository root, so the generated setup and verifier metadata keep that path
+separate from SWE-bench Verified's `/testbed`. Dynamic ARL precompute also
+requires the corresponding `sweap-images` tags to be present in the pair-diag
+mirror; missing tags fail during sandbox startup as `ImagePullBackOff`.
+Use the image preflight helper to generate or check the Phase-1 mirror list:
+
+```bash
+uv run python scripts/swebench_pro_images.py $DATA/swe_bench_pro.parquet --limit 5
+uv run python scripts/swebench_pro_images.py $DATA/swe_bench_pro.parquet \
+  --limit 5 --check-manifests --fail-on-missing-mirror
+uv run python scripts/swebench_pro_images.py $DATA/swe_bench_pro.parquet \
+  --emit-mirror-script > /tmp/swebench_pro_mirror_python.sh
+```
 
 ### Step 3. Precompute training bonus maps for P2A
 
@@ -222,11 +246,16 @@ Skip this step for a pure baseline run. P2A training reads these maps through
 
 ```bash
 TEST_FILE=$DATA/swe_bench_verified_hard.parquet bash scripts/precompute_eval_bonus_maps.sh
+
+EVAL_DATASET=swebench-pro \
+  TEST_FILE=$DATA/swe_bench_pro.parquet \
+  bash scripts/precompute_eval_bonus_maps.sh
 ```
 
-Eval maps default to `data/bonus_maps/swebench-hard`. They are diagnostic only:
-validation logging reads them, but the training reshape should use the training
-split's `data/bonus_maps/r2e-gym-subset` directory.
+Eval maps default to `data/bonus_maps/<dataset>`, such as
+`data/bonus_maps/swebench-hard` or `data/bonus_maps/swebench-pro`. They are
+diagnostic only: validation logging reads them, but the training reshape should
+use the training split's `data/bonus_maps/r2e-gym-subset` directory.
 
 ### Step 5. Configure logging and GPU layout
 
@@ -527,12 +556,14 @@ If the smoke phase records only system errors such as ARL gateway or interactive
 shell failures, batch mode stops before the full phase and reports the structured
 error kind in the rollout artifacts.
 
-Switch datasets with `THIRD_PARTY_DATASET=swebench-verified` or
-`THIRD_PARTY_DATASET=r2e-gym-subset`. Keep `P2A_THIRD_PARTY_LIMIT` small for
-smoke tests; set it higher, or to `all`, for a real baseline. The wrapper does
-not sync dependencies by default so it does not prune a shared training `.venv`;
-set `P2A_THIRD_PARTY_SYNC_DEPS=1` only when you intentionally want a core CPU
-sync in the active environment.
+Switch datasets with `THIRD_PARTY_DATASET=swebench-verified`,
+`THIRD_PARTY_DATASET=swebench-pro`, or `THIRD_PARTY_DATASET=r2e-gym-subset`.
+For `swebench-pro`, set `P2A_SWEBENCH_PRO_SCRIPTS_DIR` before the setup phase so
+the parquet embeds the per-instance verifier scripts. Keep
+`P2A_THIRD_PARTY_LIMIT` small for smoke tests; set it higher, or to `all`, for a
+real baseline. The wrapper does not sync dependencies by default so it does not
+prune a shared training `.venv`; set `P2A_THIRD_PARTY_SYNC_DEPS=1` only when you
+intentionally want a core CPU sync in the active environment.
 
 The lower-level pass-through remains available when you want explicit control
 over every path and CLI flag:
@@ -555,8 +586,8 @@ timeout 15m bash scripts/third_party_eval.sh \
 ```
 
 The harness uses Uni-Agent's `OpenAICompatibleChatModel`, the local ARL
-deployment adapter, and the same SWE/R2E reward specs as training. It writes
-`p2a_third_party_rollout_v1` JSONL with `messages`, structured tool calls,
+deployment adapter, and the same SWE/R2E/SWE-Bench-Pro reward specs as training.
+It writes `p2a_third_party_rollout_v1` JSONL with `messages`, structured tool calls,
 `p2a_step_traces`, reward details, and termination status. When
 `--bonus-map-dir` is set it also writes scorer details, a summary JSON, and a
 short Markdown localization baseline report. For smoke tests, `--max-turns`,
@@ -582,6 +613,7 @@ These are knobs you set; the repo does not pin them:
 | Third-party run scope | `THIRD_PARTY_DATASET`, `THIRD_PARTY_DATA_FILE`, `P2A_THIRD_PARTY_LIMIT`, `P2A_THIRD_PARTY_N_PARALLEL`, `P2A_THIRD_PARTY_RUN_TIMEOUT`, `P2A_THIRD_PARTY_BONUS_*` |
 | ARL gateway | `ARL_GATEWAY_URL` |
 | Hard-subset criterion | `--difficulties` flag of `build_data.py swebench-hard` (default = the `1-4 hours` / `>4 hours` difficulty set) |
+| SWE-Bench-Pro scripts | `P2A_SWEBENCH_PRO_SCRIPTS_DIR` / `SWEBENCH_PRO_SCRIPTS_DIR`, pointing at the official `SWE-bench_Pro-os/run_scripts` checkout |
 | R2E bad-case policy | `config/bad_instances.json` (pair-diag ARL gate evidence) |
 
 Hydra training overrides live in `scripts/train_p2a.sh`; if you move any to a json/yaml

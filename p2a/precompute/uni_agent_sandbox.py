@@ -293,12 +293,17 @@ class UniAgentSandboxAdapter:
         *,
         default_timeout: int = 300,
         swebench_verified: bool = False,
+        swebench_pro: bool = False,
+        repo_path: str | None = None,
         startup_env_variables: dict[str, str] | None = None,
         post_setup_cmd: str | None = None,
     ):
         self.agent_env = agent_env
         self.default_timeout = default_timeout
-        self.swebench_verified = swebench_verified
+        self.swebench_verified = swebench_verified or swebench_pro
+        self.swebench_pro = swebench_pro
+        if repo_path:
+            self.repo_path = repo_path
         self.startup_env_variables = startup_env_variables or {}
         self.post_setup_cmd = post_setup_cmd
 
@@ -332,8 +337,11 @@ class UniAgentSandboxAdapter:
         # Inject the sandbox env every call (one-shot execute = fresh shell, no persistent state),
         # mirroring the pre-migration tracer: R2E-Gym → PATH with the venv first + cwd=/testbed;
         # SWE-bench → conda activate testbed. Without this the venv python is unresolved (exit 127).
-        if self.swebench_verified:
+        if self.swebench_verified and not self.swebench_pro:
             run_command = f"source /opt/miniconda3/bin/activate && conda activate testbed && {command}"
+            env = None
+        elif self.swebench_pro:
+            run_command = command
             env = None
         else:
             run_command = command
@@ -419,6 +427,8 @@ class UniAgentSandboxAdapter:
         if exit_code == 0 and expected_commit and actual_head == expected_commit:
             diag["buggy_checkout_verified"] = True
             diag["sandbox_code_state"] = "git_checkout_verified"
+            if self.swebench_pro:
+                diag.update(self._restore_swebench_pro_tests(task))
             return diag
 
         diag["buggy_checkout_verified"] = False
@@ -433,12 +443,26 @@ class UniAgentSandboxAdapter:
         diag["sandbox_code_state_mismatch"] = True
         return diag
 
+    def _restore_swebench_pro_tests(self, task: dict[str, Any]) -> dict[str, Any]:
+        cmd = _swebench_pro_restore_tests_cmd(task)
+        if not cmd:
+            return {"swebench_pro_restore_tests_cmd": None, "swebench_pro_restore_tests_exit": None}
+        stdout, stderr, exit_code = self._execute_raw(f"cd {self.repo_path} && {cmd}", timeout=120)
+        return {
+            "swebench_pro_restore_tests_cmd": cmd,
+            "swebench_pro_restore_tests_exit": exit_code,
+            "swebench_pro_restore_tests_stdout": stdout.strip()[-500:] if exit_code != 0 else "",
+            "swebench_pro_restore_tests_stderr": stderr.strip()[-500:] if exit_code != 0 else "",
+        }
+
 
 def create_uni_agent_sandbox(task: dict[str, Any], *, instance_id: str) -> UniAgentSandboxAdapter:
     from uni_agent.interaction import AgentEnv, AgentEnvConfig
 
     config = build_agent_env_config(task, instance_id=instance_id)
+    swebench_pro = _is_swebench_pro_task(task)
     swebench_verified = _is_swebench_verified_task(task)
+    repo_path = _repo_path_for_task(task) if swebench_pro else None
     if config["deployment"].get("type") == "arl":
         from env.deployment import make_env_config
 
@@ -455,10 +479,17 @@ def create_uni_agent_sandbox(task: dict[str, Any], *, instance_id: str) -> UniAg
         return UniAgentSandboxAdapter(
             env,
             swebench_verified=swebench_verified,
+            swebench_pro=swebench_pro,
+            repo_path=repo_path,
             startup_env_variables=config.get("env_variables"),
             post_setup_cmd=config.get("post_setup_cmd"),
         )
-    return UniAgentSandboxAdapter(env, swebench_verified=swebench_verified)
+    return UniAgentSandboxAdapter(
+        env,
+        swebench_verified=swebench_verified,
+        swebench_pro=swebench_pro,
+        repo_path=repo_path,
+    )
 
 
 def _is_swebench_verified_task(task: dict[str, Any]) -> bool:
@@ -471,6 +502,48 @@ def _is_swebench_verified_task(task: dict[str, Any]) -> bool:
     if metadata.get("FAIL_TO_PASS") is not None or task.get("FAIL_TO_PASS") is not None:
         return True
     return False
+
+
+def _is_swebench_pro_task(task: dict[str, Any]) -> bool:
+    tools_kwargs = extract_tools_kwargs(task)
+    reward = tools_kwargs.get("reward") if isinstance(tools_kwargs.get("reward"), dict) else {}
+    metadata = extract_reward_metadata(task)
+    if reward.get("name") == "swe_bench_pro":
+        return True
+    for source in (task, metadata):
+        data_source = str(source.get("data_source") or "").strip().lower()
+        if data_source in {"swebench-pro", "swe-bench-pro"}:
+            return True
+        if source.get("swebench_pro_repo_path") or source.get("swebench_pro_restore_tests_cmd"):
+            return True
+        image = " ".join(str(source.get(key) or "") for key in ("docker_image", "image"))
+        if "sweap-images:" in image and str(source.get("repo_path") or "").strip() == "/app":
+            return True
+    return False
+
+
+def _swebench_pro_restore_tests_cmd(task: dict[str, Any]) -> str | None:
+    metadata = extract_reward_metadata(task)
+    for source in (task, metadata):
+        value = source.get("swebench_pro_restore_tests_cmd")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        before = source.get("before_repo_set_cmd")
+        if isinstance(before, str):
+            lines = [line.strip() for line in before.splitlines() if line.strip()]
+            if lines:
+                return lines[-1]
+    return None
+
+
+def _repo_path_for_task(task: dict[str, Any]) -> str:
+    metadata = extract_reward_metadata(task)
+    for source in (task, metadata):
+        for key in ("swebench_pro_repo_path", "repo_path"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return "/app"
 
 
 def _read_old_sources(env: UniAgentSandboxAdapter, files: set[str]) -> tuple[dict[str, str], set[str]]:

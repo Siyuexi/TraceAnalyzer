@@ -71,7 +71,7 @@ def _bonus_map_candidate_ids(instance_id: str) -> list[str]:
 # Path normalization
 # ---------------------------------------------------------------------------
 
-_SANDBOX_PREFIXES = ["/testbed/", "/workspace/", "/repo/"]
+_SANDBOX_PREFIXES = ["/testbed/", "/app/", "/workspace/", "/repo/"]
 
 
 def _normalize_path(path: str) -> str:

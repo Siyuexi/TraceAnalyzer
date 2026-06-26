@@ -71,6 +71,7 @@ SYSTEM_ERROR_KINDS = {
     "arl_shell_forbidden",
     "arl_shell_unavailable",
     "arl_gateway_unreachable",
+    "image_pull_failed",
     "network_error",
     "runtime_timeout",
 }
@@ -87,6 +88,8 @@ def classify_error(error: BaseException | str | None) -> str | None:
         return "arl_shell_forbidden"
     if "interactive shell" in lowered or "/shell" in lowered:
         return "arl_shell_unavailable"
+    if any(token in lowered for token in ("imagepullbackoff", "errimagepull", "pull access denied")):
+        return "image_pull_failed"
     if "arl" in lowered and any(token in lowered for token in ("connection", "connect", "gateway", "timeout", "refused")):
         return "arl_gateway_unreachable"
     if any(token in lowered for token in ("network", "connection refused", "connection reset", "temporary failure")):
@@ -351,6 +354,8 @@ def _make_interaction(*, run_id: str, env: Any, model: Any, tools_manager: Any, 
 
 def _make_reward(row: dict[str, Any], *, run_id: str, env: Any, agent_cfg: dict[str, Any]):
     from uni_agent.reward import load_reward_spec
+
+    import p2a.reward_specs  # noqa: F401 - registers P2A-local Uni-Agent reward specs
 
     reward_cfg = dict(extract_tools_kwargs(row).get("reward") or {})
     if not reward_cfg:

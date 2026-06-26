@@ -1391,16 +1391,19 @@ def compute_dynamic_bonus_map(
                     diagnostics=env_diag,
                 )
 
-            # Repo startup fixups (source patches + dep pins) run AFTER buggy
-            # checkout and BEFORE instrumentation, so the instrumented + tested
-            # source is the fixed-up source (same adapter the gate uses).
-            _repo = instance_id.split("__", 1)[0] if instance_id and "__" in instance_id else ""
-            _debug_progress(instance_id, "startup_fixups")
-            _fix_out, _ = env._run(startup_fixup_command(_repo), timeout=300)
-            _fixups = parse_fixups(_fix_out)
-            env_diag["startup_fixups_applied"] = _fixups
-            if _fixups:
-                print(f"  [{instance_id}] startup_fixups_applied={_fixups}")
+            if getattr(env, "swebench_pro", False):
+                env_diag["startup_fixups_applied"] = []
+            else:
+                # Repo startup fixups (source patches + dep pins) run AFTER buggy
+                # checkout and BEFORE instrumentation, so the instrumented + tested
+                # source is the fixed-up source (same adapter the gate uses).
+                _repo = instance_id.split("__", 1)[0] if instance_id and "__" in instance_id else ""
+                _debug_progress(instance_id, "startup_fixups")
+                _fix_out, _ = env._run(startup_fixup_command(_repo), timeout=300)
+                _fixups = parse_fixups(_fix_out)
+                env_diag["startup_fixups_applied"] = _fixups
+                if _fixups:
+                    print(f"  [{instance_id}] startup_fixups_applied={_fixups}")
 
             # Uni-Agent R2E parquet keeps reward.metadata.patch but drops the
             # parsed old/new file contents. Recover callable diffs from the
@@ -2088,6 +2091,7 @@ def main() -> int:
         skip_ids = load_skip_ids()
         print(f"Skip-case registry: {len(skip_ids)} bad instances will be excluded")
     n_skipped_bad = 0
+    n_skipped_language = 0
 
     work_items = []
     n_skipped_existing = 0
@@ -2095,9 +2099,17 @@ def main() -> int:
     for idx, row in df.iterrows():
         task_payload = row.to_dict()
         try:
-            instance_id = make_instance_id(normalize_task(task_payload))
+            normalized_payload = normalize_task(task_payload)
+            instance_id = make_instance_id(normalized_payload)
         except Exception:
             instance_id = None
+            normalized_payload = task_payload
+        if (
+            normalized_payload.get("data_source") == "swebench-pro"
+            and str(normalized_payload.get("repo_language") or "").lower() != "python"
+        ):
+            n_skipped_language += 1
+            continue
         if instance_id and instance_id in skip_ids:
             n_skipped_bad += 1
             continue
@@ -2122,7 +2134,10 @@ def main() -> int:
             )
         )
 
-    print(f"Excluded {n_skipped_bad} bad instances (skip registry); processing {len(work_items)} work items")
+    print(
+        f"Excluded {n_skipped_bad} bad instances (skip registry), "
+        f"{n_skipped_language} unsupported-language instances; processing {len(work_items)} work items"
+    )
     if skip_existing:
         print(f"Skipped {n_skipped_existing} complete existing maps; retrying {n_retryable_existing} retryable/incomplete maps")
 

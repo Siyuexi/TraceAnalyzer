@@ -23,7 +23,7 @@ Common overrides:
   P2A_THIRD_PARTY_API_KEY=...
   P2A_THIRD_PARTY_BASE_URL=https://apic1.ohmycdn.com/v1
   P2A_THIRD_PARTY_MODEL=deepseek-v4-flash
-  THIRD_PARTY_DATASET=swebench-hard|swebench-verified|r2e-gym-subset
+  THIRD_PARTY_DATASET=swebench-hard|swebench-verified|swebench-pro|r2e-gym-subset
   THIRD_PARTY_DATA_FILE=/path/to/custom.parquet
   P2A_THIRD_PARTY_LIMIT=1
   P2A_THIRD_PARTY_MAX_TURNS=3

@@ -178,6 +178,16 @@ def test_classify_error_marks_arl_websocket_forbidden_as_system_error():
     assert classify_error("InvalidStatus: server rejected WebSocket connection: HTTP 403") == "arl_shell_forbidden"
 
 
+def test_classify_error_marks_image_pull_failure_as_system_error():
+    assert (
+        classify_error(
+            "ImagePullBackOff: ErrImagePull: pull access denied for "
+            "pair-diag-cn-guangzhou.cr.volces.com/code/sweap-images:demo"
+        )
+        == "image_pull_failed"
+    )
+
+
 def test_dump_record_is_readable_by_fault_localization_scorer(tmp_path):
     bonus_dir = tmp_path / "bonus_maps"
     bonus_dir.mkdir()

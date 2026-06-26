@@ -54,6 +54,23 @@ def test_structured_execute_bash_tool_call():
     assert {"file_path": "bar.py", "start_line": 5, "end_line": 9} in reads
 
 
+def test_app_paths_normalize_like_repo_relative_paths():
+    tool_calls = [
+        {"function": {"name": "execute_bash", "arguments": {"command": "cat /app/pkg/root.py"}}},
+        {"function": {"name": "str_replace_editor",
+                      "arguments": {"command": "view", "path": "/app/pkg/helper.py", "view_range": [2, 4]}}},
+        {"function": {"name": "str_replace_editor",
+                      "arguments": {"command": "str_replace", "path": "/app/pkg/root.py"}}},
+    ]
+
+    reads = parse_read_actions_from_tool_calls(tool_calls)
+    writes = parse_write_actions_from_tool_calls(tool_calls)
+
+    assert {"file_path": "pkg/root.py", "start_line": 1, "end_line": 999999} in reads
+    assert {"file_path": "pkg/helper.py", "start_line": 2, "end_line": 4} in reads
+    assert {"file_path": "pkg/root.py", "start_line": 1, "end_line": 999999, "command": "str_replace"} in writes
+
+
 def test_segments_purpose_blocks_by_family_and_target():
     traces = [
         {"step_idx": 1, "tool_calls": [{"function": {"name": "str_replace_editor", "arguments": {"command": "view", "path": "/testbed/a.py"}}}]},

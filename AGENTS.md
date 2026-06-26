@@ -25,6 +25,12 @@ is on `main`.
 - Do not put public/reusable datasets or model checkpoints under `src/data`.
   Do not put TraceAnalyzer-specific run artifacts under `../../datasets` or
   `../../models` by default.
+- SWE-Bench-Pro is eval-only. Phase 1 supports only Python repos and writes
+  `swe_bench_pro.parquet`; never route it into RL training. The official Pro
+  images use `/app` as the repository root, not SWE-bench Verified's `/testbed`.
+  ARL runs require the corresponding `jefzda/sweap-images:{dockerhub_tag}` tags
+  to be mirrored under `pair-diag-cn-guangzhou.cr.volces.com/code/sweap-images`;
+  Docker Hub direct pull is not assumed available from ARL.
 
 ## Research concept docs
 

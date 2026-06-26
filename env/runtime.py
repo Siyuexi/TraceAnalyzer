@@ -70,6 +70,23 @@ _RETRY_ATTEMPTS = 3
 _RETRY_BASE_DELAY = 1.5  # seconds; exponential backoff: 1.5, 3.0, ...
 
 
+def _is_transient_step_failure(output: Any) -> bool:
+    """Return true when ARL failed before the user's command could run."""
+    if int(getattr(output, "exit_code", 0) or 0) == 0:
+        return False
+    text = "\n".join(
+        str(getattr(output, attr, "") or "")
+        for attr in ("stderr", "stdout")
+    )
+    if "gRPC Execute failed" not in text:
+        return False
+    return (
+        "transport: Error while dialing" in text
+        or "connection refused" in text
+        or "rpc error: code = Unavailable" in text
+    )
+
+
 def _transient_exc_types() -> tuple[type[BaseException], ...]:
     """Best-effort tuple of transient network errors worth retrying.
 
@@ -166,6 +183,33 @@ class ArlRuntime(AbstractRuntime):
         """ManagedSession.execute with transient-drop retry (stateless → safe)."""
         return self._retry_sync("execute", self._session.execute, steps)
 
+    def _execute_steps_sync(self, what: str, steps: list[dict[str, Any]]) -> Any:
+        """Execute ARL steps, retrying gateway failures reported as step output."""
+        last_resp: Any | None = None
+        for attempt in range(1, _RETRY_ATTEMPTS + 1):
+            resp = self._session_execute(steps)
+            last_resp = resp
+            transient = next(
+                (
+                    result.output
+                    for result in getattr(resp, "results", []) or []
+                    if _is_transient_step_failure(getattr(result, "output", None))
+                ),
+                None,
+            )
+            if transient is None:
+                return resp
+            if attempt >= _RETRY_ATTEMPTS:
+                break
+            delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            message = (getattr(transient, "stderr", "") or getattr(transient, "stdout", "") or "").strip()
+            self.logger.warning(
+                "ARL %s transient step failure (attempt %d/%d), retry in %.1fs: %s",
+                what, attempt, _RETRY_ATTEMPTS, delay, message[-300:],
+            )
+            time.sleep(delay)
+        return last_resp
+
     # ── persistent interactive shells ─────────────────────────────────────
     def _open_shell(self, name: str, startup_source: list[str] | None) -> str:
         from arl.interactive_shell_client import InteractiveShellClient
@@ -236,7 +280,7 @@ class ArlRuntime(AbstractRuntime):
         step: dict[str, Any] = {"name": "arl-exec", "command": ["bash", "-lc", shell_cmd]}
         if timeout:
             step["timeout"] = int(timeout)
-        resp = self._session_execute([step])
+        resp = self._execute_steps_sync("execute", [step])
         if not resp.results:
             raise RuntimeError("ARL execute returned no results")
         return resp.results[0].output
@@ -259,7 +303,7 @@ class ArlRuntime(AbstractRuntime):
                 "command": ["bash", "-lc", f"printf %s {shlex.quote(chunk)} | base64 -d {redirect} {quoted}"],
             })
             first = False
-        resp = self._session_execute(steps)
+        resp = self._execute_steps_sync("write_file", steps)
         bad = [r for r in resp.results if r.output.exit_code != 0]
         if bad:
             raise RuntimeError(f"write_file failed: {bad[-1].output.stderr}")
@@ -363,7 +407,7 @@ class ArlRuntime(AbstractRuntime):
 
     async def is_alive(self, *, timeout: float | None = None) -> IsAliveResponse:
         try:
-            output = await self._blocking(self._exec_sync, "echo ok")
+            output = await self._blocking(self._exec_sync, "echo ok", timeout)
             ok = output.exit_code == 0 and "ok" in output.stdout
             return IsAliveResponse(is_alive=ok, message="" if ok else output.stderr)
         except Exception as exc:  # noqa: BLE001 - report liveness failures, don't raise

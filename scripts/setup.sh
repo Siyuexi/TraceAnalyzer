@@ -10,8 +10,8 @@ p2a_setup_usage() {
   cat <<'EOF'
 Usage:
   bash scripts/setup.sh deps <core|dev|train-gpu>
-  bash scripts/setup.sh data <swebench-hard|swebench-verified|r2e-gym-subset>
-  bash scripts/setup.sh maps <swebench-hard|swebench-verified|r2e-gym-subset>
+  bash scripts/setup.sh data <swebench-hard|swebench-verified|swebench-pro|r2e-gym-subset>
+  bash scripts/setup.sh maps <swebench-hard|swebench-verified|swebench-pro|r2e-gym-subset>
   bash scripts/setup.sh train
   bash scripts/setup.sh third-party
 
@@ -61,6 +61,16 @@ p2a_setup_select_dataset() {
       P2A_SETUP_DATA_FILE="${custom_file:-${DATA}/swe_bench_verified.parquet}"
       P2A_SETUP_BUILD_CMD=(swebench-verified --out "${P2A_SETUP_DATA_FILE}")
       ;;
+    swebench-pro|swe-bench-pro|swebenchpro|swe-pro|pro)
+      P2A_SETUP_DATASET_SLUG="swebench-pro"
+      P2A_SETUP_DATA_FILE="${custom_file:-${DATA}/swe_bench_pro.parquet}"
+      P2A_SETUP_BUILD_CMD=(swebench-pro --out "${P2A_SETUP_DATA_FILE}")
+      if [[ -n "${P2A_SWEBENCH_PRO_SCRIPTS_DIR:-}" ]]; then
+        P2A_SETUP_BUILD_CMD+=(--scripts-dir "${P2A_SWEBENCH_PRO_SCRIPTS_DIR}")
+      elif [[ -n "${SWEBENCH_PRO_SCRIPTS_DIR:-}" ]]; then
+        P2A_SETUP_BUILD_CMD+=(--scripts-dir "${SWEBENCH_PRO_SCRIPTS_DIR}")
+      fi
+      ;;
     r2e|r2e-gym|r2e-gym-subset)
       P2A_SETUP_DATASET_SLUG="r2e-gym-subset"
       P2A_SETUP_DATA_FILE="${custom_file:-${DATA}/r2e_gym_subset_p2a.train.parquet}"
@@ -68,7 +78,7 @@ p2a_setup_select_dataset() {
       ;;
     *)
       echo "[setup] unknown dataset: ${dataset}" >&2
-      echo "[setup] expected one of: swebench-hard, swebench-verified, r2e-gym-subset" >&2
+      echo "[setup] expected one of: swebench-hard, swebench-verified, swebench-pro, r2e-gym-subset" >&2
       return 2
       ;;
   esac

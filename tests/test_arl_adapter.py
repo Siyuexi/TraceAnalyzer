@@ -98,6 +98,92 @@ class ArlAdapterTests(unittest.TestCase):
         runtime = ArlRuntime(FakeSession(), run_id="run-1")
         self.assertEqual(runtime._arl_session_id, "arl-session-1")
 
+    def test_arl_runtime_retries_gateway_execute_refusal(self) -> None:
+        from env.runtime import ArlRuntime
+
+        class FakeClient:
+            base_url = "http://gateway"
+
+        class FakeSession:
+            _client = FakeClient()
+            _session_id = "arl-session-1"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def execute(self, steps):
+                self.calls += 1
+                if self.calls == 1:
+                    output = SimpleNamespace(
+                        exit_code=1,
+                        stdout="",
+                        stderr=(
+                            "gRPC Execute failed: rpc error: code = Unavailable "
+                            "desc = connection error: transport: Error while dialing: "
+                            "connect: connection refused"
+                        ),
+                    )
+                else:
+                    output = SimpleNamespace(exit_code=0, stdout="ok\n", stderr="")
+                return SimpleNamespace(results=[SimpleNamespace(output=output)])
+
+        session = FakeSession()
+        runtime = ArlRuntime(session, run_id="run-1")
+        with patch("env.runtime.time.sleep", return_value=None):
+            output = runtime._exec_sync("echo ok")
+
+        self.assertEqual(session.calls, 2)
+        self.assertEqual(output.exit_code, 0)
+        self.assertEqual(output.stdout, "ok\n")
+
+    def test_arl_runtime_does_not_retry_user_command_failures(self) -> None:
+        from env.runtime import ArlRuntime
+
+        class FakeClient:
+            base_url = "http://gateway"
+
+        class FakeSession:
+            _client = FakeClient()
+            _session_id = "arl-session-1"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def execute(self, steps):
+                self.calls += 1
+                output = SimpleNamespace(exit_code=1, stdout="", stderr="pytest failed")
+                return SimpleNamespace(results=[SimpleNamespace(output=output)])
+
+        session = FakeSession()
+        runtime = ArlRuntime(session, run_id="run-1")
+        output = runtime._exec_sync("pytest")
+
+        self.assertEqual(session.calls, 1)
+        self.assertEqual(output.exit_code, 1)
+        self.assertEqual(output.stderr, "pytest failed")
+
+    def test_deployment_waits_until_runtime_is_executable(self) -> None:
+        deployment = ArlDeployment.from_config(
+            ArlDeploymentConfig(image="registry.local/r2e:latest", gateway_url="http://gateway"),
+            run_id="run-1",
+        )
+        calls = {"count": 0}
+
+        class FakeRuntime:
+            async def is_alive(self, *, timeout=None):
+                calls["count"] += 1
+                return SimpleNamespace(is_alive=calls["count"] >= 3, message="not ready")
+
+        deployment._runtime = FakeRuntime()
+
+        async def no_sleep(_delay):
+            return None
+
+        with patch("env.deployment.asyncio.sleep", side_effect=no_sleep):
+            asyncio.run(deployment._wait_until_runtime_ready(10))
+
+        self.assertEqual(calls["count"], 3)
+
     def test_deployment_config_accepts_required_interactive_shell(self) -> None:
         config = ArlDeploymentConfig.from_mapping(
             {

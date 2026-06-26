@@ -14,6 +14,7 @@ from typing import Any
 import yaml
 
 from p2a.api_providers import check_provider_available, normalize_provider_config, provider_source
+from p2a.datasets import SUPPORTED_EVAL_DATASETS, canonical_dataset
 from p2a.eval_cache import (
     DONE_STATUS,
     ERROR_STATUS,
@@ -30,7 +31,7 @@ from p2a.hf_assets import shared_p2a_data_dir
 from p2a.third_party_eval import _instance_id, _load_rows, _select_rows, is_system_error_kind, parse_limit_arg
 
 
-SUPPORTED_DATASETS = {"swebench-hard", "swebench-verified", "r2e-gym-subset"}
+SUPPORTED_DATASETS = set(SUPPORTED_EVAL_DATASETS)
 REDACT_KEYS = ("api_key", "apikey", "token", "secret", "password", "authorization")
 SYSTEM_ERROR_STATUS = "system_error"
 
@@ -85,19 +86,7 @@ def _parse_limit(value: Any, *, default: int | None) -> int | None:
 
 
 def _canonical_dataset(name: str) -> str:
-    aliases = {
-        "hard": "swebench-hard",
-        "swe-bench-hard": "swebench-hard",
-        "verified": "swebench-verified",
-        "swe-bench-verified": "swebench-verified",
-        "r2e": "r2e-gym-subset",
-        "r2e-gym": "r2e-gym-subset",
-    }
-    canonical = aliases.get(name, name)
-    if canonical not in SUPPORTED_DATASETS:
-        supported = ", ".join(sorted(SUPPORTED_DATASETS))
-        raise ValueError(f"dataset.name must be one of: {supported}")
-    return canonical
+    return canonical_dataset(name)
 
 
 def _redact(value: Any) -> Any:

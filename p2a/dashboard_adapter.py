@@ -64,6 +64,7 @@ CASE_FILTER_BUCKETS = ("direct", "standard", "others")
 DATASET_PARQUET_FILENAMES = {
     "swebench-hard": ("swe_bench_verified_hard.parquet",),
     "swebench-verified": ("swe_bench_verified.parquet",),
+    "swebench-pro": ("swe_bench_pro.parquet",),
     "r2e-gym-subset": ("r2e_gym_subset_p2a.parquet", "r2e_gym_subset_p2a.train.parquet"),
 }
 THINK_BLOCK_RE = re.compile(r"<think>([\s\S]*?)(?:</think>|\Z)", re.IGNORECASE)

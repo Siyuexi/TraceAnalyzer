@@ -96,6 +96,23 @@ class ArlDeployment(AbstractDeployment):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
 
+    async def _wait_until_runtime_ready(self, timeout: float) -> None:
+        deadline = asyncio.get_running_loop().time() + max(timeout, 1.0)
+        interval = max(float(os.getenv("ARL_EXEC_READY_INTERVAL", "3")), 0.1)
+        last_message = ""
+        while True:
+            remaining = max(deadline - asyncio.get_running_loop().time(), 0.0)
+            alive = await self.runtime.is_alive(timeout=min(30.0, max(1.0, remaining)))
+            if alive.is_alive:
+                return
+            last_message = alive.message or last_message
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"ARL sandbox did not become executable within {timeout:.0f}s: {last_message}"
+                )
+            await asyncio.sleep(min(interval, remaining))
+
     async def start(self, max_retries: int = 5) -> None:
         """Create an ARL SDK session and attach the local runtime adapter.
 
@@ -156,6 +173,8 @@ class ArlDeployment(AbstractDeployment):
 
         self._hooks.on_custom_step("Attaching ARL runtime adapter")
         self._runtime = ArlRuntime(self._session, run_id=self.run_id, logger=self.logger)
+        self._hooks.on_custom_step("Waiting for ARL execute readiness")
+        await self._wait_until_runtime_ready(self._config.startup_timeout)
         # Precompute can use one-shot execute calls only. Uni-Agent rollouts need
         # the persistent shell because AgentEnv.communicate() carries cwd/env state.
         eager_shell_timeout = float(os.getenv("ARL_EAGER_SHELL_TIMEOUT", "10"))
@@ -171,7 +190,6 @@ class ArlDeployment(AbstractDeployment):
             self.logger.warning(
                 f"Eager ARL shell open failed ({exc!r}); will open lazily on first interactive use"
             )
-        await self._runtime.is_alive(timeout=self._config.startup_timeout)
 
     async def stop(self) -> None:
         if self._stopped:

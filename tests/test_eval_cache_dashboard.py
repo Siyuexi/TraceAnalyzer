@@ -458,6 +458,87 @@ def test_unified_dashboard_snapshot_includes_db_model_metrics(tmp_path):
     assert snapshot["details"][0]["step_inspection"][0]["recovered_reads"][0]["file_path"] == "a.py"
 
 
+def test_swebench_pro_dashboard_mixes_p2a_and_resolution_only_cells(tmp_path):
+    db = tmp_path / "traces.sqlite"
+    bonus_dir = tmp_path / "bonus"
+    bonus_dir.mkdir()
+    (bonus_dir / "case-python.json").write_text(json.dumps(_bonus_map("case-python")), encoding="utf-8")
+
+    with ensure_db(db) as conn:
+        upsert_experiment(
+            conn,
+            experiment_id="exp-pro",
+            provider_source="internal_api",
+            dataset="swebench-pro",
+            config_snapshot={"dataset": "swebench-pro"},
+        )
+        upsert_planned_cells(
+            conn,
+            experiment_id="exp-pro",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-pro",
+            instance_ids=["case-python", "case-go"],
+        )
+
+        py_record = _set_dataset(_rollout("case-python", resolved=True), "swebench-pro")
+        py_record["repo_language"] = "python"
+        upsert_rollout_record(
+            conn,
+            experiment_id="exp-pro",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-pro",
+            record=py_record,
+        )
+
+        go_record = _set_dataset(_rollout("case-go", resolved=False), "swebench-pro")
+        go_record["repo_language"] = "go"
+        upsert_rollout_record(
+            conn,
+            experiment_id="exp-pro",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-pro",
+            record=go_record,
+        )
+        conn.commit()
+
+    snapshot = build_dashboard_snapshot(
+        DashboardRequest(
+            db_path=db,
+            experiment_id="exp-pro",
+            dataset="swebench-pro",
+            bonus_map_dir=bonus_dir,
+        )
+    )
+    details = {detail["instance_id"]: detail for detail in snapshot["details"]}
+
+    assert snapshot["datasets"][0]["dataset"] == "swebench-pro"
+    assert snapshot["model_metrics"][0]["target"] == 2
+    assert snapshot["model_metrics"][0]["resolved_rate"] == 0.5
+    assert snapshot["path_metric_detail_count"] == 1
+    assert snapshot["dynamic_traceable_detail_count"] == 1
+
+    assert details["case-python"]["has_bonus_map"] is True
+    assert details["case-python"]["chain_case_kind"] == "direct"
+    assert details["case-python"]["hit_ground_truth"] is True
+    assert details["case-python"]["resolved"] is True
+
+    assert details["case-go"]["has_bonus_map"] is False
+    assert details["case-go"]["not_chain_evaluable_reason"] == "missing_bonus_map"
+    assert details["case-go"]["resolved"] is False
+    assert details["case-go"]["data_source"] == "swebench-pro"
+
+    paths = write_static_dashboard(tmp_path / "swebench-pro-dashboard", snapshot)
+    html = paths["html"].read_text(encoding="utf-8")
+    assert "window.__P2A_DASHBOARD_SNAPSHOT__" in html
+    assert "swebench-pro" in html
+
+
 def test_dashboard_fills_issue_and_patch_from_dataset_parquet_when_db_raw_lacks_metadata(tmp_path):
     pd = pytest.importorskip("pandas")
     data_file = tmp_path / "swe_bench_verified_hard.parquet"

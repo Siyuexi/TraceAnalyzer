@@ -76,6 +76,28 @@ storage:
     assert config.bonus_map_dir == shared_root / "datasets" / "p2a" / "eval_bonus_maps" / "swebench-hard"
 
 
+def test_batch_config_accepts_swebench_pro_alias(monkeypatch, tmp_path):
+    monkeypatch.setenv("P2A_SHARED_ROOT", str(tmp_path / "shared"))
+    path = tmp_path / "batch.yaml"
+    path.write_text(
+        """
+provider:
+  source: openai_compatible
+dataset:
+  name: swe-bench-pro
+models:
+  - api_name: dummy-model
+storage:
+  precompute_maps: false
+""",
+        encoding="utf-8",
+    )
+
+    config = load_batch_config(path)
+
+    assert config.dataset_name == "swebench-pro"
+
+
 def test_batch_config_requires_explicit_models(tmp_path):
     path = tmp_path / "bad.yaml"
     path.write_text(
