@@ -77,6 +77,24 @@ def parse_string_list(value: Any) -> list[str]:
     return [text]
 
 
+def last_nonempty_line(text: Any) -> str | None:
+    """Return the last non-empty, stripped line of ``text`` (or None)."""
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    return lines[-1] if lines else None
+
+
+def swebench_pro_repo_path(*sources: Any) -> str:
+    """Resolve the SWE-Bench-Pro repo path, defaulting to ``/app``."""
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        for key in ("swebench_pro_repo_path", "repo_path"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return "/app"
+
+
 def _row_data_source(row: dict[str, Any]) -> str:
     for value in (row.get("data_source"), row.get("dataset")):
         if isinstance(value, str) and value:
@@ -120,7 +138,13 @@ def assert_training_data_sources_allowed(paths: str | Path | Iterable[str | Path
             df = pd.read_parquet(path, columns=["data_source", "extra_info"])
         except Exception:  # noqa: BLE001 - older/synthetic files may not carry both helper columns
             df = pd.read_parquet(path)
-        sources = {_row_data_source(row) for row in df.to_dict(orient="records")}
+        if "data_source" in df.columns and df["data_source"].notna().all():
+            sources = {
+                canonical_dataset(value) if value in DATASET_ALIASES else value
+                for value in df["data_source"].astype(str).unique()
+            }
+        else:
+            sources = {_row_data_source(row) for row in df.to_dict(orient="records")}
         bad = {source for source in sources if source in EVAL_ONLY_DATASETS}
         if bad:
             disallowed[str(path)] = bad

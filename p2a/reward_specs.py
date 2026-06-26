@@ -20,7 +20,7 @@ from uni_agent.reward.base import AbstractRewardSpec
 from uni_agent.reward.registry import register_reward_spec
 from uni_agent.utils import auto_await
 
-from p2a.datasets import parse_string_list
+from p2a.datasets import last_nonempty_line, parse_string_list, swebench_pro_repo_path
 
 
 def _script_from_metadata_or_dir(metadata: dict[str, Any], *, name: str, key: str) -> str:
@@ -49,17 +49,11 @@ def _restore_tests_command(metadata: dict[str, Any]) -> str:
     value = metadata.get("swebench_pro_restore_tests_cmd")
     if isinstance(value, str) and value.strip():
         return value.strip()
-    before = metadata.get("before_repo_set_cmd")
-    if isinstance(before, str):
-        lines = [line.strip() for line in before.splitlines() if line.strip()]
-        if lines:
-            return lines[-1]
-    return "true"
+    return last_nonempty_line(metadata.get("before_repo_set_cmd")) or "true"
 
 
 def _repo_path(metadata: dict[str, Any]) -> str:
-    value = metadata.get("swebench_pro_repo_path") or metadata.get("repo_path")
-    return str(value or "/app").strip() or "/app"
+    return swebench_pro_repo_path(metadata)
 
 
 def _safe_json_loads(raw: str) -> dict[str, Any]:
@@ -68,6 +62,25 @@ def _safe_json_loads(raw: str) -> dict[str, Any]:
     except (json.JSONDecodeError, TypeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _ordered_unique(items: list[str]) -> list[str]:
+    out = []
+    seen = set()
+    for item in items:
+        text = str(item or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+
+
+def _reward_test_args(metadata: dict[str, Any]) -> list[str]:
+    f2p = parse_string_list(metadata.get("FAIL_TO_PASS") or metadata.get("fail_to_pass"))
+    p2p = parse_string_list(metadata.get("PASS_TO_PASS") or metadata.get("pass_to_pass"))
+    if f2p or p2p:
+        return _ordered_unique([*f2p, *p2p])
+    return _ordered_unique(parse_string_list(metadata.get("selected_test_files_to_run")))
 
 
 @register_reward_spec("swe_bench_pro")
@@ -146,8 +159,8 @@ class SWEBenchProRewardSpec(AbstractRewardSpec):
         return paths
 
     def _build_eval_script(self, paths: dict[str, Path]) -> str:
-        selected = ",".join(parse_string_list(self.metadata.get("selected_test_files_to_run")))
-        selected_arg = shlex.quote(selected) if selected else ""
+        selected = _reward_test_args(self.metadata)
+        selected_arg = " ".join(shlex.quote(item) for item in selected)
         restore_cmd = _restore_tests_command(self.metadata)
         repo_path = _repo_path(self.metadata)
         quoted_repo = shlex.quote(repo_path)
@@ -157,7 +170,7 @@ class SWEBenchProRewardSpec(AbstractRewardSpec):
             [
                 "#!/bin/bash",
                 "set -uo pipefail",
-                f"cd {quoted_repo}",
+                f"cd {quoted_repo} || {{ printf '{{\"tests\":[],\"restore_error\":\"cd_failed\"}}\\n' > {output_path}; exit 0; }}",
                 f"git config --global --add safe.directory {quoted_repo} >/dev/null 2>&1 || true",
                 "restore_status=0",
                 "(",
@@ -186,12 +199,16 @@ class SWEBenchProRewardSpec(AbstractRewardSpec):
     def _grade(self, output: dict[str, Any]) -> dict[str, Any]:
         tests = output.get("tests") if isinstance(output, dict) else None
         tests = tests if isinstance(tests, list) else []
-        passed = {str(item.get("name")) for item in tests if isinstance(item, dict) and item.get("status") == "PASSED"}
+        passed = {
+            str(item.get("name"))
+            for item in tests
+            if isinstance(item, dict) and item.get("status") == "PASSED" and item.get("name") is not None
+        }
         f2p = set(parse_string_list(self.metadata.get("FAIL_TO_PASS") or self.metadata.get("fail_to_pass")))
         p2p = set(parse_string_list(self.metadata.get("PASS_TO_PASS") or self.metadata.get("pass_to_pass")))
         missing = sorted((f2p | p2p) - passed)
         report = {
-            "resolved": not missing,
+            "resolved": bool(f2p) and not missing,
             "found_eval_status": bool(tests),
             "n_tests": len(tests),
             "n_passed": len(passed),

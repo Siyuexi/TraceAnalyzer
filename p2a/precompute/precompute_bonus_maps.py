@@ -1102,6 +1102,50 @@ PY"""
     return diag
 
 
+def _prepare_swebench_pro_test_script(env, task: dict, test_script: str) -> dict:
+    """Prepare a SWE-Bench-Pro F2P-only precompute runner."""
+
+    diag: dict[str, object] = {}
+    run_tests = task.get("run_tests")
+    f2p_nodeids = _swebench_f2p_nodeids(task)
+    diag["swebench_pro_f2p_nodeids"] = f2p_nodeids
+    diag["swebench_f2p_nodeids"] = f2p_nodeids
+    diag["swebench_test_script_patch_stdout"] = "targeted_pytest=1\n" if f2p_nodeids else "targeted_pytest=0\n"
+    if not isinstance(run_tests, str) or not run_tests.strip():
+        env.write_file(
+            test_script,
+            "#!/bin/bash\n"
+            "echo 'SWE-Bench-Pro run_script.sh is missing from task metadata' >&2\n"
+            "exit 127\n",
+        )
+        env._run(f"chmod +x {shlex.quote(test_script)}", timeout=60)
+        diag["swebench_pro_run_tests_source"] = "missing"
+        return diag
+
+    official_script = "/tmp/p2a_swebench_pro_official_run.sh"
+    selected_args = " ".join(shlex.quote(item) for item in f2p_nodeids)
+    env.write_file(official_script, run_tests if run_tests.endswith("\n") else f"{run_tests}\n")
+    wrapper = "\n".join(
+        [
+            "#!/bin/bash",
+            "set -uo pipefail",
+            f"cd {shlex.quote(env.repo_path)} || exit 101",
+            f"chmod +x {shlex.quote(official_script)}",
+            f"bash {shlex.quote(official_script)} {selected_args}",
+            "",
+        ]
+    )
+    env.write_file(test_script, wrapper)
+    stdout, stderr = env._run(
+        f"chmod +x {shlex.quote(test_script)} {shlex.quote(official_script)}",
+        timeout=60,
+    )
+    diag["swebench_pro_run_tests_source"] = "metadata"
+    diag["swebench_pro_prepare_stdout"] = stdout
+    diag["swebench_pro_prepare_stderr"] = stderr
+    return diag
+
+
 def _module_name_from_file_path(file_path: str) -> str | None:
     """Best-effort Python module name for import-target diagnostics."""
     if not file_path.endswith(".py"):
@@ -1452,16 +1496,25 @@ def compute_dynamic_bonus_map(
         # Clear stale trace file, run tests
         env._run(f"rm -f {TRACE_FILE_PATH}")
 
-        test_script = "/run_tests.sh" if env.swebench_verified else f"{env.alt_path}/run_tests.sh"
+        swebench_like = bool(env.swebench_verified or getattr(env, "swebench_pro", False))
+        if getattr(env, "swebench_pro", False):
+            test_script = "/tmp/p2a_swebench_pro_run_tests.sh"
+        elif env.swebench_verified:
+            test_script = "/run_tests.sh"
+        else:
+            test_script = f"{env.alt_path}/run_tests.sh"
         test_script_diag = {}
-        if env.swebench_verified:
+        if getattr(env, "swebench_pro", False):
+            _debug_progress(instance_id, "prepare_swebench_pro_test_script")
+            test_script_diag = _prepare_swebench_pro_test_script(env, task, test_script)
+        elif env.swebench_verified:
             _debug_progress(instance_id, "prepare_swebench_test_script")
             test_script_diag = _prepare_swebench_test_script(env, task, test_script, all_modified)
-        if not env.swebench_verified:
+        if not swebench_like:
             env._run(f"sed -i '/pytest/{{/-rA/!s/pytest/pytest -rA/}}' {test_script}")
         # Repo fixups already ran after buggy checkout (see startup_fixup_command);
         # no separate normalization shim needed here.
-        timeout_env = "P2A_SWEBENCH_TEST_TIMEOUT" if env.swebench_verified else "P2A_TEST_TIMEOUT"
+        timeout_env = "P2A_SWEBENCH_TEST_TIMEOUT" if swebench_like else "P2A_TEST_TIMEOUT"
         default_timeout = 900
         test_timeout = _env_int(timeout_env, default_timeout, minimum=1)
         _debug_progress(instance_id, f"run_tests timeout={test_timeout}")
@@ -1470,17 +1523,17 @@ def compute_dynamic_bonus_map(
         raw_output = f"{stdout}\n{stderr}" if stderr else stdout
         f2p_nodeids = _swebench_f2p_nodeids(task)
         swebench_f2p_failure_observed = (
-            env.swebench_verified and _swebench_output_has_f2p_failure(raw_output, f2p_nodeids)
+            swebench_like and _swebench_output_has_f2p_failure(raw_output, f2p_nodeids)
         )
         swebench_f2p_observation = (
             _swebench_f2p_collection_observation(raw_output, f2p_nodeids)
-            if env.swebench_verified
+            if swebench_like
             else {"observed": [], "missing": []}
         )
         swebench_f2p_collection_missing = bool(
-            env.swebench_verified and f2p_nodeids and swebench_f2p_observation["missing"]
+            swebench_like and f2p_nodeids and swebench_f2p_observation["missing"]
         )
-        if test_exit == 0 and env.swebench_verified and _swebench_output_has_zero_tests(raw_output):
+        if test_exit == 0 and swebench_like and _swebench_output_has_zero_tests(raw_output):
             capture_diag = dict(capture_diag)
             capture_diag["test_exit_overridden_from_zero_tests"] = True
             test_exit = 5
@@ -1542,6 +1595,7 @@ def compute_dynamic_bonus_map(
         patch_stdout = str(test_script_diag.get("swebench_test_script_patch_stdout") or "")
         common_diag["swebench_targeted_f2p"] = bool(re.search(r"targeted_(pytest|django|sympy)=[1-9]", patch_stdout))
         common_diag["swebench_verified"] = env.swebench_verified
+        common_diag["swebench_pro"] = bool(getattr(env, "swebench_pro", False))
         common_diag["test_timeout"] = test_timeout
         trace_event_cap = _env_int("P2A_TRACE_MAX_EVENTS", DEFAULT_TRACE_MAX_EVENTS, minimum=0)
         trace_frame_cap = _env_int("P2A_TRACE_MAX_FRAMES", DEFAULT_TRACE_MAX_FRAMES, minimum=0)
@@ -1596,7 +1650,7 @@ def compute_dynamic_bonus_map(
             import_targets = _detect_import_targets(env, all_modified)
             common_diag["import_targets"] = import_targets
             imports_match = bool(import_targets) and all(item.get("matches_repo_path") for item in import_targets)
-            if env.swebench_verified and swebench_f2p_failure_observed and imports_match and _swebench_output_has_signature_entry_failure(raw_output):
+            if swebench_like and swebench_f2p_failure_observed and imports_match and _swebench_output_has_signature_entry_failure(raw_output):
                 print(f"  [{instance_id}] signature_mismatch: F2P failed before instrumented callable body entry. instrumented={len(instrumented_callables)}")
                 return _make_result(
                     instance_id,
@@ -1607,7 +1661,7 @@ def compute_dynamic_bonus_map(
                     reason_code="signature_mismatch_before_entry",
                     diagnostics=common_diag,
                 )
-            if newly_created and env.swebench_verified and swebench_f2p_failure_observed and imports_match:
+            if newly_created and swebench_like and swebench_f2p_failure_observed and imports_match:
                 print(f"  [{instance_id}] newly_created: F2P failed but only added callables were exercised. instrumented={len(instrumented_callables)}")
                 return _make_result(
                     instance_id,
@@ -1656,7 +1710,7 @@ def compute_dynamic_bonus_map(
             )
 
         # ── Decision node: NO_F2P ────────────────────────────────────
-        f2p_test_funcs = _get_f2p_test_funcs(task, raw_output, env.swebench_verified)
+        f2p_test_funcs = _get_f2p_test_funcs(task, raw_output, swebench_like)
 
         if f2p_test_funcs is None:
             # Can't parse test output at all
@@ -1750,7 +1804,7 @@ def compute_dynamic_bonus_map(
         f2p_diag["raw_gt_test_funcs_before_f2p"] = f2p_diag.get("raw_gt_test_funcs", [])
         print(f"  [{instance_id}] F2P filter: {len(raw_traces)} → {len(f2p_traces)} (F2P funcs: {f2p_test_funcs})")
 
-        if not f2p_traces and not env.swebench_verified:
+        if not f2p_traces and not swebench_like:
             added_test_funcs = _test_func_names_from_callables(newly_created)
             recovered_traces = _filter_traces_to_f2p(raw_traces, added_test_funcs)
             if recovered_traces:
@@ -1760,7 +1814,7 @@ def compute_dynamic_bonus_map(
                 f2p_diag["f2p_recovery_source"] = "newly_created_tests"
                 f2p_diag["f2p_recovery_test_funcs"] = sorted(added_test_funcs)
 
-        if not f2p_traces and env.swebench_verified and common_diag.get("swebench_targeted_f2p"):
+        if not f2p_traces and swebench_like and common_diag.get("swebench_targeted_f2p"):
             print(f"  [{instance_id}] F2P recovery via targeted SWE-bench run: {len(raw_traces)} traces")
             f2p_traces = raw_traces
             f2p_diag["f2p_trace_count"] = len(f2p_traces)

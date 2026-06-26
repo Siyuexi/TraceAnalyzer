@@ -38,7 +38,7 @@ def _sample(repo_language="python"):
         ),
         "fail_to_pass": "['tests/unit/utils/test_qtlog.py::TestHideQtWarning::test_unfiltered']",
         "pass_to_pass": '["tests/unit/utils/test_log.py::test_stub"]',
-        "selected_test_files_to_run": '["tests/unit/utils/test_qtlog.py::TestHideQtWarning::test_unfiltered"]',
+        "selected_test_files_to_run": '["tests/unit/utils/test_qtlog.py", "tests/unit/utils/test_log.py"]',
         "patch": "diff --git a/qutebrowser/utils/qtlog.py b/qutebrowser/utils/qtlog.py\n",
         "test_patch": "diff --git a/tests/unit/utils/test_qtlog.py b/tests/unit/utils/test_qtlog.py\n",
         "problem_statement": "Hide Qt warnings by prefix.",
@@ -120,6 +120,17 @@ def test_cmd_swebench_pro_builds_python_subset_with_scripts(monkeypatch, tmp_pat
     assert tools["reward"]["metadata"]["swebench_pro_restore_tests_cmd"] == "git checkout f91ace -- tests/unit/utils/test_qtlog.py"
 
 
+def test_cmd_swebench_pro_rejects_selected_tests_that_do_not_cover_p2p(monkeypatch, tmp_path):
+    build_data = _load_build_data_module()
+    sample = _sample()
+    sample["selected_test_files_to_run"] = '["tests/unit/utils/test_qtlog.py"]'
+
+    monkeypatch.setattr("p2a.hf_assets.load_shared_dataset", lambda *_args, **_kwargs: [sample])
+
+    with pytest.raises(ValueError, match="does not cover FAIL_TO_PASS/PASS_TO_PASS files"):
+        build_data.cmd_swebench_pro(SimpleNamespace(out=str(tmp_path / "out.parquet"), language="python", scripts_dir=None))
+
+
 def test_swebench_pro_reward_grades_f2p_and_p2p():
     from p2a.reward_specs import SWEBenchProRewardSpec
 
@@ -168,6 +179,31 @@ def test_swebench_pro_reward_eval_script_uses_app_repo_path():
     assert "python_not_found" in script
     assert "parser_failed" in script
     assert "/testbed" not in script
+
+
+def test_swebench_pro_reward_eval_script_runs_f2p_and_p2p_nodeids():
+    from p2a.reward_specs import SWEBenchProRewardSpec
+
+    spec = object.__new__(SWEBenchProRewardSpec)
+    spec.metadata = {
+        "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_fail"]),
+        "PASS_TO_PASS": json.dumps(["tests/test_other.py::test_pass"]),
+        "selected_test_files_to_run": json.dumps(["tests/test_demo.py"]),
+        "swebench_pro_repo_path": "/app",
+    }
+
+    script = spec._build_eval_script(
+        {
+            "run_script": Path("/tmp/run.sh"),
+            "parser": Path("/tmp/parser.py"),
+            "stdout": Path("/tmp/stdout.log"),
+            "stderr": Path("/tmp/stderr.log"),
+            "output": Path("/tmp/output.json"),
+        }
+    )
+
+    assert "tests/test_demo.py::test_fail tests/test_other.py::test_pass" in script
+    assert "bash /tmp/run.sh tests/test_demo.py >" not in script
 
 
 def test_swebench_pro_reward_eval_script_stops_when_restore_fails(tmp_path):
@@ -234,7 +270,83 @@ def test_swebench_pro_sandbox_execute_does_not_activate_verified_conda():
     adapter._execute_raw("echo ok")
 
     assert adapter.repo_path == "/app"
+    assert adapter.swebench_verified is False
     assert calls == ["echo ok"]
+
+
+def test_swebench_pro_create_sandbox_does_not_mark_verified(monkeypatch):
+    from p2a.precompute import uni_agent_sandbox
+
+    created = {}
+
+    class FakeConfig:
+        deployment = {"type": "local"}
+        env_variables = None
+        post_setup_cmd = None
+        tool_install_dir = "/tools"
+
+    class FakeAgentEnv:
+        def __init__(self, run_id, env_config):
+            created["run_id"] = run_id
+            created["env_config"] = env_config
+
+    monkeypatch.setattr("uni_agent.interaction.AgentEnvConfig", lambda **_kwargs: FakeConfig())
+    monkeypatch.setattr("uni_agent.interaction.AgentEnv", FakeAgentEnv)
+
+    task = {
+        "data_source": "swebench-pro",
+        "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_fail"]),
+        "extra_info": {
+            "tools_kwargs": {
+                "env": {"deployment": {"image": "registry.local/swebench-pro:latest"}},
+                "reward": {
+                    "name": "swe_bench_pro",
+                    "metadata": {"swebench_pro_repo_path": "/app"},
+                }
+            }
+        },
+    }
+
+    adapter = uni_agent_sandbox.create_uni_agent_sandbox(task, instance_id="demo")
+
+    assert adapter.swebench_pro is True
+    assert adapter.swebench_verified is False
+    assert adapter.repo_path == "/app"
+
+
+def test_swebench_pro_precompute_runner_uses_official_script_with_f2p_only():
+    from p2a.precompute.precompute_bonus_maps import _prepare_swebench_pro_test_script
+
+    writes = {}
+    commands = []
+
+    class FakeEnv:
+        repo_path = "/app"
+
+        def write_file(self, path, content):
+            writes[str(path)] = content
+
+        def _run(self, command, timeout=None):
+            commands.append(command)
+            return "", ""
+
+    task = {
+        "run_tests": "pytest \"$@\"\n",
+        "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_fail", "tests/test_demo.py::test_param[a b]"]),
+        "PASS_TO_PASS": json.dumps(["tests/test_other.py::test_pass"]),
+    }
+
+    diag = _prepare_swebench_pro_test_script(FakeEnv(), task, "/tmp/p2a_runner.sh")
+    wrapper = writes["/tmp/p2a_runner.sh"]
+
+    assert diag["swebench_pro_run_tests_source"] == "metadata"
+    assert "cd /app" in wrapper
+    assert "/opt/miniconda3/envs/testbed" not in wrapper
+    assert "tests/test_demo.py::test_fail" in wrapper
+    assert "'tests/test_demo.py::test_param[a b]'" in wrapper
+    assert "tests/test_other.py::test_pass" not in wrapper
+    assert writes["/tmp/p2a_swebench_pro_official_run.sh"] == "pytest \"$@\"\n"
+    assert any("chmod +x /tmp/p2a_runner.sh /tmp/p2a_swebench_pro_official_run.sh" in command for command in commands)
 
 
 def test_swebench_pro_task_detection_does_not_match_generic_python_docker_rows():
@@ -254,6 +366,7 @@ def test_swebench_pro_task_detection_does_not_match_generic_python_docker_rows()
                 "tools_kwargs": {
                     "reward": {
                         "metadata": {
+                            "data_source": "swebench-pro",
                             "docker_image": "jefzda/sweap-images:example-tag",
                             "repo_path": "/app",
                         }

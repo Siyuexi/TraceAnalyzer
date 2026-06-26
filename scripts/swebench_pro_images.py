@@ -45,7 +45,7 @@ def _metadata(row: dict[str, Any]) -> dict[str, Any]:
 
 def image_records(path: Path, *, repo_language: str = "python", limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
     df = pd.read_parquet(path)
-    if repo_language:
+    if repo_language and "repo_language" in df.columns:
         df = df[df["repo_language"].astype(str).str.lower() == repo_language.lower()]
     if offset:
         df = df.iloc[offset:]

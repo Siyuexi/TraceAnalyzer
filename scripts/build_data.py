@@ -46,6 +46,7 @@ from p2a.datasets import (  # noqa: E402
     SWEBENCH_HARD_DATA_SOURCE,
     SWEBENCH_PRO_DATA_SOURCE,
     SWEBENCH_VERIFIED_DATA_SOURCE,
+    last_nonempty_line,
     parse_string_list,
 )
 
@@ -178,8 +179,7 @@ def _swebench_pro_user_prompt(template: str, problem_statement: str, *, repo_pat
 
 
 def _swebench_pro_restore_tests_cmd(before_repo_set_cmd: str) -> str:
-    lines = [line.strip() for line in str(before_repo_set_cmd or "").splitlines() if line.strip()]
-    return lines[-1] if lines else "true"
+    return last_nonempty_line(before_repo_set_cmd) or "true"
 
 
 def _swebench_pro_post_setup_cmd(before_repo_set_cmd: str, *, repo_path: str = "/app") -> str:
@@ -196,6 +196,21 @@ def _swebench_pro_post_setup_cmd(before_repo_set_cmd: str, *, repo_path: str = "
             "git gc --prune=now >/dev/null 2>&1 || true",
         ]
     )
+
+
+def _selector_file(selector: str) -> str:
+    return str(selector or "").split("::", 1)[0].strip()
+
+
+def _validate_swebench_pro_selected_tests(instance_id: str, selected_tests: list[str], expected_nodeids: list[str]) -> None:
+    selected_files = {_selector_file(item) for item in selected_tests if _selector_file(item)}
+    expected_files = {_selector_file(item) for item in expected_nodeids if _selector_file(item)}
+    missing = sorted(expected_files - selected_files)
+    if missing:
+        raise ValueError(
+            f"SWE-Bench-Pro selected_test_files_to_run for {instance_id} does not cover "
+            f"FAIL_TO_PASS/PASS_TO_PASS files: {missing}"
+        )
 
 
 def _read_swebench_pro_scripts(scripts_dir: str | None, instance_id: str) -> dict[str, str]:
@@ -240,6 +255,7 @@ def cmd_swebench_pro(args) -> int:
         f2p = parse_string_list(ex.get("fail_to_pass"))
         p2p = parse_string_list(ex.get("pass_to_pass"))
         selected_tests = parse_string_list(ex.get("selected_test_files_to_run"))
+        _validate_swebench_pro_selected_tests(iid, selected_tests, [*f2p, *p2p])
         script_fields = _read_swebench_pro_scripts(scripts_dir, iid)
         if script_fields:
             scripts_hit += 1
