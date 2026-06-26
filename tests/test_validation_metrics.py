@@ -11,6 +11,27 @@ class FakeBatch:
         self.non_tensor_batch = non_tensor_batch
 
 
+def test_validation_records_infer_rollout_indexes_for_repeated_instances():
+    batch = FakeBatch(
+        {
+            "uid": np.array(["u0", "u1", "u2", "u3"], dtype=object),
+            "instance_id": np.array(["case-1", "case-1", "case-2", "case-2"], dtype=object),
+            "data_source": np.array(["unit", "unit", "unit", "unit"], dtype=object),
+        }
+    )
+
+    records = validation_records_from_batch(batch, output_texts=["", "", "", ""], scores=[0.0, 1.0, 0.0, 0.0])
+
+    assert [(record["instance_id"], record["rollout_index"]) for record in records] == [
+        ("case-1", 0),
+        ("case-1", 1),
+        ("case-2", 0),
+        ("case-2", 1),
+    ]
+    assert records[1]["rollout_id"] == "case-1:1"
+    assert records[1]["extra_fields"]["rollout_index"] == 1
+
+
 def _schema_v5_bonus_map(instance_id="demo__path"):
     return {
         "instance_id": instance_id,

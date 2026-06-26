@@ -1,5 +1,9 @@
 # Example OpenAI-compatible third-party rollout config for issue #27.
 # Keep the API key in the environment; never commit it.
+experiment:
+  rollouts_per_instance: 1
+  per_instance_parallelism: 1
+
 model:
   base_url_env: P2A_THIRD_PARTY_BASE_URL
   api_key_env: P2A_THIRD_PARTY_API_KEY

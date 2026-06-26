@@ -18,7 +18,7 @@ from p2a.datasets import SUPPORTED_EVAL_DATASETS, canonical_dataset
 from p2a.eval_cache import (
     DONE_STATUS,
     ERROR_STATUS,
-    completed_instance_ids,
+    completed_rollout_keys,
     ensure_db,
     ingest_artifacts,
     mark_cells_running,
@@ -55,6 +55,8 @@ class BatchConfig:
     limit: int | None
     offset: int
     max_turns: int
+    rollouts_per_instance: int
+    per_instance_parallelism: int
     run_timeout: str | None
     per_model_concurrency: int
     model_parallelism: int
@@ -83,6 +85,15 @@ def _parse_limit(value: Any, *, default: int | None) -> int | None:
     if isinstance(value, str):
         return parse_limit_arg(value)
     raise ValueError("experiment.limit must be an integer or 'all'")
+
+
+def _positive_int(value: Any, *, default: int, name: str) -> int:
+    if value is None:
+        return default
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(f"{name} must be >= 1")
+    return parsed
 
 
 def _canonical_dataset(name: str) -> str:
@@ -155,6 +166,16 @@ def load_batch_config(path: Path) -> BatchConfig:
         limit=_parse_limit(experiment_cfg.get("limit"), default=500),
         offset=int(experiment_cfg.get("offset") or 0),
         max_turns=int(experiment_cfg.get("max_turns") or 20),
+        rollouts_per_instance=_positive_int(
+            experiment_cfg.get("rollouts_per_instance", experiment_cfg.get("rollout_n")),
+            default=1,
+            name="experiment.rollouts_per_instance",
+        ),
+        per_instance_parallelism=_positive_int(
+            experiment_cfg.get("per_instance_parallelism", experiment_cfg.get("rollout_parallelism")),
+            default=1,
+            name="experiment.per_instance_parallelism",
+        ),
         run_timeout=str(experiment_cfg["run_timeout"]) if experiment_cfg.get("run_timeout") else None,
         per_model_concurrency=max(1, int(experiment_cfg.get("per_model_concurrency") or 1)),
         model_parallelism=max(1, int(experiment_cfg.get("model_parallelism") or len(models))),
@@ -256,6 +277,10 @@ def selected_instance_ids(data_file: Path, *, limit: int | None, offset: int) ->
     return instance_ids
 
 
+def _rollout_jobs(instance_ids: list[str], rollouts_per_instance: int) -> list[tuple[str, int]]:
+    return [(instance_id, rollout_index) for instance_id in instance_ids for rollout_index in range(rollouts_per_instance)]
+
+
 def _model_eval_config(config: BatchConfig, model: BatchModel, run_dir: Path) -> Path:
     payload: dict[str, Any] = {}
     for key in ("agent", "analysis"):
@@ -283,7 +308,7 @@ def _base_command(
     eval_config: Path,
     data_file: Path,
     run_dir: Path,
-    missing_ids: list[str],
+    missing_jobs: list[tuple[str, int]],
     config: BatchConfig,
     bonus_map_dir: Path | None,
 ) -> list[str]:
@@ -302,6 +327,10 @@ def _base_command(
         "0",
         "--n-parallel",
         str(config.per_model_concurrency),
+        "--rollouts-per-instance",
+        str(config.rollouts_per_instance),
+        "--per-instance-parallelism",
+        str(config.per_instance_parallelism),
         "--max-turns",
         str(config.max_turns),
         "--summary-out",
@@ -313,8 +342,8 @@ def _base_command(
     ]
     if bonus_map_dir is not None:
         command.extend(["--bonus-map-dir", str(bonus_map_dir)])
-    for instance_id in missing_ids:
-        command.extend(["--instance-id", instance_id])
+    for instance_id, rollout_index in missing_jobs:
+        command.extend(["--rollout-job", f"{instance_id}:{rollout_index}"])
     return command
 
 
@@ -371,7 +400,7 @@ def _mark_missing_error(
     *,
     config: BatchConfig,
     model: BatchModel,
-    instance_ids: list[str],
+    rollout_jobs: list[tuple[str, int]],
     error: str,
 ) -> None:
     with ensure_db(db_path) as conn:
@@ -385,6 +414,7 @@ def _mark_missing_error(
               AND model_api_name = ?
               AND dataset = ?
               AND instance_id = ?
+              AND rollout_index = ?
             """,
             [
                 (
@@ -397,8 +427,9 @@ def _mark_missing_error(
                     model.api_name,
                     config.dataset_name,
                     instance_id,
+                    rollout_index,
                 )
-                for instance_id in instance_ids
+                for instance_id, rollout_index in rollout_jobs
             ],
         )
         conn.commit()
@@ -416,6 +447,7 @@ async def run_model_phase(
 ) -> dict[str, Any]:
     source = provider_source(config.provider)
     target_ids = selected_instance_ids(data_file, limit=phase_limit, offset=config.offset)
+    target_jobs = _rollout_jobs(target_ids, config.rollouts_per_instance)
     with ensure_db(config.db_path) as conn:
         upsert_experiment(
             conn,
@@ -432,26 +464,27 @@ async def run_model_phase(
             model_label=model.label,
             dataset=config.dataset_name,
             instance_ids=target_ids,
+            rollouts_per_instance=config.rollouts_per_instance,
         )
-        done_ids = completed_instance_ids(
+        done_jobs = completed_rollout_keys(
             conn,
             experiment_id=config.experiment_id,
             provider_source=source,
             model_api_name=model.api_name,
             dataset=config.dataset_name,
         )
-        missing_ids = [instance_id for instance_id in target_ids if instance_id not in done_ids]
+        missing_jobs = [job for job in target_jobs if job not in done_jobs]
         mark_cells_running(
             conn,
             experiment_id=config.experiment_id,
             provider_source=source,
             model_api_name=model.api_name,
             dataset=config.dataset_name,
-            instance_ids=missing_ids,
+            rollout_jobs=missing_jobs,
         )
         conn.commit()
 
-    if not missing_ids:
+    if not missing_jobs:
         return {"model": model.label, "phase": phase, "status": "skipped", "n_missing": 0}
 
     run_dir = config.artifacts_dir / config.experiment_id / phase / config.dataset_name / _safe_slug(model.label)
@@ -461,7 +494,7 @@ async def run_model_phase(
         eval_config=eval_config,
         data_file=data_file,
         run_dir=run_dir,
-        missing_ids=missing_ids,
+        missing_jobs=missing_jobs,
         config=config,
         bonus_map_dir=bonus_map_dir,
     )
@@ -478,7 +511,7 @@ async def run_model_phase(
             config.db_path,
             config=config,
             model=model,
-            instance_ids=missing_ids,
+            rollout_jobs=missing_jobs,
             error=f"third_party_eval exited {returncode}; see {log_path}",
         )
         return {
@@ -487,7 +520,7 @@ async def run_model_phase(
             "status": "error",
             "returncode": returncode,
             "log": str(log_path),
-            "n_missing": len(missing_ids),
+            "n_missing": len(missing_jobs),
         }
 
     with ensure_db(config.db_path) as conn:
@@ -508,7 +541,7 @@ async def run_model_phase(
             "model": model.label,
             "phase": phase,
             "status": SYSTEM_ERROR_STATUS,
-            "n_missing": len(missing_ids),
+            "n_missing": len(missing_jobs),
             "n_ingested": n_ingested,
             "run_dir": str(run_dir),
             **system_error,
@@ -517,7 +550,7 @@ async def run_model_phase(
         "model": model.label,
         "phase": phase,
         "status": DONE_STATUS,
-        "n_missing": len(missing_ids),
+        "n_missing": len(missing_jobs),
         "n_ingested": n_ingested,
         "run_dir": str(run_dir),
     }

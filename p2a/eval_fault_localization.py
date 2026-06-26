@@ -310,6 +310,31 @@ def extract_run_step(record: dict) -> int | None:
     return None
 
 
+def extract_rollout_index(record: dict) -> int:
+    for container in _candidate_containers(record):
+        value = _maybe_json(container.get("rollout_index"))
+        if isinstance(value, bool) or value is None:
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and math.isfinite(value):
+            return int(value)
+        if isinstance(value, str):
+            try:
+                return int(float(value.strip()))
+            except ValueError:
+                continue
+    return 0
+
+
+def extract_rollout_id(record: dict) -> str | None:
+    for container in _candidate_containers(record):
+        value = _as_str(container.get("rollout_id"))
+        if value:
+            return value
+    return None
+
+
 def _normalize_tool_call(tool_call: Any) -> dict | None:
     tool_call = _maybe_json(tool_call)
     if not isinstance(tool_call, dict):
@@ -1342,6 +1367,8 @@ def score_record(
     instance_id = extract_instance_id(record)
     data_source = extract_data_source(record)
     run_step = extract_run_step(record)
+    rollout_index = extract_rollout_index(record)
+    rollout_id = extract_rollout_id(record)
     bonus_map = bonus_maps.get(instance_id) if instance_id else None
     step_reads, reads = extract_record_reads(record, tracking_mode, step_items=step_items)
     display_step_indices = _trace_step_indices(step_items)
@@ -1367,6 +1394,8 @@ def score_record(
         "instance_id": instance_id,
         "data_source": data_source,
         "run_step": run_step,
+        "rollout_index": rollout_index,
+        "rollout_id": rollout_id,
         "step_index_origin": "one_based_display",
         "has_bonus_map": bonus_map is not None,
         "has_step_traces": bool(step_reads),

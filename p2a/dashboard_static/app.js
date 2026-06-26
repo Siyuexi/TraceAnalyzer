@@ -24,6 +24,7 @@ const state = {
   },
   showGraphContext: false,
   graphEdgeFilters: { path: true, graph: false, trace: true },
+  passAtK: null,
 };
 
 const BONUS_MAP_METRIC_CASE_TYPES = new Set(["direct", "standard"]);
@@ -187,6 +188,52 @@ function fmt(value, digits = 3) {
 function pct(value) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   return `${(value * 100).toFixed(1)}%`;
+}
+
+function selectedRolloutK(row) {
+  const rolloutN = Number(row?.rollouts_per_instance || 1);
+  return Math.max(1, Math.min(Number(state.passAtK || rolloutN), rolloutN));
+}
+
+function avgAtValue(row, key) {
+  const k = selectedRolloutK(row);
+  return row?.avg_at?.[String(k)]?.[key] ?? row?.[key];
+}
+
+function avgAtStd(row, key) {
+  const k = selectedRolloutK(row);
+  return row?.avg_at_std?.[String(k)]?.[key] ?? row?.[`${key}_std`];
+}
+
+function withStd(row, key, formatter = fmt, digits = 3) {
+  const value = avgAtValue(row, key);
+  const shown = formatter === fmt ? formatter(value, digits) : formatter(value);
+  const std = avgAtStd(row, key);
+  if (selectedRolloutK(row) <= 1 || std === null || std === undefined || Number.isNaN(std)) return shown;
+  const stdShown = formatter === fmt ? formatter(std, digits) : formatter(std);
+  return `${shown} ± ${stdShown}`;
+}
+
+function passAtValue(row) {
+  const rolloutN = Number(row?.rollouts_per_instance || 1);
+  const k = selectedRolloutK(row);
+  return row?.pass_at?.[String(k)] ?? (k === rolloutN ? row?.pass_at_n : null);
+}
+
+function pathF1Value(row) {
+  const pathF1Key = avgAtValue(row, "avg_path_node_f1") === null || avgAtValue(row, "avg_path_node_f1") === undefined
+    ? "avg_chain_node_f1"
+    : "avg_path_node_f1";
+  if (avgAtValue(row, pathF1Key) !== null && avgAtValue(row, pathF1Key) !== undefined) {
+    return withStd(row, pathF1Key, pct);
+  }
+  const precisionKey = avgAtValue(row, "avg_path_node_precision") === null || avgAtValue(row, "avg_path_node_precision") === undefined
+    ? "avg_chain_node_precision"
+    : "avg_path_node_precision";
+  const recallKey = avgAtValue(row, "avg_path_node_recall") === null || avgAtValue(row, "avg_path_node_recall") === undefined
+    ? "avg_chain_node_recall"
+    : "avg_path_node_recall";
+  return pct(f1(avgAtValue(row, precisionKey), avgAtValue(row, recallKey)));
 }
 
 function numeric(value) {
@@ -877,39 +924,53 @@ function kpiColumns(hasCacheWrite) {
     { header: "Kind", fixed: true, value: (row) => row.source_kind },
     { header: "Experiment", fixed: true, value: (row) => row.experiment_id },
     { header: "Done", group: "scope", value: (row) => progress(row) },
-    { header: "Graph P.", group: "graph", value: (row) => pct(row.avg_read_precision) },
-    { header: "Graph R.", group: "graph", value: (row) => pct(row.avg_node_recall) },
-    { header: "Graph F1", group: "graph", value: (row) => pct(row.avg_hit_f1) },
-    { header: "Task success", group: "outcome", value: (row) => pct(row.resolved_rate ?? row.reward_rate) },
-    { header: "Symptom hit", group: "outcome", value: (row) => pct(row.anchor_hit_rate) },
-    { header: "Root cause hit", group: "outcome", value: (row) => pct(row.root_hit_rate) },
-    { header: "First symptom", group: "outcome", value: (row) => fmt(row.avg_first_anchor_step, 1) },
-    { header: "First root cause", group: "outcome", value: (row) => fmt(row.avg_first_root_step, 1) },
-    { header: "Path P.", group: "path", value: (row) => pct(row.avg_path_node_precision ?? row.avg_chain_node_precision) },
-    { header: "Path R.", group: "path", value: (row) => pct(row.avg_path_node_recall ?? row.avg_chain_node_recall) },
-    { header: "Path F1", group: "path", value: (row) => pct(row.avg_path_node_f1 ?? row.avg_chain_node_f1 ?? f1(row.avg_path_node_precision ?? row.avg_chain_node_precision, row.avg_path_node_recall ?? row.avg_chain_node_recall)) },
-    { header: "Order score", group: "exploration_behavior", value: (row) => fmt(row.avg_order_score) },
-    { header: "Reverse rate", group: "exploration_behavior", value: (row) => pct(row.reverse_order_rate) },
-    { header: "Miracle rate", group: "exploration_behavior", value: (row) => pct(row.miracle_rate) },
-    { header: "Loop trace", group: "exploration_behavior", value: (row) => pct(row.loop_trace_rate) },
-    { header: "Error spiral", group: "exploration_behavior", value: (row) => pct(row.error_spiral_rate) },
-    { header: "Blocks", group: "purpose_blocks", value: (row) => fmt(row.avg_blocks_per_trace, 1) },
-    { header: "Achieved", group: "purpose_blocks", value: (row) => pct(row.block_achieve_rate) },
-    { header: "Wasted", group: "purpose_blocks", value: (row) => pct(row.block_waste_rate) },
-    { header: "Loop blocks", group: "purpose_blocks", value: (row) => pct(row.block_loop_rate) },
-    { header: "Turns", group: "efficiency_cost", value: (row) => fmt(row.avg_turns, 1) },
-    { header: "Tools", group: "efficiency_cost", value: (row) => fmt(row.avg_tool_calls, 1) },
-    { header: "Wall", group: "efficiency_cost", value: (row) => fmt(row.avg_wall_time, 1) },
-    { header: "In", group: "efficiency_cost", value: (row) => token(row.avg_input_tokens) },
-    { header: "Out", group: "efficiency_cost", value: (row) => token(row.avg_output_tokens) },
-    { header: "Reason", group: "efficiency_cost", value: (row) => token(row.avg_reasoning_tokens) },
+    { header: "Graph P.", group: "graph", value: (row) => withStd(row, "avg_read_precision", pct) },
+    { header: "Graph R.", group: "graph", value: (row) => withStd(row, "avg_node_recall", pct) },
+    { header: "Graph F1", group: "graph", value: (row) => withStd(row, "avg_hit_f1", pct) },
+    { header: "Pass@K", group: "outcome", value: (row) => pct(passAtValue(row)) },
+    { header: "Avg@K", group: "outcome", value: (row) => withStd(row, row.resolved_rate === null || row.resolved_rate === undefined ? "reward_rate" : "resolved_rate", pct) },
+    { header: "Symptom hit", group: "outcome", value: (row) => withStd(row, "anchor_hit_rate", pct) },
+    { header: "Root cause hit", group: "outcome", value: (row) => withStd(row, "root_hit_rate", pct) },
+    { header: "First symptom", group: "outcome", value: (row) => withStd(row, "avg_first_anchor_step", fmt, 1) },
+    { header: "First root cause", group: "outcome", value: (row) => withStd(row, "avg_first_root_step", fmt, 1) },
+    { header: "Path P.", group: "path", value: (row) => withStd(row, row.avg_path_node_precision === null || row.avg_path_node_precision === undefined ? "avg_chain_node_precision" : "avg_path_node_precision", pct) },
+    { header: "Path R.", group: "path", value: (row) => withStd(row, row.avg_path_node_recall === null || row.avg_path_node_recall === undefined ? "avg_chain_node_recall" : "avg_path_node_recall", pct) },
+    { header: "Path F1", group: "path", value: (row) => pathF1Value(row) },
+    { header: "Order score", group: "exploration_behavior", value: (row) => withStd(row, "avg_order_score") },
+    { header: "Reverse rate", group: "exploration_behavior", value: (row) => withStd(row, "reverse_order_rate", pct) },
+    { header: "Miracle rate", group: "exploration_behavior", value: (row) => withStd(row, "miracle_rate", pct) },
+    { header: "Loop trace", group: "exploration_behavior", value: (row) => withStd(row, "loop_trace_rate", pct) },
+    { header: "Error spiral", group: "exploration_behavior", value: (row) => withStd(row, "error_spiral_rate", pct) },
+    { header: "Blocks", group: "purpose_blocks", value: (row) => withStd(row, "avg_blocks_per_trace", fmt, 1) },
+    { header: "Achieved", group: "purpose_blocks", value: (row) => withStd(row, "block_achieve_rate", pct) },
+    { header: "Wasted", group: "purpose_blocks", value: (row) => withStd(row, "block_waste_rate", pct) },
+    { header: "Loop blocks", group: "purpose_blocks", value: (row) => withStd(row, "block_loop_rate", pct) },
+    { header: "Turns", group: "efficiency_cost", value: (row) => withStd(row, "avg_turns", fmt, 1) },
+    { header: "Tools", group: "efficiency_cost", value: (row) => withStd(row, "avg_tool_calls", fmt, 1) },
+    { header: "Wall", group: "efficiency_cost", value: (row) => withStd(row, "avg_wall_time", fmt, 1) },
+    { header: "In", group: "efficiency_cost", value: (row) => withStd(row, "avg_input_tokens", token) },
+    { header: "Out", group: "efficiency_cost", value: (row) => withStd(row, "avg_output_tokens", token) },
+    { header: "Reason", group: "efficiency_cost", value: (row) => withStd(row, "avg_reasoning_tokens", token) },
     { header: "Cost", group: "efficiency_cost", value: (row) => money(row.total_cost) },
-    { header: "Cache hit", group: "efficiency_cost", value: (row) => pct(row.cache_hit_rate) },
+    { header: "Cache hit", group: "efficiency_cost", value: (row) => withStd(row, "cache_hit_rate", pct) },
   ];
   if (hasCacheWrite) {
-    columns.push({ header: "Cache write", group: "efficiency_cost", value: (row) => pct(row.cache_write_rate) });
+    columns.push({ header: "Cache write", group: "efficiency_cost", value: (row) => withStd(row, "cache_write_rate", pct) });
   }
   return columns.filter((column) => column.fixed || metricGroupEnabled(column.group));
+}
+
+function maxRolloutN(rows) {
+  return Math.max(1, ...rows.map((row) => Number(row.rollouts_per_instance || 1)).filter(Number.isFinite));
+}
+
+function renderPassAtControl(rows) {
+  const maxN = maxRolloutN(rows);
+  if (!state.passAtK || state.passAtK > maxN) state.passAtK = maxN;
+  const options = Array.from({ length: maxN }, (_item, index) => index + 1)
+    .map((k) => `<option value="${k}" ${Number(state.passAtK) === k ? "selected" : ""}>${k}</option>`)
+    .join("");
+  return `<label class="pass-at-control">Pass/Avg K <select id="pass-at-k">${options}</select></label>`;
 }
 
 function renderModels(snapshot) {
@@ -925,6 +986,7 @@ function renderModels(snapshot) {
   const scopeNote = `Metrics and Traces both use the current global filters (${scopeBits.join("; ")}).`;
   document.getElementById("model-table").innerHTML = `
     <div class="panel-note">Metrics are scoped to dataset <strong>${esc(state.selectedDataset)}</strong>. ${esc(scopeNote)} Graph metrics score reads against the captured dependency Graph; Path metrics score the issue symptom-to-root-cause Path; Trace metrics describe the agent trajectory.</div>
+    ${renderPassAtControl(rows)}
     ${renderMetricGroupControls()}
     ${metricDefinitions("Metric definitions", MACRO_METRIC_GROUPS)}
     <div class="table-wrap kpi-table">${renderKpiTable(columns, rows)}</div>`;
@@ -935,6 +997,10 @@ function renderModels(snapshot) {
       state.metricGroupFilters[group] = Boolean(event.target.checked);
       renderModels(state.snapshot);
     });
+  });
+  document.getElementById("pass-at-k")?.addEventListener("change", (event) => {
+    state.passAtK = Number(event.target.value);
+    renderModels(state.snapshot);
   });
   document.querySelectorAll(".select-kpi-cell, #model-table tr[data-eval-cell-key]").forEach((el) => {
     el.addEventListener("click", () => {

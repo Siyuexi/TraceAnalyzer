@@ -23,6 +23,8 @@ experiment:
   stage: smoke
   limit: 500
   offset: 0
+  rollouts_per_instance: 1
+  per_instance_parallelism: 1
   max_turns: 20
   run_timeout: 15m
   per_model_concurrency: 8

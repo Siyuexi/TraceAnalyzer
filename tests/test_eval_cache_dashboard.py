@@ -357,6 +357,61 @@ def test_eval_cache_upserts_cells_without_duplicates(tmp_path):
     assert metrics_count == 1
 
 
+def test_eval_cache_migrates_v1_cells_to_rollout_schema(tmp_path):
+    db = tmp_path / "traces.sqlite"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE run_cells (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          experiment_id TEXT NOT NULL,
+          provider_source TEXT NOT NULL,
+          model_api_name TEXT NOT NULL,
+          model_label TEXT NOT NULL,
+          dataset TEXT NOT NULL,
+          instance_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          run_id TEXT,
+          artifact_rollouts TEXT,
+          artifact_details TEXT,
+          started_at TEXT,
+          ended_at TEXT,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (experiment_id, provider_source, model_api_name, dataset, instance_id)
+        );
+        INSERT INTO run_cells(
+          experiment_id, provider_source, model_api_name, model_label, dataset,
+          instance_id, status, created_at, updated_at
+        )
+        VALUES ('exp', 'internal_api', 'dummy-model', 'dummy', 'swebench-hard', 'case-1', 'done', 'now', 'now');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    with ensure_db(db) as migrated:
+        columns = {row["name"] for row in migrated.execute("PRAGMA table_info(run_cells)").fetchall()}
+        assert {"rollout_index", "rollout_id"} <= columns
+        row = migrated.execute("SELECT instance_id, rollout_index, status FROM run_cells").fetchone()
+        assert dict(row) == {"instance_id": "case-1", "rollout_index": 0, "status": "done"}
+        upsert_planned_cells(
+            migrated,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            instance_ids=["case-1"],
+            rollouts_per_instance=2,
+        )
+        migrated.commit()
+        rows = migrated.execute("SELECT rollout_index, status FROM run_cells ORDER BY rollout_index").fetchall()
+        assert [(row["rollout_index"], row["status"]) for row in rows] == [(0, "done"), (1, "pending")]
+
+
 def test_unified_dashboard_snapshot_includes_db_model_metrics(tmp_path):
     db = tmp_path / "traces.sqlite"
     bonus_dir = tmp_path / "bonus"
@@ -456,6 +511,71 @@ def test_unified_dashboard_snapshot_includes_db_model_metrics(tmp_path):
         {"name": "execute_bash", "arguments": [{"key": "command", "value": "cat /testbed/a.py"}]}
     ]
     assert snapshot["details"][0]["step_inspection"][0]["recovered_reads"][0]["file_path"] == "a.py"
+
+
+def test_eval_cache_aggregates_pass_at_n_and_avg_at_n(tmp_path):
+    db = tmp_path / "traces.sqlite"
+    with ensure_db(db) as conn:
+        upsert_experiment(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            dataset="swebench-hard",
+            config_snapshot={"ok": True},
+        )
+        upsert_planned_cells(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            instance_ids=["case-1", "case-2"],
+            rollouts_per_instance=2,
+        )
+        for instance_id, resolved_values in {"case-1": [False, True], "case-2": [False, False]}.items():
+            for rollout_index, resolved in enumerate(resolved_values):
+                record = _rollout(instance_id, resolved=resolved)
+                record["run_id"] = f"run-{instance_id}-{rollout_index}"
+                record["rollout_index"] = rollout_index
+                record["wall_time"] = 1.0 + rollout_index
+                upsert_rollout_record(
+                    conn,
+                    experiment_id="exp",
+                    provider_source="internal_api",
+                    model_api_name="dummy-model",
+                    model_label="dummy",
+                    dataset="swebench-hard",
+                    record=record,
+                )
+        conn.commit()
+
+        rows = aggregate_model_metrics(conn, experiment_id="exp")
+
+    row = rows[0]
+    assert row["target"] == 2
+    assert row["target_rollouts"] == 4
+    assert row["done"] == 2
+    assert row["done_rollouts"] == 4
+    assert row["rollouts_per_instance"] == 2
+    assert row["pass_at"] == {"1": 0.0, "2": 0.5}
+    assert row["pass_at_n"] == 0.5
+    assert row["avg_at"]["1"]["resolved_rate"] == 0.0
+    assert row["avg_at"]["2"]["resolved_rate"] == 0.25
+    assert row["resolved_rate"] == 0.25
+    assert row["resolved_rate_std"] == 0.25
+    assert row["avg_wall_time"] == 1.5
+    assert row["avg_wall_time_std"] == 0.0
+
+    snapshot = build_dashboard_snapshot(DashboardRequest(db_path=db, experiment_id="exp"))
+
+    metric = snapshot["model_metrics"][0]
+    assert metric["pass_at_n"] == 0.5
+    assert metric["avg_at"]["1"]["resolved_rate"] == 0.0
+    assert metric["resolved_rate"] == 0.25
+    assert metric["rollouts_per_instance"] == 2
+    details = sorted((detail["instance_id"], detail["rollout_index"]) for detail in snapshot["details"])
+    assert details == [("case-1", 0), ("case-1", 1), ("case-2", 0), ("case-2", 1)]
 
 
 def test_swebench_pro_dashboard_mixes_p2a_and_resolution_only_cells(tmp_path):

@@ -7,6 +7,7 @@
 # Usage:
 #   TRAIN_FILE=... TEST_FILE=... MODEL_PATH=... bash scripts/train_p2a.sh
 #   TRAIN_FILE=... TEST_FILE=... MODEL_PATH=... P2A_BONUS_MAP_DIR=... P2A_M_MAX=3.0 P2A_CREDIT_GRANULARITY=step bash scripts/train_p2a.sh
+#   P2A_TRAIN_ROLLOUT_N=8 P2A_VAL_ROLLOUT_N=1 bash scripts/train_p2a.sh
 set -xeuo pipefail
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.0}"
 export CUDA_PATH="${CUDA_PATH:-${CUDA_HOME}}"
@@ -167,7 +168,8 @@ update_weights_bucket_megabytes="${P2A_UPDATE_WEIGHTS_BUCKET_MB:-2048}"
 nccl_timeout="${P2A_NCCL_TIMEOUT:-9600}"
 
 train_prompt_bsz=0
-n_resp_per_prompt=8
+n_resp_per_prompt=${P2A_TRAIN_ROLLOUT_N:-${P2A_ROLLOUT_N:-8}}
+val_resp_per_prompt=${P2A_VAL_ROLLOUT_N:-${P2A_VALIDATION_ROLLOUT_N:-1}}
 train_prompt_mini_bsz=16
 total_rollout_steps=200000
 test_freq=10
@@ -360,7 +362,7 @@ PY
     actor_rollout_ref.rollout.val_kwargs.top_p=${val_top_p} \
     actor_rollout_ref.rollout.val_kwargs.top_k=${val_top_k} \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    actor_rollout_ref.rollout.val_kwargs.n=1 \
+    actor_rollout_ref.rollout.val_kwargs.n=${val_resp_per_prompt} \
     actor_rollout_ref.rollout.name=${rollout_name} \
     actor_rollout_ref.rollout.mode=${rollout_mode} \
     actor_rollout_ref.rollout.calculate_log_probs=True \

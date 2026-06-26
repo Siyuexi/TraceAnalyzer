@@ -29,6 +29,10 @@ from p2a.precompute.uni_agent_sandbox import build_agent_env_config, extract_too
 
 
 DEFAULT_CONFIG = {
+    "experiment": {
+        "rollouts_per_instance": 1,
+        "per_instance_parallelism": 1,
+    },
     "model": {
         "base_url_env": "P2A_THIRD_PARTY_BASE_URL",
         "api_key_env": "P2A_THIRD_PARTY_API_KEY",
@@ -165,6 +169,11 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dic
         agent_cfg["tool_install_timeout"] = args.tool_install_timeout
     if getattr(args, "skip_tool_install", None):
         agent_cfg["skip_tool_install_commands"] = args.skip_tool_install
+    experiment_cfg = config.setdefault("experiment", {})
+    if getattr(args, "rollouts_per_instance", None) is not None:
+        experiment_cfg["rollouts_per_instance"] = args.rollouts_per_instance
+    if getattr(args, "per_instance_parallelism", None) is not None:
+        experiment_cfg["per_instance_parallelism"] = args.per_instance_parallelism
     return config
 
 
@@ -273,6 +282,28 @@ def parse_limit_arg(value: str) -> int | None:
     if limit < 0:
         raise argparse.ArgumentTypeError("--limit must be a non-negative integer or 'all'")
     return limit
+
+
+def _positive_int(value: Any, *, default: int, name: str) -> int:
+    if value is None:
+        return default
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(f"{name} must be >= 1")
+    return parsed
+
+
+def parse_rollout_job(value: str) -> tuple[str, int]:
+    instance_id, sep, raw_index = str(value).rpartition(":")
+    if not sep or not instance_id:
+        raise argparse.ArgumentTypeError("--rollout-job must be formatted as <instance_id>:<rollout_index>")
+    try:
+        rollout_index = int(raw_index)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--rollout-job rollout_index must be an integer") from exc
+    if rollout_index < 0:
+        raise argparse.ArgumentTypeError("--rollout-job rollout_index must be non-negative")
+    return instance_id, rollout_index
 
 
 def _extra_info(row: dict[str, Any]) -> dict[str, Any]:
@@ -422,6 +453,7 @@ def build_dump_record(
     run_id: str,
     model_name: str,
     base_url: str,
+    rollout_index: int = 0,
     interaction_result: dict[str, Any] | None,
     reward_score: Any,
     reward_details: Any,
@@ -444,6 +476,8 @@ def build_dump_record(
     return {
         "schema_version": "p2a_third_party_rollout_v1",
         "run_id": run_id,
+        "rollout_index": rollout_index,
+        "rollout_id": f"{instance_id}:{rollout_index}" if instance_id is not None else str(rollout_index),
         "instance_id": instance_id,
         "data_source": _data_source(row),
         "model": model_name,
@@ -499,6 +533,7 @@ async def run_one(
     model_cfg: dict[str, Any],
     agent_cfg: dict[str, Any],
     provider_cfg: dict[str, Any] | None = None,
+    rollout_index: int = 0,
 ) -> dict[str, Any]:
     instance_id = _instance_id(row)
     run_id = f"p2a-third-party-{uuid.uuid4()}"
@@ -566,6 +601,7 @@ async def run_one(
         run_id=run_id,
         model_name=model_cfg["model_name"],
         base_url=model_cfg.get("base_url") or provider_source(provider_cfg),
+        rollout_index=rollout_index,
         interaction_result=interaction_result,
         reward_score=reward_score,
         reward_details=reward_details,
@@ -584,14 +620,36 @@ async def run_batch(
     agent_cfg: dict[str, Any],
     n_parallel: int,
     provider_cfg: dict[str, Any] | None = None,
+    rollouts_per_instance: int = 1,
+    per_instance_parallelism: int = 1,
+    rollout_jobs: list[tuple[str, int]] | None = None,
 ) -> list[dict[str, Any]]:
     semaphore = asyncio.Semaphore(max(n_parallel, 1))
+    row_by_id = {_instance_id(row): row for row in rows}
+    if rollout_jobs:
+        jobs = [(row_by_id[instance_id], rollout_index) for instance_id, rollout_index in rollout_jobs if instance_id in row_by_id]
+    else:
+        jobs = [(row, rollout_index) for row in rows for rollout_index in range(max(1, int(rollouts_per_instance or 1)))]
+    instance_semaphores: dict[str, asyncio.Semaphore] = {}
 
-    async def guarded(row: dict[str, Any]) -> dict[str, Any]:
+    def instance_semaphore(row: dict[str, Any]) -> asyncio.Semaphore:
+        instance_id = _instance_id(row) or f"row-{id(row)}"
+        if instance_id not in instance_semaphores:
+            instance_semaphores[instance_id] = asyncio.Semaphore(max(1, int(per_instance_parallelism or 1)))
+        return instance_semaphores[instance_id]
+
+    async def guarded(row: dict[str, Any], rollout_index: int) -> dict[str, Any]:
         async with semaphore:
-            return await run_one(row, model_cfg=model_cfg, agent_cfg=agent_cfg, provider_cfg=provider_cfg)
+            async with instance_semaphore(row):
+                return await run_one(
+                    row,
+                    model_cfg=model_cfg,
+                    agent_cfg=agent_cfg,
+                    provider_cfg=provider_cfg,
+                    rollout_index=rollout_index,
+                )
 
-    return await asyncio.gather(*(guarded(row) for row in rows))
+    return await asyncio.gather(*(guarded(row, rollout_index) for row, rollout_index in jobs))
 
 
 def write_analysis(
@@ -712,6 +770,15 @@ def main() -> int:
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--instance-id", action="append", default=[])
     parser.add_argument("--n-parallel", type=int, default=1)
+    parser.add_argument("--rollouts-per-instance", type=int, default=None)
+    parser.add_argument("--per-instance-parallelism", type=int, default=None)
+    parser.add_argument(
+        "--rollout-job",
+        action="append",
+        type=parse_rollout_job,
+        default=[],
+        help="Run one explicit rollout job formatted as <instance_id>:<rollout_index>; may be repeated",
+    )
     parser.add_argument("--provider-smoke-only", action="store_true")
     parser.add_argument("--base-url", help="Override model.base_url from config/env")
     parser.add_argument("--model-name", help="Override model.model_name from config/env")
@@ -742,6 +809,17 @@ def main() -> int:
     provider_cfg = normalize_provider_config(config.get("provider"))
     model_cfg = resolve_model_config(config)
     agent_cfg = dict(config.get("agent") or {})
+    experiment_cfg = dict(config.get("experiment") or {})
+    rollouts_per_instance = _positive_int(
+        experiment_cfg.get("rollouts_per_instance", experiment_cfg.get("rollout_n")),
+        default=1,
+        name="experiment.rollouts_per_instance",
+    )
+    per_instance_parallelism = _positive_int(
+        experiment_cfg.get("per_instance_parallelism", experiment_cfg.get("rollout_parallelism")),
+        default=1,
+        name="experiment.per_instance_parallelism",
+    )
 
     if args.provider_smoke_only:
         smoke = asyncio.run(run_provider_smoke(model_cfg, provider_cfg))
@@ -754,14 +832,23 @@ def main() -> int:
         _load_rows(args.data),
         limit=args.limit,
         offset=args.offset,
-        instance_ids=set(args.instance_id) if args.instance_id else None,
+        instance_ids=set(args.instance_id) if args.instance_id else {item[0] for item in args.rollout_job} if args.rollout_job else None,
     )
     if not rows:
         raise ValueError("No rows selected")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     records = asyncio.run(
-        run_batch(rows, model_cfg=model_cfg, agent_cfg=agent_cfg, n_parallel=args.n_parallel, provider_cfg=provider_cfg)
+        run_batch(
+            rows,
+            model_cfg=model_cfg,
+            agent_cfg=agent_cfg,
+            n_parallel=args.n_parallel,
+            provider_cfg=provider_cfg,
+            rollouts_per_instance=rollouts_per_instance,
+            per_instance_parallelism=per_instance_parallelism,
+            rollout_jobs=args.rollout_job or None,
+        )
     )
     write_jsonl(args.out, records)
     print(json.dumps({"rollouts": str(args.out), "n_records": len(records)}, indent=2))

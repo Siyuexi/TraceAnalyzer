@@ -347,6 +347,28 @@ tr.is-selected td {
   font-size: 12px;
   font-weight: 700;
 }
+.pass-at-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: #172033;
+  font-size: 12px;
+  font-weight: 700;
+}
+.pass-at-control select {
+  min-width: 58px;
+  height: 28px;
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  background: #fff;
+  color: #172033;
+  font: inherit;
+}
 .legend-step {
   display: inline-grid;
   grid-template-columns: 24px minmax(0, 1fr);

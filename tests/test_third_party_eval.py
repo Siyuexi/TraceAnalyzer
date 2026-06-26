@@ -108,6 +108,8 @@ def test_apply_cli_overrides_bounds_smoke_run():
             tool_install_timeout=18,
             skip_tool_install=["str_replace_editor"],
             reward_eval_timeout=20,
+            rollouts_per_instance=4,
+            per_instance_parallelism=2,
         ),
     )
 
@@ -121,6 +123,8 @@ def test_apply_cli_overrides_bounds_smoke_run():
     assert config["agent"]["tool_install_timeout"] == 18
     assert config["agent"]["skip_tool_install_commands"] == ["str_replace_editor"]
     assert config["agent"]["reward_eval_timeout"] == 20
+    assert config["experiment"]["rollouts_per_instance"] == 4
+    assert config["experiment"]["per_instance_parallelism"] == 2
 
 
 def test_prompt_accepts_parquet_numpy_array():

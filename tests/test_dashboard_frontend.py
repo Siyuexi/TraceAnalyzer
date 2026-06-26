@@ -811,7 +811,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             const expectedOrder = [
               "Done",
               "Graph P.", "Graph R.", "Graph F1",
-              "Task success", "Symptom hit", "Root cause hit", "First symptom", "First root cause",
+              "Pass@K", "Avg@K", "Symptom hit", "Root cause hit", "First symptom", "First root cause",
               "Path P.", "Path R.", "Path F1",
               "Order score", "Reverse rate", "Miracle rate", "Loop trace", "Error spiral",
               "Blocks", "Achieved", "Wasted", "Loop blocks",
@@ -830,7 +830,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             if (filteredColumnHeaders.includes("Graph P.") || filteredColumnHeaders.includes("Graph R.") || filteredColumnHeaders.includes("Graph F1")) {
               throw new Error("graph KPI group filter did not hide graph columns");
             }
-            if (!filteredColumnHeaders.includes("Task success") || !filteredColumnHeaders.includes("Path P.")) {
+            if (!filteredColumnHeaders.includes("Avg@K") || !filteredColumnHeaders.includes("Path P.")) {
               throw new Error("graph filter should not hide other KPI groups");
             }
             run("state.metricGroupFilters.graph = true;");

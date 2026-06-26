@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from p2a.third_party_batch import SYSTEM_ERROR_STATUS, _system_error_summary, load_batch_config, run_batch, sanitized_config_snapshot
+from p2a.third_party_eval import run_batch as run_eval_batch
 
 
 def test_load_batch_config_defaults_and_dummy_models(monkeypatch, tmp_path):
@@ -17,6 +18,8 @@ def test_load_batch_config_defaults_and_dummy_models(monkeypatch, tmp_path):
     assert config.experiment_id == "public-swebench-hard-demo"
     assert config.stage == "smoke"
     assert config.limit == 500
+    assert config.rollouts_per_instance == 1
+    assert config.per_instance_parallelism == 1
     assert [model.api_name for model in config.models] == [
         "dummy-model-a",
         "dummy-model-b",
@@ -96,6 +99,64 @@ storage:
     config = load_batch_config(path)
 
     assert config.dataset_name == "swebench-pro"
+
+
+def test_batch_config_parses_rollout_controls(monkeypatch, tmp_path):
+    monkeypatch.setenv("P2A_SHARED_ROOT", str(tmp_path / "shared"))
+    path = tmp_path / "batch.yaml"
+    path.write_text(
+        """
+provider:
+  source: openai_compatible
+dataset:
+  name: swebench-hard
+experiment:
+  rollouts_per_instance: 8
+  per_instance_parallelism: 2
+models:
+  - api_name: dummy-model
+storage:
+  precompute_maps: false
+""",
+        encoding="utf-8",
+    )
+
+    config = load_batch_config(path)
+
+    assert config.rollouts_per_instance == 8
+    assert config.per_instance_parallelism == 2
+
+
+def test_eval_batch_expands_rollouts_per_instance(monkeypatch):
+    calls = []
+
+    async def fake_run_one(row, *, rollout_index, **_kwargs):
+        calls.append((row["instance_id"], rollout_index))
+        return {"instance_id": row["instance_id"], "rollout_index": rollout_index}
+
+    monkeypatch.setattr("p2a.third_party_eval.run_one", fake_run_one)
+
+    rows = [{"instance_id": "case-1"}, {"instance_id": "case-2"}]
+    records = asyncio.run(
+        run_eval_batch(
+            rows,
+            model_cfg={"model_name": "dummy"},
+            agent_cfg={},
+            n_parallel=4,
+            rollouts_per_instance=3,
+            per_instance_parallelism=2,
+        )
+    )
+
+    assert sorted(calls) == [
+        ("case-1", 0),
+        ("case-1", 1),
+        ("case-1", 2),
+        ("case-2", 0),
+        ("case-2", 1),
+        ("case-2", 2),
+    ]
+    assert len(records) == 6
 
 
 def test_batch_config_requires_explicit_models(tmp_path):
@@ -178,3 +239,56 @@ storage:
 
     assert phases == ["smoke"]
     assert results[0]["status"] == SYSTEM_ERROR_STATUS
+
+
+def test_run_batch_tracks_missing_rollout_jobs(monkeypatch, tmp_path):
+    monkeypatch.setenv("P2A_SHARED_ROOT", str(tmp_path / "shared"))
+    path = tmp_path / "batch.yaml"
+    path.write_text(
+        """
+provider:
+  source: openai_compatible
+dataset:
+  name: swebench-hard
+experiment:
+  id: demo
+  stage: full
+  limit: 1
+  rollouts_per_instance: 2
+models:
+  - api_name: dummy-model
+storage:
+  precompute_maps: false
+""",
+        encoding="utf-8",
+    )
+    data = tmp_path / "data.jsonl"
+    data.write_text(json.dumps({"instance_id": "case-1", "data_source": "swebench-hard"}) + "\n", encoding="utf-8")
+    config = load_batch_config(path)
+    seen = []
+
+    async def fake_run_subprocess(command, **_kwargs):
+        seen.extend(item for index, item in enumerate(command) if index and command[index - 1] == "--rollout-job")
+        run_dir = Path(command[command.index("--out") + 1]).parent
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "rollouts.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps({"run_id": "r0", "instance_id": "case-1", "rollout_index": 0, "data_source": "swebench-hard"}),
+                    json.dumps({"run_id": "r1", "instance_id": "case-1", "rollout_index": 1, "data_source": "swebench-hard"}),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return 0, "ok"
+
+    monkeypatch.setattr("p2a.third_party_batch.check_provider_available", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("p2a.third_party_batch.resolve_data_file", lambda *_args, **_kwargs: data)
+    monkeypatch.setattr("p2a.third_party_batch.resolve_bonus_map_dir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("p2a.third_party_batch._run_subprocess", fake_run_subprocess)
+
+    results = asyncio.run(run_batch(config, env={}))
+
+    assert seen == ["case-1:0", "case-1:1"]
+    assert results[0]["n_ingested"] == 2
