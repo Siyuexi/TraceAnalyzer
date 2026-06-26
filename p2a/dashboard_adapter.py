@@ -543,6 +543,13 @@ def _enrich_details_from_bonus_map_dirs(details: list[dict[str, Any]], bonus_map
 
 def _step_inspection(record: dict[str, Any], step_details: list[dict[str, Any]]) -> list[dict[str, Any]]:
     traces = _as_sequence(record.get("p2a_step_traces"))
+    explicit_step_values: list[int] = []
+    for trace_value in traces:
+        trace = _as_mapping(trace_value)
+        value = trace.get("step_idx", trace.get("step_index"))
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            explicit_step_values.append(int(value))
+    explicit_step_offset = 1 if explicit_step_values and min(explicit_step_values) == 0 else 0
     by_trace_index = {
         int(detail.get("trace_index", index)): detail
         for index, detail in enumerate(step_details or [])
@@ -568,10 +575,17 @@ def _step_inspection(record: dict[str, Any], step_details: list[dict[str, Any]])
         computed_execution_error = _step_execution_error(trace, tool_results, observation)
         stale_scored_error = bool(scored.get("execution_error")) and not tool_results and not observation
         execution_error = bool(stale_scored_error or computed_execution_error)
+        raw_step_index = trace.get("step_idx", trace.get("step_index"))
+        if isinstance(scored.get("step_index"), int | float) and not isinstance(scored.get("step_index"), bool):
+            display_step_index = int(scored["step_index"])
+        elif isinstance(raw_step_index, int | float) and not isinstance(raw_step_index, bool):
+            display_step_index = int(raw_step_index) + explicit_step_offset
+        else:
+            display_step_index = index + 1
         out.append(
             {
                 "trace_index": index,
-                "step_index": trace.get("step_idx", scored.get("step_index", index)),
+                "step_index": display_step_index,
                 "tool_names": tool_names,
                 "tool_name": tool_names[0] if tool_names else "no-tool",
                 "tool_args": _jsonable(tool_args),
@@ -738,12 +752,38 @@ def _stored_step_order(step: dict[str, Any], fallback: int) -> int:
     return fallback
 
 
-def _stored_step_first_hits(detail: dict[str, Any]) -> dict[str, int]:
+def _stored_step_label_offset(detail: dict[str, Any]) -> int:
+    labels: list[int] = []
+    for step in detail.get("step_details") or []:
+        if not isinstance(step, dict):
+            continue
+        value = step.get("step_index")
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            labels.append(int(value))
+    return 1 if labels and min(labels) == 0 else 0
+
+
+def _stored_step_display_order(step: dict[str, Any], fallback: int, offset: int) -> int:
+    value = step.get("step_index")
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return int(value) + offset
+    value = step.get("trace_index")
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return int(value) + 1
+    return fallback + 1
+
+
+def _stored_step_first_hits(detail: dict[str, Any], *, display: bool = False) -> dict[str, int]:
     first_hits: dict[str, int] = {}
+    offset = _stored_step_label_offset(detail) if display else 0
     for fallback, step in enumerate(detail.get("step_details") or []):
         if not isinstance(step, dict):
             continue
-        order = _stored_step_order(step, fallback)
+        order = (
+            _stored_step_display_order(step, fallback, offset)
+            if display
+            else _stored_step_order(step, fallback)
+        )
         for node in _stored_step_hit_nodes(step):
             first_hits.setdefault(str(node["key"]), order)
     return first_hits
@@ -787,6 +827,7 @@ def _repair_order_semantics(detail: dict[str, Any]) -> None:
     roots = set(bonus_map.get("root_cause_nodes") or [])
     first_hits = _stored_step_first_hits(detail)
     if first_hits:
+        display_first_hits = _stored_step_first_hits(detail, display=True)
         detail["order_score"], detail["order_defined"] = _kendall_order(first_hits, bonus_map)
         detail["miracle_step"], detail["miracle_severity"] = _miracle_stats(
             first_hits,
@@ -796,8 +837,10 @@ def _repair_order_semantics(detail: dict[str, Any]) -> None:
         )
         first_anchor = _first_hit(first_hits, anchors)
         first_root = _first_hit(first_hits, roots)
-        detail["first_anchor_step"] = first_anchor
-        detail["first_root_step"] = first_root
+        display_first_anchor = _first_hit(display_first_hits, anchors)
+        display_first_root = _first_hit(display_first_hits, roots)
+        detail["first_anchor_step"] = display_first_anchor
+        detail["first_root_step"] = display_first_root
         if first_anchor is not None and first_root is not None:
             detail["anchor_before_root"] = first_anchor <= first_root
             detail["steps_anchor_to_root"] = first_root - first_anchor
