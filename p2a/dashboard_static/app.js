@@ -119,7 +119,6 @@ const TRACE_LEGEND_GROUPS = [
       { sample: '<span class="legend-step intermediate"><span class="legend-step-num">5</span><span>intermediate</span></span>', text: "This step hit an intermediate Graph node." },
       { sample: '<span class="legend-step fix-adapter"><span class="legend-step-num">6</span><span>fix-adapter</span></span>', text: "This step hit an upstream patched adapter." },
       { sample: '<span class="legend-step root"><span class="legend-step-num">7</span><span>root cause</span></span>', text: "This step hit root cause." },
-      { sample: '<span class="legend-step multi-hit" style="--step-bg: linear-gradient(90deg, #dcfce7 0 20%, #fef3c7 20% 40%, #dbeafe 40% 60%, #fce7f3 60% 80%, #fee2e2 80% 100%);"><span class="legend-step-num">3</span><span>split</span></span>', text: "One step hit multiple node roles." },
       { sample: '<span class="legend-step offmap"><span class="legend-step-num">9</span><span>off Path</span></span>', text: "Parsed read outside the Path." },
     ],
   },
@@ -130,6 +129,8 @@ const TRACE_LEGEND_GROUPS = [
       { sample: '<span class="legend-step edit"><span class="legend-step-num">4</span><span>edit</span></span>', text: "Write action did not hit root cause." },
       { sample: '<span class="legend-step neutral is-error"><span class="legend-step-num">6</span><span>failed</span></span>', text: "Tool or command execution failed." },
       { sample: '<span class="legend-step exec-other"><span class="legend-step-num">2</span><span>exec / other</span></span>', text: "Exec or other tool without a parsed read hit." },
+      { sample: '<span class="legend-step multi-hit" style="--step-bg: linear-gradient(90deg, #dcfce7 0 20%, #ffedd5 20% 40%, #dbeafe 40% 60%, #fce7f3 60% 80%, #fee2e2 80% 100%);"><span class="legend-step-num">3</span><span>split</span></span>', text: "Read step that hit multiple node roles." },
+      { sample: '<span class="legend-step symptom-root-cause"><span class="legend-step-num">3</span><span>S+RC</span></span>', text: "Read step that hit symptom + root cause." },
     ],
   },
 ];
@@ -151,7 +152,7 @@ const GRAPH_LEGEND_GROUPS = [
     items: [
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-path" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2563eb"></path></marker></defs><path class="graph-edge path" d="M12 20 C42 6, 74 6, 108 20" marker-end="url(#legend-arrow-path)"></path></svg>', text: "Path edge: fixed Graph edge on the symptom-to-root Path." },
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-context" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#667085"></path></marker></defs><path class="graph-edge context" d="M12 20 C42 32, 74 32, 108 20" marker-end="url(#legend-arrow-context)"></path></svg>', text: "Graph edge: fixed Graph edge outside the Path." },
-      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-trace" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#c2410c"></path></marker></defs><path class="graph-edge trace" d="M12 20 C42 6, 74 32, 108 20" marker-end="url(#legend-arrow-trace)"></path><text class="graph-trace-label" x="58" y="19">1</text></svg>', text: "Trace edge: observed jump between visited Graph nodes." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-trace" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#c2410c"></path></marker></defs><path class="graph-edge trace" d="M12 20 C42 6, 74 32, 108 20" marker-end="url(#legend-arrow-trace)"></path></svg>', text: "Trace edge: observed jump between adjacent Graph-hit steps when at least one side is single-hit." },
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-order" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2563eb"></path></marker></defs><circle cx="16" cy="19" r="10" fill="#dcfce7" stroke="#15803d" stroke-width="2"></circle><path class="graph-edge path" d="M28 19 C48 19, 62 19, 82 19" marker-end="url(#legend-arrow-order)"></path><circle cx="98" cy="19" r="10" fill="#fee2e2" stroke="#b42318" stroke-width="2"></circle></svg>', text: "Dependency direction: symptom to root cause." },
     ],
   },
@@ -159,6 +160,7 @@ const GRAPH_LEGEND_GROUPS = [
     title: "Symbols",
     items: [
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node symptom hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">7</text></g><text class="legend-graph-text" x="42" y="16">hit step</text><text class="legend-graph-sub" x="42" y="29">step 7</text></svg>', text: "Number is the first visited step." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><text class="graph-trace-label" x="18" y="23">3x4</text><text class="legend-graph-text" x="54" y="16">trace label</text><text class="legend-graph-sub" x="54" y="29">step x repeats</text></svg>', text: "Trace label 3x4 means first seen at step 3, repeated 4 times." },
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node path miss" transform="translate(20,19)"><circle r="14"></circle></g><text class="legend-graph-text" x="42" y="16">not hit</text><text class="legend-graph-sub" x="42" y="29">faded</text></svg>', text: "Faded node was not visited." },
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node path hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">4</text></g><text class="legend-graph-text" x="42" y="16">save x3</text><text class="legend-graph-sub" x="42" y="29">same span</text></svg>', text: "Multiple symbols share one source span." },
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><linearGradient id="graph-symptom-root-cause-fill" x1="0" y1="1" x2="1" y2="0"><stop offset="50%" stop-color="#dcfce7"></stop><stop offset="50%" stop-color="#fee2e2"></stop></linearGradient></defs><g class="graph-node symptom-root-cause hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">2</text></g><text class="legend-graph-text" x="42" y="16">S+RC</text><text class="legend-graph-sub" x="42" y="29">same callable</text></svg>', text: "Same callable has both roles." },
@@ -1081,19 +1083,24 @@ function hitNodeIsSymptom(node, detail) {
   return canonicalNodeRole(node?.node_role) === "symptom" || node?.selected_issue_anchor === true || node?.anchor === true || detailSymptomKeys(detail).has(node?.key);
 }
 
+function nodeIsFaultSidePatch(node) {
+  return node?.patched_callable === true || node?.patch_role === "root_cause" || node?.patch_role === "fix_adapter";
+}
+
 function hitNodeIsSymptomRootCause(node, detail) {
-  return hitNodeIsRootCause(node, detail) && hitNodeIsSymptom(node, detail);
+  return hitNodeIsSymptom(node, detail) && (hitNodeIsRootCause(node, detail) || nodeIsFaultSidePatch(node));
 }
 
 const STEP_ROLE_COLORS = {
   symptom: "#dcfce7",
-  "test-adapter": "#fef3c7",
+  "test-adapter": "#ffedd5",
   intermediate: "#dbeafe",
   "fix-adapter": "#fce7f3",
   root: "#fee2e2",
 };
 
 function stepNodeSegment(node, detail) {
+  if (hitNodeIsSymptomRootCause(node, detail)) return "symptom-root-cause";
   if (hitNodeIsSymptom(node, detail)) return "symptom";
   if (hitNodeIsRootCause(node, detail)) return "root";
   const role = canonicalNodeRole(node?.node_role);
@@ -1110,9 +1117,7 @@ function stepRoleSegments(step, detail) {
   if (step?.action_family === "edit" || (step?.write_actions || []).length || (scored.writes || []).length) return ["edit"];
   const roles = [];
   const present = new Set(nodes.map((node) => stepNodeSegment(node, detail)).filter(Boolean));
-  const onlySymptomRootCause = nodes.length > 0 && nodes.every((node) => hitNodeIsSymptomRootCause(node, detail));
-  if (onlySymptomRootCause) return ["symptom-root-cause"];
-  for (const role of ["symptom", "test-adapter", "intermediate", "fix-adapter", "root"]) {
+  for (const role of ["symptom-root-cause", "symptom", "test-adapter", "intermediate", "fix-adapter", "root"]) {
     if (present.has(role)) roles.push(role);
   }
   if (roles.length) return roles;
@@ -1133,10 +1138,79 @@ function stepSegmentsStyle(segments) {
   return ` style="--step-bg: linear-gradient(90deg, ${stops.join(", ")});"`;
 }
 
+function stepSegmentsMarkup(segments) {
+  const colorSegments = segments.filter((segment) => segment === "symptom-root-cause" || STEP_ROLE_COLORS[segment]);
+  if (colorSegments.length <= 1) return "";
+  return `<span class="step-segments" aria-hidden="true">${colorSegments.map((segment) => `<span class="step-segment ${esc(segment)}"></span>`).join("")}</span>`;
+}
+
 function nodeKeysFromSummaries(nodes) {
   return (nodes || [])
     .map((node) => node?.key)
     .filter(Boolean);
+}
+
+function rawStepLabel(step, fallback) {
+  const value = step?.step_index;
+  if (value !== null && value !== undefined && Number.isFinite(Number(value))) return Number(value);
+  return fallback + 1;
+}
+
+function stepLabelOffset(steps) {
+  const labels = (steps || [])
+    .map((step, index) => rawStepLabel(step, index))
+    .filter((value) => Number.isFinite(value));
+  return labels.length && Math.min(...labels) === 0 ? 1 : 0;
+}
+
+function displayStepLabel(step, detail, fallback = 0) {
+  const value = step?.step_index;
+  if (value !== null && value !== undefined && Number.isFinite(Number(value))) {
+    return Number(value) + stepLabelOffset(detailSteps(detail));
+  }
+  return fallback + 1;
+}
+
+function detailSteps(detail) {
+  const steps = (detail?.step_inspection || []).length ? detail.step_inspection : detail?.step_details || [];
+  return Array.isArray(steps) ? steps : [];
+}
+
+function stepHitNodesForFirstStep(step) {
+  const scored = step?.scored || step || {};
+  return scored.hit_nodes || [];
+}
+
+function displayFirstStepsByNode(detail) {
+  const steps = detailSteps(detail);
+  const offset = stepLabelOffset(steps);
+  const first = new Map();
+  steps.forEach((step, index) => {
+    const value = step?.step_index;
+    const label = value !== null && value !== undefined && Number.isFinite(Number(value))
+      ? Number(value) + offset
+      : index + 1;
+    for (const node of stepHitNodesForFirstStep(step)) {
+      const key = node?.key;
+      if (!key) continue;
+      if (!first.has(key) || label < first.get(key)) first.set(key, label);
+    }
+  });
+  return first;
+}
+
+function displayBlockIndex(block, detail, fallback = 0) {
+  const blocks = detail?.purpose_blocks || [];
+  const values = blocks
+    .map((item, index) => {
+      const value = item?.block_index;
+      return value !== null && value !== undefined && Number.isFinite(Number(value)) ? Number(value) : index + 1;
+    })
+    .filter((value) => Number.isFinite(value));
+  const offset = values.length && Math.min(...values) === 0 ? 1 : 0;
+  const raw = block?.block_index;
+  if (raw !== null && raw !== undefined && Number.isFinite(Number(raw))) return Number(raw) + offset;
+  return fallback + 1;
 }
 
 function finalEditNodeKeys(detail) {
@@ -1168,6 +1242,7 @@ function graphNodes(detail, { includeContext = state.showGraphContext } = {}) {
   const contextNodes = graphContextNodes(detail);
   const anchors = new Set(projection.anchors || []);
   const roots = new Set(projection.roots || []);
+  const displayFirstSteps = displayFirstStepsByNode(detail);
   const editedNodes = finalEditNodeKeys(detail);
   const topologyByKey = new Map((detail?.graph_topology?.nodes || []).map((node) => [node?.key, node]));
   const annotateNode = (node) => {
@@ -1181,6 +1256,7 @@ function graphNodes(detail, { includeContext = state.showGraphContext } = {}) {
       source_preview: node?.source_preview || topologyNode?.source_preview,
       selected_issue_anchor: Boolean(node?.selected_issue_anchor || anchors.has(node?.key)),
       root_cause: Boolean(node?.root_cause || roots.has(node?.key) || role === "root_cause"),
+      first_step: displayFirstSteps.has(node?.key) ? displayFirstSteps.get(node?.key) : node?.first_step ?? topologyNode?.first_step,
       final_edit: Boolean(editedNodes.has(node?.key)),
     });
   };
@@ -1278,6 +1354,8 @@ function aggregateGraph(nodes, edges) {
       first_step: hitSteps.length ? Math.min(...hitSteps) : null,
       selected_issue_anchor: members.some((member) => member.selected_issue_anchor),
       root_cause: members.some((member) => member.root_cause),
+      patched_callable: members.some((member) => member.patched_callable),
+      patch_role: members.find((member) => member.patch_role)?.patch_role,
     });
   });
   const aggregateEdgeByKey = new Map();
@@ -1320,13 +1398,25 @@ function stepHitNodeKeys(step) {
     .filter((key) => typeof key === "string" && key);
 }
 
-function firstHitNodeKeysFromProjection(detail) {
+function visibleStepHitKeys(step, toVisibleKey) {
+  const seen = new Set();
+  const keys = [];
+  stepHitNodeKeys(step).forEach((rawKey) => {
+    const key = toVisibleKey(rawKey);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    keys.push(key);
+  });
+  return keys;
+}
+
+function firstHitNodesFromProjection(detail) {
   const nodes = [...graphContextNodes(detail), ...pathNodes(detail)];
   return nodes
     .filter((node) => node?.first_step !== null && node?.first_step !== undefined)
     .sort((a, b) => Number(a.first_step) - Number(b.first_step))
-    .map((node) => node.key)
-    .filter((key) => typeof key === "string" && key);
+    .map((node) => ({ key: node.key, first_step: node.first_step }))
+    .filter((node) => typeof node.key === "string" && node.key);
 }
 
 function traceEdges(detail, model) {
@@ -1338,36 +1428,57 @@ function traceEdges(detail, model) {
   const rawSteps = (detail.step_inspection || []).length ? detail.step_inspection : detail.step_details || [];
   const steps = [...rawSteps]
     .sort((a, b) => Number(a.trace_index ?? a.step_index ?? 0) - Number(b.trace_index ?? b.step_index ?? 0));
-  const sequence = [];
-  const pushKey = (rawKey) => {
-    const key = toVisibleKey(rawKey);
-    if (!key) return;
-    if (sequence[sequence.length - 1] !== key) sequence.push(key);
-  };
-  steps.forEach((step) => {
-    const seenInStep = new Set();
-    stepHitNodeKeys(step).forEach((key) => {
-      if (seenInStep.has(key)) return;
-      seenInStep.add(key);
-      pushKey(key);
-    });
-  });
-  if (!sequence.length) firstHitNodeKeysFromProjection(detail).forEach(pushKey);
   const edgeByKey = new Map();
-  for (let index = 1; index < sequence.length; index += 1) {
-    const source = sequence[index - 1];
-    const target = sequence[index];
-    if (!source || !target || source === target) continue;
+  const addEdge = (source, target, firstStep) => {
+    if (!source || !target || source === target) return;
     const key = `${source}->${target}`;
-    const current = edgeByKey.get(key) || { source, target, caller: source, callee: target, edge_type: "trace", first_hop: index, count: 0 };
+    const current = edgeByKey.get(key) || { source, target, caller: source, callee: target, edge_type: "trace", first_step: firstStep, count: 0 };
     current.count += 1;
     edgeByKey.set(key, current);
+  };
+  const addStepEdges = (sourceStep, targetStep) => {
+    if (!sourceStep || !targetStep) return;
+    const sourceMulti = sourceStep.keys.length > 1;
+    const targetMulti = targetStep.keys.length > 1;
+    if (sourceMulti && targetMulti) return;
+    if (sourceMulti && targetStep.keys.every((target) => sourceStep.keys.includes(target))) return;
+    sourceStep.keys.forEach((source) => {
+      targetStep.keys.forEach((target) => addEdge(source, target, targetStep.step_label));
+    });
+  };
+  let previous = null;
+  let sawStepHit = false;
+  steps.forEach((step, index) => {
+    const keys = visibleStepHitKeys(step, toVisibleKey);
+    if (!keys.length) return;
+    sawStepHit = true;
+    const traceIndex = Number(step?.trace_index ?? index);
+    const stepLabel = displayStepLabel(step, detail, Number.isFinite(traceIndex) ? traceIndex : index);
+    const current = { keys, step_label: stepLabel };
+    addStepEdges(previous, current);
+    previous = current;
+  });
+  if (!sawStepHit) {
+    let fallbackPrevious = null;
+    const byStep = new Map();
+    firstHitNodesFromProjection(detail).forEach((node) => {
+      const key = toVisibleKey(node.key);
+      if (!key) return;
+      const label = node.first_step;
+      if (!byStep.has(label)) byStep.set(label, new Set());
+      byStep.get(label).add(key);
+    });
+    [...byStep.entries()].sort((a, b) => Number(a[0]) - Number(b[0])).forEach(([stepLabel, keys]) => {
+      const current = { keys: [...keys], step_label: stepLabel };
+      addStepEdges(fallbackPrevious, current);
+      fallbackPrevious = current;
+    });
   }
   return [...edgeByKey.values()];
 }
 
 function isSymptomRootCauseNode(node) {
-  return Boolean(node?.selected_issue_anchor && node?.root_cause);
+  return Boolean(node?.selected_issue_anchor && (node?.root_cause || nodeIsFaultSidePatch(node)));
 }
 
 function nodeRoleLabel(node) {
@@ -1782,8 +1893,8 @@ function renderGraph(detail) {
     const b = positions.get(edge.target);
     if (!a || !b) return "";
     const label = graphEdgeLabelPosition(a, b);
-    const hopLabel = edge.count > 1 ? `${edge.first_hop}x${edge.count}` : String(edge.first_hop);
-    return `<path class="graph-edge trace graph-trace-edge" d="${graphEdgePath(a, b, "trace")}" marker-end="url(#graph-arrow-trace)"><title>Trace edge ${esc(edge.source)} -> ${esc(edge.target)} first hop ${esc(edge.first_hop)}${edge.count > 1 ? ` repeated ${esc(edge.count)} times` : ""}</title></path><text class="graph-trace-label" x="${label.x.toFixed(1)}" y="${label.y.toFixed(1)}">${esc(hopLabel)}</text>`;
+    const stepLabel = edge.count > 1 ? `${edge.first_step}x${edge.count}` : String(edge.first_step);
+    return `<path class="graph-edge trace graph-trace-edge" d="${graphEdgePath(a, b, "trace")}" marker-end="url(#graph-arrow-trace)"><title>Trace edge ${esc(edge.source)} -> ${esc(edge.target)} first seen at step ${esc(edge.first_step)}${edge.count > 1 ? ` repeated ${esc(edge.count)} times` : ""}</title></path><text class="graph-trace-label" x="${label.x.toFixed(1)}" y="${label.y.toFixed(1)}">${esc(stepLabel)}</text>`;
   }).join("");
   const nodeSvg = nodes.map((node) => {
     const pos = positions.get(node.key);
@@ -1819,7 +1930,7 @@ function renderGraph(detail) {
     ? ` Hidden by arrow filter: ${hiddenFixedEdgeCount} fixed, ${hiddenTraversalEdgeCount} Trace.`
     : "";
   const note = edges.length || traversalEdges.length
-    ? `${scope} Showing edges: ${edgeFilterSummary}. Blue edges are Path edges; gray edges are Graph edges outside the Path; orange dashed edges are Trace edges over visible Graph nodes.${hiddenNote}`
+    ? `${scope} Showing edges: ${edgeFilterSummary}. Blue edges are Path edges; gray edges are Graph edges outside the Path; orange dashed edges are Trace edges between adjacent Graph-hit steps when at least one side is single-hit. Multi-hit read steps do not create internal edges, and multi-hit to multi-hit transitions are omitted. Trace labels show first step; mxn means first seen at step m and repeated n times.${hiddenNote}`
     : `${scope} Showing edges: ${edgeFilterSummary}. No edges are visible under the current edge filter.`;
   const hasSelectedSource = model.nodes.some((node) => node.key === state.selectedGraphNodeKey);
   return `<section class="graph-panel" aria-label="Graph">
@@ -1947,11 +2058,11 @@ function renderTimeline(detail) {
   if (!blocks.length) {
     return `<div class="timeline-grid">${[...byIndex.values()].map((step) => renderStepThumb(step, detail)).join("")}</div>`;
   }
-  return blocks.map((block) => {
+  return blocks.map((block, blockIndex) => {
     const steps = blockSteps(block).map((idx) => byIndex.get(Number(idx))).filter(Boolean);
     return `<section class="purpose-block">
       <div class="block-head">
-        <strong>Block ${esc(block.block_index)}</strong>
+        <strong>Block ${esc(displayBlockIndex(block, detail, blockIndex))}</strong>
         <span>${esc(block.family || "-")} ${esc(block.target_path || "")}</span>
       </div>
       <div class="timeline-grid">${steps.map((step) => renderStepThumb(step, detail)).join("") || '<span class="muted">No captured step in this block.</span>'}</div>
@@ -1965,12 +2076,14 @@ function renderStepThumb(step, detail) {
   const tone = stepTone(step, detail);
   const segments = stepRoleSegments(step, detail);
   const style = stepSegmentsStyle(segments);
+  const segmentMarkup = stepSegmentsMarkup(segments);
   const failed = step.execution_error === true || step.status === "error";
   const tool = step.tool_name || (step.tool_names || [step.scored?.family || "step"]).join("+");
   const family = step.action_family && step.action_family !== "other" ? `${step.action_family}: ` : "";
   const target = step.target_path || step.path || step.scored?.target_path || "";
   return `<button type="button" class="step-thumb ${tone} ${failed ? "is-error" : ""} ${selected ? "is-selected" : ""}" data-step-index="${traceIndex}" data-step-tone="${esc(tone)}" data-step-roles="${esc(segments.join(","))}"${style}>
-    <span class="step-num">${esc(step.step_index ?? traceIndex)}</span>
+    ${segmentMarkup}
+    <span class="step-num">${esc(displayStepLabel(step, detail, traceIndex))}</span>
     <span class="step-tool">${esc(`${family}${tool}`)}</span>
     <span class="step-target">${esc(target.split("/").slice(-2).join("/") || step.command || "no target")}</span>
   </button>`;
@@ -2082,6 +2195,7 @@ function nodeLineRange(node) {
 
 function groupedStepHitNodes(step, detail) {
   const groups = [
+    { key: "symptom-root-cause", label: "symptom + root cause", nodes: [] },
     { key: "symptom", label: "symptom", nodes: [] },
     { key: "test-adapter", label: "test-adapter", nodes: [] },
     { key: "intermediate", label: "intermediate", nodes: [] },
@@ -2130,7 +2244,7 @@ function renderStepDetail(detail) {
     return `<section class="step-detail"><h3>Trajectory detail</h3><div class="empty">Raw step content was not captured for this artifact.</div></section>`;
   }
   return `<section class="step-detail">
-    <h3>Step ${esc(step.step_index ?? step.trace_index)}</h3>
+    <h3>Step ${esc(displayStepLabel(step, detail, Number(step.trace_index ?? step.step_index ?? 0)))}</h3>
     <div class="detail-badges">
       ${step.execution_error || step.status === "error" ? badge("execution error", true, "bad") : ""}
       ${step.parse_error ? badge("parse error", true, "bad") : ""}

@@ -273,13 +273,13 @@ def test_format_report_contains_aggregate_and_instance_rows():
                 "hit_call_graph": True,
                 "hit_ground_truth": True,
                 "min_distance": 0.0,
-                "first_ground_truth_step": 0,
+                "first_ground_truth_step": 1,
             }
         ],
     )
 
     assert "Third-Party P2A Localization Baseline" in report
-    assert "| demo__abc123 | 1 | yes | yes | 0.0 | 0 |" in report
+    assert "| demo__abc123 | 1 | yes | yes | 0.0 | 1 |" in report
 
 
 def test_cache_rollouts_upserts_standard_third_party_artifacts(tmp_path):

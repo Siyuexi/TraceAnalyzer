@@ -525,6 +525,58 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             if (run(`nodeRoleLabel({node_role: "fix_adapter"})`) !== "fix-adapter") {
               throw new Error("fix_adapter should use public hyphenated label");
             }
+            if (run(`roleTone({node_role: "symptom", selected_issue_anchor: true, patched_callable: true, patch_role: "fix_adapter"})`) !== "symptom-root-cause") {
+              throw new Error("selected patched symptom should use dual graph tone");
+            }
+            if (run(`nodeRoleLabel({node_role: "symptom", selected_issue_anchor: true, patched_callable: true, patch_role: "fix_adapter"})`) !== "symptom + root cause") {
+              throw new Error("selected patched symptom should use dual graph label");
+            }
+            const zeroBasedStepLabel = run(`displayStepLabel({step_index: 0}, {step_details: [{step_index: 0}]}, 0)`);
+            if (zeroBasedStepLabel !== 1) {
+              throw new Error(`zero-based stored step label should display as 1: ${zeroBasedStepLabel}`);
+            }
+            const oneBasedStepLabel = run(`displayStepLabel({step_index: 2}, {step_details: [{step_index: 1}, {step_index: 2}]}, 1)`);
+            if (oneBasedStepLabel !== 2) {
+              throw new Error(`one-based stored step label should stay 2: ${oneBasedStepLabel}`);
+            }
+            const fallbackStepLabel = run(`displayStepLabel({trace_index: 3}, {step_details: [{step_index: 0}]}, 3)`);
+            if (fallbackStepLabel !== 4) {
+              throw new Error(`missing step_index fallback should be one-based: ${fallbackStepLabel}`);
+            }
+            const blockLabel = run(`displayBlockIndex({block_index: 0}, {purpose_blocks: [{block_index: 0}]}, 0)`);
+            if (blockLabel !== 1) {
+              throw new Error(`zero-based block label should display as 1: ${blockLabel}`);
+            }
+            const derivedFirstSteps = run(`JSON.stringify([...displayFirstStepsByNode({step_details: [
+              {trace_index: 0, step_index: 1, hit_nodes: []},
+              {trace_index: 1, step_index: 2, hit_nodes: [{key: "pkg/symptom.py::symptom"}]}
+            ]}).entries()])`);
+            if (derivedFirstSteps !== JSON.stringify([["pkg/symptom.py::symptom", 2]])) {
+              throw new Error(`Graph first-step labels should derive from step hits: ${derivedFirstSteps}`);
+            }
+            const traceEdgeSteps = run(`JSON.stringify(traceEdges({
+              step_details: [
+                {trace_index: 1, step_index: 2, hit_nodes: [{key: "A"}]},
+                {trace_index: 98, step_index: 99, hit_nodes: [{key: "C"}]},
+                {trace_index: 100, step_index: 101, hit_nodes: [{key: "A"}]},
+                {trace_index: 101, step_index: 102, hit_nodes: [{key: "C"}]}
+              ]
+            }, {nodes: [{key: "A"}, {key: "C"}]}).map((edge) => [edge.source, edge.target, edge.first_step, edge.count]))`);
+            if (traceEdgeSteps !== JSON.stringify([["A", "C", 99, 2], ["C", "A", 101, 1]])) {
+              throw new Error(`Trace edge labels should use first target step, not flattened hop index: ${traceEdgeSteps}`);
+            }
+            const multiHitTraceEdges = run(`JSON.stringify(traceEdges({
+              step_details: [
+                {trace_index: 1, step_index: 2, hit_nodes: [{key: "A"}, {key: "B"}]},
+                {trace_index: 98, step_index: 99, hit_nodes: [{key: "C"}]},
+                {trace_index: 100, step_index: 101, hit_nodes: [{key: "A"}, {key: "B"}]},
+                {trace_index: 101, step_index: 102, hit_nodes: [{key: "D"}, {key: "E"}]},
+                {trace_index: 102, step_index: 103, hit_nodes: [{key: "D"}]}
+              ]
+            }, {nodes: [{key: "A"}, {key: "B"}, {key: "C"}, {key: "D"}, {key: "E"}]}).map((edge) => [edge.source, edge.target, edge.first_step, edge.count]))`);
+            if (multiHitTraceEdges !== JSON.stringify([["A", "C", 99, 1], ["B", "C", 99, 1], ["C", "A", 101, 1], ["C", "B", 101, 1]])) {
+              throw new Error(`Trace edges should connect across multi-hit steps only when one side is unambiguous: ${multiHitTraceEdges}`);
+            }
             const blockedGraphRoute = run(`graphEdgeRouteOffset(
               {caller: "manager", callee: "update"},
               {x: 80, y: 55},
@@ -616,6 +668,26 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             if (dualNodeTone !== "symptom-root-cause") {
               throw new Error("same callable with symptom and root-cause roles should use dual-node tone");
             }
+            const patchedDualTone = run(`stepTone({scored: {hit_nodes: [
+              {key: "pkg/fix.py::FixAdapter.wrap", node_role: "symptom", selected_issue_anchor: true, patched_callable: true, patch_role: "fix_adapter"}
+            ]}}, state.snapshot.details[0])`);
+            if (patchedDualTone !== "symptom-root-cause") {
+              throw new Error("selected patched symptom should use dual step tone");
+            }
+            const dualSplitRoles = run(`JSON.stringify(stepRoleSegments({scored: {hit_nodes: [
+              {key: "pkg/fix.py::FixAdapter.wrap", node_role: "symptom", selected_issue_anchor: true, patched_callable: true, patch_role: "fix_adapter"},
+              {key: "framework/request.py::dispatch", node_role: "test_adapter"}
+            ]}}, state.snapshot.details[0]))`);
+            if (dualSplitRoles !== JSON.stringify(["symptom-root-cause", "test-adapter"])) {
+              throw new Error(`unexpected dual split roles: ${dualSplitRoles}`);
+            }
+            const dualSplitThumb = run(`renderStepThumb({trace_index: 3, scored: {hit_nodes: [
+              {key: "pkg/fix.py::FixAdapter.wrap", node_role: "symptom", selected_issue_anchor: true, patched_callable: true, patch_role: "fix_adapter"},
+              {key: "framework/request.py::dispatch", node_role: "test_adapter"}
+            ]}}, state.snapshot.details[0])`);
+            for (const needle of ["step-thumb multi-hit", "data-step-roles=\\"symptom-root-cause,test-adapter\\"", "step-segment symptom-root-cause", "step-segment test-adapter"]) {
+              if (!dualSplitThumb.includes(needle)) throw new Error(`missing dual split thumb fragment: ${needle}`);
+            }
             const editTone = run(`stepTone({action_family: "edit", write_actions: [{file_path: "pkg/other.py"}]}, state.snapshot.details[0])`);
             if (editTone !== "edit") {
               throw new Error("non-root write step should use edit tone");
@@ -644,6 +716,12 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             }
             if (!(nodeHitHtml.indexOf("node-hit-group symptom") < nodeHitHtml.indexOf("node-hit-group test-adapter") && nodeHitHtml.indexOf("node-hit-group test-adapter") < nodeHitHtml.indexOf("node-hit-group intermediate") && nodeHitHtml.indexOf("node-hit-group intermediate") < nodeHitHtml.indexOf("node-hit-group fix-adapter") && nodeHitHtml.indexOf("node-hit-group fix-adapter") < nodeHitHtml.indexOf("node-hit-group root"))) {
               throw new Error("node hit groups should render in Graph role order");
+            }
+            const dualNodeHitHtml = run(`renderStepNodeHits({scored: {hit_nodes: [
+              {key: "pkg/fix.py::FixAdapter.wrap", file_path: "pkg/fix.py", start_line: 10, end_line: 12, node_role: "symptom", selected_issue_anchor: true, patched_callable: true, patch_role: "fix_adapter"}
+            ]}}, state.snapshot.details[0])`);
+            for (const needle of ["node-hit-group symptom-root-cause", "symptom + root cause", "pkg/fix.py", "FixAdapter.wrap"]) {
+              if (!dualNodeHitHtml.includes(needle)) throw new Error(`missing dual node hit fragment: ${needle}`);
             }
             if (!stepHtml.includes('detail-toggle observation-toggle" open')) {
               throw new Error("observation toggle should default open");
@@ -682,8 +760,17 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
               if (stepHtml.includes(needle)) throw new Error(`stale inspector fragment: ${needle}`);
             }
             const legendHtml = elements.get("trace-legend").innerHTML;
-            for (const needle of ["Trace Patterns", "Read Step Colors", "Write / Execute / Other Step Colors", "legend-icon", "Hit symptom: observed failure signal", "Hit root cause: expected cause or fix target", "Edited root cause: a write landed on a root-cause node", "Loop: repeated purpose block", "Reverse: traversal goes against dependency order", "Write action modified root cause", "Write action did not hit root cause", "One step hit multiple node roles", "Tool or command execution failed", "Exec or other tool without a parsed read hit", "exec / other", "Parsed read outside the Path", "Graph", "Nodes", "Edges", "Symbols", "test harness", "symptom", "intermediate", "Number is the first visited step", "test-adapter", "fix-adapter", "Last edit landed on this node", "Trace edge", "Faded node was not visited", "Path edge", "Graph edge", "Dependency direction", 'x1="0" y1="1" x2="1" y2="0"']) {
+            for (const needle of ["Trace Patterns", "Read Step Colors", "Write / Execute / Other Step Colors", "legend-icon", "Hit symptom: observed failure signal", "Hit root cause: expected cause or fix target", "Edited root cause: a write landed on a root-cause node", "Loop: repeated purpose block", "Reverse: traversal goes against dependency order", "Write action modified root cause", "Write action did not hit root cause", "Read step that hit multiple node roles", "Tool or command execution failed", "Exec or other tool without a parsed read hit", "exec / other", "Parsed read outside the Path", "Graph", "Nodes", "Edges", "Symbols", "test harness", "symptom", "intermediate", "Number is the first visited step", "test-adapter", "fix-adapter", "Last edit landed on this node", "Trace edge", "observed jump between adjacent Graph-hit steps", "Trace label 3x4 means first seen at step 3, repeated 4 times", "Faded node was not visited", "Path edge", "Graph edge", "Dependency direction", 'x1="0" y1="1" x2="1" y2="0"']) {
               if (!legendHtml.includes(needle)) throw new Error(`missing trajectory legend fragment: ${needle}`);
+            }
+            if (!fullGraphHtml.includes("Multi-hit read steps do not create internal edges") || !fullGraphHtml.includes("multi-hit to multi-hit transitions are omitted")) {
+              throw new Error("graph note should state how multi-hit reads affect Trace edges");
+            }
+            if (!(legendHtml.indexOf("Symbols") < legendHtml.indexOf("Trace label 3x4 means first seen at step 3, repeated 4 times"))) {
+              throw new Error("trace mxn label explanation should live in Symbols");
+            }
+            if (!fullGraphHtml.includes("mxn means first seen at step m and repeated n times")) {
+              throw new Error("graph note should explain Trace edge mxn labels");
             }
             for (const needle of ["Path node", "Path hit"]) {
               if (legendHtml.includes(needle)) throw new Error(`graph legend should not use stale generic node label: ${needle}`);
@@ -691,8 +778,15 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             if (legendHtml.includes("Trajectory labels and colors")) {
               throw new Error("trajectory legend should not render a title");
             }
-            if (legendHtml.includes("This step hit both symptom and root cause")) {
-              throw new Error("dual-node step legend should not occupy trajectory legend space");
+            for (const needle of ["legend-step symptom-root-cause", "Read step that hit symptom + root cause"]) {
+              if (!legendHtml.includes(needle)) throw new Error(`missing dual role legend fragment: ${needle}`);
+            }
+            const readGroupStart = legendHtml.indexOf("Read Step Colors");
+            const otherGroupStart = legendHtml.indexOf("Write / Execute / Other Step Colors");
+            const splitLegend = legendHtml.indexOf("Read step that hit multiple node roles");
+            const dualLegend = legendHtml.indexOf("Read step that hit symptom + root cause");
+            if (!(readGroupStart >= 0 && otherGroupStart > readGroupStart && splitLegend > otherGroupStart && dualLegend > splitLegend)) {
+              throw new Error("split and S+RC legends should be read-labeled Other colors, with S+RC after split");
             }
             for (const needle of ["Icons", "legend-block"]) {
               if (legendHtml.includes(needle)) throw new Error(`trajectory legend should not include deleted block/loop legend: ${needle}`);

@@ -746,6 +746,8 @@ def test_dashboard_does_not_reinfer_miracle_from_stored_first_hit_steps(tmp_path
 
     assert snapshot["details"][0]["miracle_step"] is False
     assert snapshot["details"][0]["block_miracle_step"] is False
+    assert snapshot["details"][0]["first_anchor_step"] == 2
+    assert snapshot["details"][0]["first_root_step"] == 2
     assert snapshot["model_metrics"][0]["miracle_rate"] == 0.0
     assert snapshot["path_metric_model_metrics"][0]["miracle_rate"] == 0.0
     assert snapshot["dynamic_traceable_model_metrics"][0]["miracle_rate"] == 0.0

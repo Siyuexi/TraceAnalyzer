@@ -533,6 +533,41 @@ def test_issue_anchor_prefers_specific_class_match_over_deeper_leaf_match():
     ]
 
 
+def test_issue_anchor_overrides_upstream_fix_adapter_display_role():
+    traces = [
+        [
+            _frame("tests/test_filters.py", "test_filters", 1),
+            _frame("django/contrib/admin/filters.py", "RelatedFieldListFilter.field_choices", 10, patched=True),
+            _frame("django/db/models/fields/__init__.py", "ForeignKey.get_choices", 20, patched=True),
+        ]
+    ]
+    modified = [
+        _modified("django/contrib/admin/filters.py", "RelatedFieldListFilter.field_choices", 10, 12),
+        _modified("django/db/models/fields/__init__.py", "ForeignKey.get_choices", 20, 22),
+    ]
+
+    result = build_call_graph_from_traces(
+        traces,
+        modified,
+        issue_text="Ordering problem in `admin.RelatedFieldListFilter`.",
+    )
+
+    adapter = result["call_graph_nodes"]["django/contrib/admin/filters.py::RelatedFieldListFilter.field_choices"]
+    root = result["call_graph_nodes"]["django/db/models/fields/__init__.py::ForeignKey.get_choices"]
+    assert result["selected_issue_anchor_nodes"] == [
+        "django/contrib/admin/filters.py::RelatedFieldListFilter.field_choices"
+    ]
+    assert result["symptom_nodes"] == [
+        "django/contrib/admin/filters.py::RelatedFieldListFilter.field_choices"
+    ]
+    assert result["fix_adapter_nodes"] == []
+    assert result["root_cause_nodes"] == ["django/db/models/fields/__init__.py::ForeignKey.get_choices"]
+    assert adapter["node_role"] == "symptom"
+    assert adapter["patch_role"] == "fix_adapter"
+    assert adapter["patched_callable"] is True
+    assert root["node_role"] == "root_cause"
+
+
 def test_issue_anchor_matches_public_api_values_suffix():
     traces = [
         [
