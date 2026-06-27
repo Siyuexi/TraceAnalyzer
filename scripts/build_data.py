@@ -34,7 +34,7 @@ os.environ.setdefault("DEPLOYMENT", "vefaas")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/ on path
 
-MIRROR = "pair-diag-cn-guangzhou.cr.volces.com/code"
+MIRROR = os.getenv("P2A_IMAGE_REGISTRY", "pair-diag-cn-guangzhou.cr.volces.com/code")
 HARD_DIFFICULTIES = {"1-4 hours", ">4 hours"}
 CONFIG = Path(__file__).resolve().parents[1] / "config" / "bad_instances.json"
 R2E_DATA_SOURCE = "r2e-gym-subset"

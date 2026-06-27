@@ -12,6 +12,7 @@ export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.0}"
 export CUDA_PATH="${CUDA_PATH:-${CUDA_HOME}}"
 export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
 export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
+# Let Megatron/TE auto-select attention backend (do not override NVTE_FUSED_ATTN)
 
 SCRIPT_SRC_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 P2A_STAGE_LOCAL_RUNTIME="${P2A_STAGE_LOCAL_RUNTIME:-1}"
@@ -59,7 +60,7 @@ RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/swe_agent/runtime_env_arl.yaml
 # Agent-loop actors on every node load this path, so it must resolve on all of
 # them; the (staged) source tree is present per-node at the same location,
 # unlike RAY_DATA_HOME which is node-local to the head.
-DEFAULT_AGENT_CONFIG_PATH="${SRC_ROOT}/env/agent_config_arl.yaml"
+DEFAULT_AGENT_CONFIG_PATH="${SRC_ROOT}/env/agent_config_nexus.yaml"
 AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-"${DEFAULT_AGENT_CONFIG_PATH}"}
 PYTHON_BIN=${PYTHON_BIN:-"${UV_PROJECT_ENVIRONMENT}/bin/python"}
 RAY_BIN=${RAY_BIN:-"${UV_PROJECT_ENVIRONMENT}/bin/ray"}
@@ -114,7 +115,7 @@ clip_ratio_low=4e-4
 clip_ratio_high=4e-4
 
 max_prompt_length=$((1024 * 4))
-max_response_length=$(((1024 * 128) - max_prompt_length))
+max_response_length=$((1024 * 64))
 enable_overlong_buffer=False
 overlong_buffer_len=$((1024 * 4))
 overlong_penalty_factor=1.0
@@ -157,8 +158,8 @@ infer_ep=${INFER_EP:-1}
 # --performance-mode / --enable-return-routed-experts server flags, so they
 # default off and are opt-in for runtimes that carry the patched build.
 vllm_performance_mode="${VLLM_PERFORMANCE_MODE:-}"
-router_replay_mode="${ROUTER_REPLAY_MODE:-disabled}"
-enable_routing_replay="${ENABLE_ROUTING_REPLAY:-False}"
+router_replay_mode="${ROUTER_REPLAY_MODE:-R3}"
+enable_routing_replay="${ENABLE_ROUTING_REPLAY:-True}"
 rollout_engine_params=()
 if [[ -n "${vllm_performance_mode}" ]]; then
     rollout_engine_params+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.performance_mode=${vllm_performance_mode}")
@@ -343,7 +344,7 @@ PY
     actor_rollout_ref.rollout.response_length=${max_response_length} \
     actor_rollout_ref.rollout.multi_turn.enable=True \
     actor_rollout_ref.rollout.multi_turn.max_parallel_calls=1 \
-    actor_rollout_ref.rollout.agent.num_workers=8 \
+    actor_rollout_ref.rollout.agent.num_workers=${NUM_AGENT_WORKERS:-8} \
     actor_rollout_ref.rollout.agent.agent_loop_config_path=${AGENT_CONFIG_PATH} \
     actor_rollout_ref.rollout.agent.default_agent_loop=swe_agent \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
@@ -366,7 +367,7 @@ PY
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.nccl_timeout=${nccl_timeout} \
     actor_rollout_ref.hybrid_engine=False \
-    actor_rollout_ref.rollout.enforce_eager=True \
+    actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.disable_log_stats=False \
     actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=${update_weights_bucket_megabytes} \
@@ -388,7 +389,7 @@ PY
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.val_before_train=${val_before_train} \
-    trainer.save_freq=-1 \
+    trainer.save_freq=10 \
     trainer.total_epochs=20 \
     trainer.resume_mode=auto \
     trainer.log_val_generations=10 \
