@@ -2,6 +2,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -114,6 +115,8 @@ def test_training_guard_scans_nested_eval_only_markers(tmp_path):
 
 
 def test_cmd_swebench_pro_builds_python_subset_with_scripts(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "path", [path for path in sys.path if "uni-agent/examples/data_preprocess" not in path])
+    monkeypatch.delitem(sys.modules, "swe_bench_verified", raising=False)
     build_data = _load_build_data_module()
 
     scripts_dir = tmp_path / "run_scripts"

@@ -35,11 +35,18 @@ import pandas as pd
 # below carry pair-diag image refs, and agent_config_arl.yaml supplies ARL at launch.
 os.environ.setdefault("DEPLOYMENT", "vefaas")
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # src/ on path
+SRC_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SRC_ROOT))  # src/ on path
+
+
+def _ensure_uni_agent_data_preprocess_path() -> None:
+    path = str(SRC_ROOT / "uni-agent" / "examples" / "data_preprocess")
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 MIRROR = "pair-diag-cn-guangzhou.cr.volces.com/code"
 HARD_DIFFICULTIES = {"1-4 hours", ">4 hours"}
-CONFIG = Path(__file__).resolve().parents[1] / "config" / "bad_instances.json"
+CONFIG = SRC_ROOT / "config" / "bad_instances.json"
 
 from p2a.datasets import (  # noqa: E402
     R2E_DATA_SOURCE,
@@ -123,6 +130,7 @@ def cmd_swebench(args) -> int:
     from p2a.hf_assets import load_shared_dataset
     # swe_bench_verified's modal branch is import-safe on Python <3.11; we use only its prompts.
     os.environ["DEPLOYMENT"] = "modal"
+    _ensure_uni_agent_data_preprocess_path()
     from swe_bench_verified import SYSTEM_PROMPT, USER_PROMPT
 
     def reset(base: str) -> str:
@@ -227,6 +235,7 @@ def cmd_swebench_pro(args) -> int:
     from p2a.hf_assets import load_shared_dataset
 
     os.environ["DEPLOYMENT"] = "modal"
+    _ensure_uni_agent_data_preprocess_path()
     from swe_bench_verified import SYSTEM_PROMPT, USER_PROMPT
 
     language = (args.language or "python").strip().lower()
