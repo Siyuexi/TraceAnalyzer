@@ -450,7 +450,35 @@ function setTracePanelOpen(panel, open) {
 }
 
 function rowKey(detail) {
-  return `${detail.eval_cell_key || detail.experiment_key || "cell"}::${detail.instance_id || detail.record_index}`;
+  const rolloutId = detail?.rollout_id ? `id-${detail.rollout_id}` : `idx-${rolloutIndex(detail)}`;
+  return `${traceInstanceKey(detail)}::${rolloutId}`;
+}
+
+function traceInstanceId(detail) {
+  return detail?.instance_id || `record-${detail?.record_index ?? 0}`;
+}
+
+function traceInstanceKey(detail) {
+  return `${detailCellKey(detail) || "cell"}::${traceInstanceId(detail)}`;
+}
+
+function rolloutIndex(detail) {
+  const value = Number(detail?.rollout_index);
+  return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0;
+}
+
+function compareTraceDetails(a, b) {
+  const instanceCmp = String(traceInstanceId(a)).localeCompare(String(traceInstanceId(b)));
+  if (instanceCmp) return instanceCmp;
+  const rolloutCmp = rolloutIndex(a) - rolloutIndex(b);
+  if (rolloutCmp) return rolloutCmp;
+  return Number(a?.record_index ?? 0) - Number(b?.record_index ?? 0);
+}
+
+function detailsForInstance(details, instanceKey) {
+  return details
+    .filter((detail) => traceInstanceKey(detail) === instanceKey)
+    .sort(compareTraceDetails);
 }
 
 function datasetRows(snapshot) {
@@ -1949,7 +1977,24 @@ function renderGraphSourcePanel(model) {
   </aside>`;
 }
 
-function renderTraceTitleCard(detail) {
+function renderRolloutSelector(detail, snapshot) {
+  const rollouts = detailsForInstance(filteredDetails(snapshot), traceInstanceKey(detail));
+  if (rollouts.length <= 1) {
+    return `<div class="rollout-single">Rollout ${esc(rolloutIndex(detail) + 1)} · ${esc(traceRolloutOutcome(detail))}</div>`;
+  }
+  const successCount = rollouts.filter(traceResolved).length;
+  const options = rollouts.map((item) => {
+    const label = `Rollout ${rolloutIndex(item) + 1} · ${traceRolloutOutcome(item)}`;
+    return `<option value="${esc(rowKey(item))}" ${rowKey(item) === rowKey(detail) ? "selected" : ""}>${esc(label)}</option>`;
+  }).join("");
+  return `<label class="rollout-select-control">
+    <span>Rollout</span>
+    <select id="trace-rollout-select">${options}</select>
+    <strong>${esc(successCount)}/${esc(rollouts.length)} success</strong>
+  </label>`;
+}
+
+function renderTraceTitleCard(detail, snapshot) {
   const issue = detail.issue_description || "";
   const patch = detail.golden_patch || "";
   return `<div class="trace-overview-stack">
@@ -1958,7 +2003,10 @@ function renderTraceTitleCard(detail) {
         <strong>${esc(detail.instance_id || `record-${detail.record_index}`)}</strong>
         <div class="run-meta">${esc(detail.model_label || "-")} · ${esc(detail.run_id || "-")}</div>
       </div>
-      <div>${traceStatusIcons(detail)}</div>
+      <div class="trace-title-actions">
+        ${renderRolloutSelector(detail, snapshot)}
+        ${traceStatusIcons(detail)}
+      </div>
     </div>
     <details class="instance-overview-toggle">
       <summary>Instance overview</summary>
@@ -2129,19 +2177,50 @@ function traceSummary(detail) {
   return `${fmt(steps)} steps · ${fmt(blocks)} blocks${pathHits}`;
 }
 
-function renderTraceList(snapshot) {
-  const details = filteredDetails(snapshot);
-  const rows = details.map((detail) => {
-    const selected = rowKey(detail) === state.selectedTraceKey;
+function traceRolloutOutcome(detail) {
+  return traceResolved(detail) ? "success" : "failed";
+}
+
+function selectedRolloutForGroup(details) {
+  return details.find((detail) => rowKey(detail) === state.selectedTraceKey) || details[0] || null;
+}
+
+function traceRolloutSegments(details) {
+  const segments = details.map((detail) => {
     const resolved = traceResolved(detail);
-    const id = detail.instance_id || `record-${detail.record_index}`;
-    return `<button class="trace-row ${selected ? "is-selected" : ""} ${resolved ? "is-resolved" : "is-unresolved"}" type="button" data-trace-key="${esc(rowKey(detail))}" aria-label="${esc(`${id} ${resolved ? "resolved" : "unresolved"}`)}">
-      <span class="trace-id">${esc(detail.instance_id || `record-${detail.record_index}`)}</span>
-      <span class="trace-meta">${esc(traceSummary(detail))}</span>
-      ${traceStatusIcons(detail)}
+    const selected = rowKey(detail) === state.selectedTraceKey;
+    const label = `Rollout ${rolloutIndex(detail) + 1}: ${traceRolloutOutcome(detail)}`;
+    return `<span class="trace-rollout-segment ${resolved ? "is-resolved" : "is-unresolved"} ${selected ? "is-selected" : ""}" title="${esc(label)}" aria-label="${esc(label)}"></span>`;
+  }).join("");
+  return `<span class="trace-rollout-strip" aria-hidden="true">${segments}</span>`;
+}
+
+function groupedTraceDetails(snapshot) {
+  const groups = new Map();
+  filteredDetails(snapshot).sort(compareTraceDetails).forEach((detail) => {
+    const key = traceInstanceKey(detail);
+    if (!groups.has(key)) groups.set(key, { key, details: [] });
+    groups.get(key).details.push(detail);
+  });
+  return [...groups.values()];
+}
+
+function renderTraceList(snapshot) {
+  const rows = groupedTraceDetails(snapshot).map((group) => {
+    const selectedDetail = selectedRolloutForGroup(group.details);
+    const selected = group.details.some((detail) => rowKey(detail) === state.selectedTraceKey);
+    const resolvedCount = group.details.filter(traceResolved).length;
+    const total = group.details.length;
+    const id = traceInstanceId(selectedDetail);
+    const statusClass = resolvedCount === total ? "is-resolved" : resolvedCount === 0 ? "is-unresolved" : "is-mixed";
+    return `<button class="trace-row ${selected ? "is-selected" : ""} ${statusClass}" type="button" data-trace-key="${esc(rowKey(selectedDetail))}" data-instance-key="${esc(group.key)}" aria-label="${esc(`${id} ${resolvedCount}/${total} successful rollouts`)}">
+      ${traceRolloutSegments(group.details)}
+      <span class="trace-id">${esc(id)}</span>
+      <span class="trace-meta">${esc(`${resolvedCount}/${total} success · selected rollout ${rolloutIndex(selectedDetail) + 1} · ${traceSummary(selectedDetail)}`)}</span>
+      ${traceStatusIcons(selectedDetail)}
     </button>`;
   });
-  return rows.join("") || '<div class="empty">No trajectories in the selected experiment.</div>';
+  return rows.join("") || '<div class="empty">No instances in the selected experiment.</div>';
 }
 
 function renderTraceLegend() {
@@ -2408,7 +2487,7 @@ function renderTraceInspector(snapshot) {
   document.getElementById("trace-inspector").innerHTML = `
     <aside id="trace-left-pane" class="trace-left">${renderTraceList(snapshot)}</aside>
     <section class="trace-workspace">
-      <div class="trace-overview">${renderTraceTitleCard(detail)}</div>
+      <div class="trace-overview">${renderTraceTitleCard(detail, snapshot)}</div>
       ${renderTraceWorkspacePanels(detail)}
     </section>`;
   document.querySelectorAll(".trace-section[data-trace-panel]").forEach((section) => {
@@ -2426,6 +2505,15 @@ function renderTraceInspector(snapshot) {
       renderTraceInspector(state.snapshot);
       restoreInspectorScroll({ left: leftScroll, middle: 0, right: 0 });
     });
+  });
+  document.getElementById("trace-rollout-select")?.addEventListener("change", (event) => {
+    const scrollState = captureInspectorScroll();
+    state.selectedTraceKey = event.target.value;
+    state.selectedStepIndex = 0;
+    state.selectedGraphNodeKey = null;
+    resetTracePanels();
+    renderTraceInspector(state.snapshot);
+    restoreInspectorScroll({ ...scrollState, middle: 0, right: 0 });
   });
   document.querySelectorAll(".step-thumb").forEach((button) => {
     button.addEventListener("click", () => {

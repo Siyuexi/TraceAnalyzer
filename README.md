@@ -482,7 +482,10 @@ unlinked logs are shown separately. The Traces tab is the micro-analysis
 surface: narrow instance list on the left, graph plus purpose-block/step
 timeline in the middle, and a wide right panel with parsed tool/action details,
 separate reasoning/chat text, collapsible raw action/observation payloads, and
-inline edit diffs when write actions provide old/new text. Step colors and trace
+inline edit diffs when write actions provide old/new text. When an eval cell has
+repeated rollouts for the same instance, the left instance row is split into
+per-rollout success/failure color segments and the selected instance title
+offers a rollout selector. Step colors and trace
 markers come from P2A parser/scorer fields: reads, writes, execution errors,
 root-cause edits, symptom/root-cause hits, and Path hits are computed
 in `p2a/core.py`, `p2a/eval_fault_localization.py`, and

@@ -18,11 +18,15 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
     assert ".metric-group-filter" in css
     assert ".kpi-table th.metric-group-graph" in css
     assert ".kpi-table th.metric-group-path" in css
+    assert ".trace-rollout-strip" in css
+    assert ".trace-rollout-segment.is-resolved" in css
+    assert ".trace-rollout-segment.is-unresolved" in css
+    assert ".rollout-select-control" in css
     snapshot = {
         "schema_version": "p2a_unified_dashboard_v1",
         "sources": [{"kind": "db", "path": "demo.sqlite"}],
         "summary": {
-            "counts": {"n_records": 2, "n_not_chain_evaluable": 0},
+            "counts": {"n_records": 3, "n_not_chain_evaluable": 0},
             "rates": {"anchor_hit_rate": 1.0, "root_hit_rate": 1.0, "chain_node_recall": 1.0},
             "averages": {},
             "distributions": {},
@@ -46,7 +50,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 "dataset": "swebench-hard",
                 "n_instances": 2,
                 "n_eval_cells": 2,
-                "n_trajectories": 2,
+                "n_trajectories": 3,
                 "models": ["model-a", "model-b"],
                 "source_kinds": ["third_party_api"],
             }
@@ -61,9 +65,9 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 "dataset": "swebench-hard",
                 "model_api_name": "model-a",
                 "model_label": "model-a",
-                "target": 1,
-                "done": 1,
-                "trajectory_count": 1,
+                "target": 2,
+                "done": 2,
+                "trajectory_count": 2,
                 "resolved_rate": 0.0,
                 "root_hit_rate": 1.0,
                 "path_node_recall": 1.0,
@@ -176,6 +180,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 "model_label": "model-a",
                 "instance_id": "case-a",
                 "record_index": 0,
+                "rollout_index": 0,
                 "run_id": "run-a",
                 "issue_description": "## Original issue body\n\n- with **details**\n\n```python\nprint('issue')\n```",
                 "golden_patch": "diff --git a/pkg/root.py b/pkg/root.py\n--- a/pkg/root.py\n+++ b/pkg/root.py\n@@ -1 +1 @@\n-return bad\n+return good\n",
@@ -400,6 +405,80 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 ],
             },
             {
+                "experiment_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
+                "eval_cell_key": "third_party_api::exp-a::internal_api::swebench-hard::model-a::model-a",
+                "experiment_id": "exp-a",
+                "source_kind": "third_party_api",
+                "provider_source": "internal_api",
+                "dataset": "swebench-hard",
+                "model_label": "model-a",
+                "instance_id": "case-a",
+                "record_index": 2,
+                "rollout_index": 1,
+                "run_id": "run-a-1",
+                "issue_description": "Second rollout issue body",
+                "golden_patch": "diff --git a/pkg/root.py b/pkg/root.py\n+return good\n",
+                "bonus_case_type": "direct",
+                "resolved": False,
+                "root_hit": False,
+                "anchor_hit": True,
+                "path_hit": True,
+                "chain_hit": True,
+                "path_evaluable": True,
+                "chain_evaluable": True,
+                "path_case_kind": "direct",
+                "chain_case_kind": "direct",
+                "path_node_recall": 0.5,
+                "chain_node_recall": 0.5,
+                "path_read_precision": 0.5,
+                "chain_read_precision": 0.5,
+                "bad_patterns": {"has_loop": False, "error_spiral": False},
+                "path_pattern_flags": {},
+                "chain_bad_patterns": {},
+                "path_projection": {
+                    "anchors": ["pkg/symptom.py::symptom"],
+                    "roots": ["pkg/root.py::root"],
+                    "path_nodes": [],
+                    "path_edges": [],
+                    "context_nodes": [],
+                    "context_edges": [],
+                },
+                "chain_projection": {
+                    "anchors": ["pkg/symptom.py::symptom"],
+                    "roots": ["pkg/root.py::root"],
+                    "chain_nodes": [],
+                    "chain_edges": [],
+                    "context_nodes": [],
+                    "context_edges": [],
+                },
+                "purpose_blocks": [],
+                "step_inspection": [
+                    {
+                        "trace_index": 0,
+                        "step_index": 0,
+                        "tool_names": ["str_replace_editor"],
+                        "tool_name": "str_replace_editor",
+                        "action_family": "read",
+                        "command": "view",
+                        "path": "/testbed/pkg/symptom.py",
+                        "response_text": "second rollout",
+                        "tool_args": [{"command": "view", "path": "/testbed/pkg/symptom.py"}],
+                        "tool_calls": [{"function": {"name": "str_replace_editor", "arguments": {"command": "view", "path": "/testbed/pkg/symptom.py"}}}],
+                        "tool_results": [{"observation": "second body"}],
+                        "observation": "second body",
+                        "recovered_reads": [{"file_path": "pkg/symptom.py", "start_line": 1, "end_line": 10}],
+                        "scored": {
+                            "trace_index": 0,
+                            "step_index": 0,
+                            "target_path": "pkg/symptom.py",
+                            "n_reads": 1,
+                            "reads": [{"file_path": "pkg/symptom.py", "start_line": 1, "end_line": 10}],
+                            "hit_nodes": [{"key": "pkg/symptom.py::symptom", "node_role": "symptom"}],
+                        },
+                    }
+                ],
+            },
+            {
                 "experiment_key": "third_party_api::exp-b::internal_api::swebench-hard::model-b::model-b",
                 "eval_cell_key": "third_party_api::exp-b::internal_api::swebench-hard::model-b::model-b",
                 "experiment_id": "exp-b",
@@ -491,7 +570,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                  state.selectedExperimentKey = ${JSON.stringify("PLACEHOLDER")};
                  state.selectedTraceKey = ${JSON.stringify("TRACEKEY")};
                  state.selectedStepIndex = 1;
-                 render();`.replaceAll("PLACEHOLDER", firstCell).replaceAll("TRACEKEY", `${firstCell}::case-a`));
+                 render();`.replaceAll("PLACEHOLDER", firstCell).replaceAll("TRACEKEY", `${firstCell}::case-a::idx-0`));
             const traceHtml = elements.get("trace-inspector").innerHTML;
             if (run("state.tracePanelOpen.graph") !== false || run("state.tracePanelOpen.steps") !== true || run("state.activeTracePanel") !== "steps") {
               throw new Error("trace workspace should default to graph collapsed and trace expanded");
@@ -524,9 +603,27 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             if (traceHtml.includes("trace-title-line")) {
               throw new Error("selected trace card should live in the graph header");
             }
-            for (const needle of ["trace-row is-selected is-resolved", "trace-status-icons", "trace-icon-symptom", "trace-icon-root", "trace-icon-root-edit", "hit symptom", "hit root cause", "edited root cause"]) {
+            for (const needle of ["trace-row is-selected is-mixed", "trace-status-icons", "trace-icon-symptom", "trace-icon-root", "trace-icon-root-edit", "hit symptom", "hit root cause", "edited root cause"]) {
               if (!traceHtml.includes(needle)) throw new Error(`missing compact trace status: ${needle}`);
             }
+            for (const needle of ["trace-rollout-strip", "trace-rollout-segment is-resolved is-selected", "trace-rollout-segment is-unresolved", "1/2 success", "selected rollout 1", 'id="trace-rollout-select"', "Rollout 2 · failed"]) {
+              if (!traceHtml.includes(needle)) throw new Error(`missing repeated-rollout trace fragment: ${needle}`);
+            }
+            if (run("rowKey(state.snapshot.details[0])") !== `${firstCell}::case-a::idx-0`) {
+              throw new Error(`rollout 0 trace key should include rollout index: ${run("rowKey(state.snapshot.details[0])")}`);
+            }
+            if (run("rowKey(state.snapshot.details[1])") !== `${firstCell}::case-a::idx-1`) {
+              throw new Error(`rollout 1 trace key should include rollout index: ${run("rowKey(state.snapshot.details[1])")}`);
+            }
+            if (run("groupedTraceDetails(state.snapshot).find((group) => group.key.endsWith('::case-a')).details.length") !== 2) {
+              throw new Error("left trace list should group repeated rollouts under one instance row");
+            }
+            run("state.selectedTraceKey = rowKey(state.snapshot.details[1]); renderTraceInspector(state.snapshot);");
+            const rolloutTwoHtml = elements.get("trace-inspector").innerHTML;
+            for (const needle of ["model-a · run-a-1", "selected rollout 2", "Rollout 2 · failed", 'option value="' + firstCell + '::case-a::idx-1" selected']) {
+              if (!rolloutTwoHtml.includes(needle)) throw new Error(`rollout selector did not switch detail: ${needle}`);
+            }
+            run("state.selectedTraceKey = rowKey(state.snapshot.details[0]); renderTraceInspector(state.snapshot);");
             if (run(`canonicalNodeRole("pre_symptom")`) !== "test_adapter") {
               throw new Error("legacy pre_symptom role should normalize to test_adapter");
             }
