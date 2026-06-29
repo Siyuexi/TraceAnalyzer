@@ -188,7 +188,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 "output_tokens": 200,
                 "reasoning_tokens": 50,
                 "cache_hit_tokens": 500,
-                "cost": 1.25,
+                "cost": 1250,
                 "root_hit": True,
                 "anchor_hit": True,
                 "path_hit": True,
@@ -445,8 +445,15 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 if (!elements.has(id)) elements.set(id, new Element(id));
                 return elements.get(id);
               },
-              querySelector(selector) { return selectorElements.get(selector) || null; },
-              querySelectorAll() { return []; },
+              querySelector(selector) {
+                const value = selectorElements.get(selector);
+                return Array.isArray(value) ? value[0] || null : value || null;
+              },
+              querySelectorAll(selector) {
+                const value = selectorElements.get(selector);
+                if (Array.isArray(value)) return value;
+                return value ? [value] : [];
+              },
             };
             const context = {
               window: { __P2A_DASHBOARD_SNAPSHOT__: snapshot },
@@ -806,7 +813,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
               if (legendHtml.includes(needle)) throw new Error(`trajectory legend should not include long prose: ${needle}`);
             }
             const modelHtml = elements.get("model-table").innerHTML;
-            for (const needle of ["KPI groups", "metric-group-checkbox", "metric-group-graph", "metric-group-path", "Metric definitions", "Graph", "Outcome", "Path", "Pattern", "Purpose Blocks", "Efficiency and Cost", "Graph P.", "Graph R.", "Graph F1", "Path P.", "Path R.", "Path F1", "Symptom hit", "Root cause hit", "Evaluator-resolved pass rate", "Completed cases over planned cases"]) {
+            for (const needle of ["KPI groups", "metric-group-checkbox", "metric-group-graph", "metric-group-path", "Metric definitions", "Graph", "Outcome", "Path", "Pattern", "Purpose Blocks", "Efficiency and Cost", "Graph P.", "Graph R.", "Graph F1", "Path P.", "Path R.", "Path F1", "Symptom hit", "Root cause hit", "Evaluator-resolved pass rate", "Completed cases over planned cases", "Cost units"]) {
               if (!modelHtml.includes(needle)) throw new Error(`missing macro glossary fragment: ${needle}`);
             }
             for (const needle of ["Effect and Evidence", "Graph Hits", "Dependency Path", "Exploration Behavior", "Path-read hit ratio", "Trace P.", "Trace R.", "Trace F1", "Trace precision", "Trace recall", "Path node precision", "Path node recall", "Path read precision", "Path hit ratio", "Graph hit ratio", "Read recall", "Not defined: no canonical required-read set", "Scored read actions that hit useful"]) {
@@ -877,8 +884,14 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             if (!filteredModelHtml.includes("model-a") || filteredModelHtml.includes("model-b")) {
               throw new Error("direct/latent/exposed case filter did not use filtered model rows");
             }
-            for (const needle of ["3.5", "4.5", "5.5", "1.0k", "$1.2500"]) {
+            for (const needle of ["3.5", "4.5", "5.5", "1.0k", "1.3k"]) {
               if (!filteredModelHtml.includes(needle)) throw new Error(`filtered metrics missing efficiency fallback: ${needle}`);
+            }
+            const metricWrap = {dataset: {scrollKey: "model-kpi-table"}, scrollLeft: 640, scrollTop: 12};
+            selectorElements.set(".table-wrap", [metricWrap]);
+            run("render();");
+            if (metricWrap.scrollLeft !== 640 || metricWrap.scrollTop !== 12) {
+              throw new Error(`table scroll was not preserved across render: ${metricWrap.scrollLeft}/${metricWrap.scrollTop}`);
             }
             run("state.caseFilters.direct = true; state.caseFilters.latent = true; state.caseFilters.exposed = true; state.caseFilters.others = true; render();");
             const stepThumbs = (stepHtml.match(/step-thumb/g) || []).length;

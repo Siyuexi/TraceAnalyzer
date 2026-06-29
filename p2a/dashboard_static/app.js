@@ -96,7 +96,7 @@ const MACRO_METRIC_GROUPS = [
     items: [
       ["Turns/Tools/Wall", "Average turns, tool calls, and seconds."],
       ["In/Out/Reason", "Average provider token counts."],
-      ["Cost", "Total reported API cost."],
+      ["Cost units", "Total provider-reported cost units."],
       ["Cache hit/write", "Provider prompt-cache token ratios."],
     ],
   },
@@ -273,9 +273,9 @@ function token(value) {
   return `${(value / 1000000).toFixed(1)}m`;
 }
 
-function money(value) {
+function costUnits(value) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  return `$${Number(value).toFixed(4)}`;
+  return token(Number(value));
 }
 
 function badge(label, active = true, tone = "") {
@@ -326,6 +326,31 @@ function renderKpiTable(columns, rows) {
     return `<tr class="${key === state.selectedEvalCellKey ? "is-selected" : ""}" data-eval-cell-key="${esc(key)}">${cells}</tr>`;
   }).join("");
   return `<table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function tableScrollKey(el, index) {
+  if (el?.dataset?.scrollKey) return el.dataset.scrollKey;
+  if (el?.id) return el.id;
+  const parentId = typeof el?.closest === "function" ? el.closest("[id]")?.id : "";
+  return parentId ? `${parentId}:${index}` : `table:${index}`;
+}
+
+function captureTableScroll() {
+  const scroll = {};
+  document.querySelectorAll(".table-wrap").forEach((el, index) => {
+    scroll[tableScrollKey(el, index)] = { left: el.scrollLeft || 0, top: el.scrollTop || 0 };
+  });
+  return scroll;
+}
+
+function restoreTableScroll(scrollState) {
+  if (!scrollState) return;
+  document.querySelectorAll(".table-wrap").forEach((el, index) => {
+    const saved = scrollState[tableScrollKey(el, index)];
+    if (!saved) return;
+    el.scrollLeft = saved.left || 0;
+    el.scrollTop = saved.top || 0;
+  });
 }
 
 function glossaryItem(item) {
@@ -992,7 +1017,7 @@ function kpiColumns(hasCacheWrite) {
     { header: "In", group: "efficiency_cost", value: (row) => withStd(row, "avg_input_tokens", token) },
     { header: "Out", group: "efficiency_cost", value: (row) => withStd(row, "avg_output_tokens", token) },
     { header: "Reason", group: "efficiency_cost", value: (row) => withStd(row, "avg_reasoning_tokens", token) },
-    { header: "Cost", group: "efficiency_cost", value: (row) => money(row.total_cost) },
+    { header: "Cost units", group: "efficiency_cost", value: (row) => costUnits(row.total_cost) },
     { header: "Cache hit", group: "efficiency_cost", value: (row) => withStd(row, "cache_hit_rate", pct) },
   ];
   if (hasCacheWrite) {
@@ -1030,18 +1055,22 @@ function renderModels(snapshot) {
     ${renderPassAtControl(rows)}
     ${renderMetricGroupControls()}
     ${metricDefinitions("Metric definitions", MACRO_METRIC_GROUPS)}
-    <div class="table-wrap kpi-table">${renderKpiTable(columns, rows)}</div>`;
+    <div class="table-wrap kpi-table" data-scroll-key="model-kpi-table">${renderKpiTable(columns, rows)}</div>`;
   document.querySelectorAll(".metric-group-checkbox").forEach((input) => {
     input.addEventListener("change", (event) => {
       const group = event.target.dataset.metricGroup;
       if (!group) return;
+      const tableScrollState = captureTableScroll();
       state.metricGroupFilters[group] = Boolean(event.target.checked);
       renderModels(state.snapshot);
+      restoreTableScroll(tableScrollState);
     });
   });
   document.getElementById("pass-at-k")?.addEventListener("change", (event) => {
+    const tableScrollState = captureTableScroll();
     state.passAtK = Number(event.target.value);
     renderModels(state.snapshot);
+    restoreTableScroll(tableScrollState);
   });
   document.querySelectorAll(".select-kpi-cell, #model-table tr[data-eval-cell-key]").forEach((el) => {
     el.addEventListener("click", () => {
@@ -2456,6 +2485,7 @@ function render(options = {}) {
     document.getElementById("summary-grid").innerHTML = '<div class="empty">Dashboard data is not available.</div>';
     return;
   }
+  const tableScrollState = options.tableScrollState || captureTableScroll();
   ensureSelection(snapshot);
   renderSources(snapshot);
   renderSelectedExperiment(snapshot);
@@ -2467,6 +2497,7 @@ function render(options = {}) {
   renderRuns(snapshot);
   document.getElementById("trace-legend").innerHTML = renderTraceLegend();
   renderTraceInspector(snapshot);
+  restoreTableScroll(tableScrollState);
   restoreInspectorScroll(options.scrollState);
 }
 
