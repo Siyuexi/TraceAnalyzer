@@ -27,7 +27,7 @@ const state = {
   passAtK: null,
 };
 
-const BONUS_MAP_METRIC_CASE_TYPES = new Set(["direct", "latent", "exposed", "standard"]);
+const BONUS_MAP_METRIC_CASE_TYPES = new Set(["direct", "latent", "exposed"]);
 const CASE_FILTER_BUCKETS = ["direct", "latent", "exposed", "others"];
 
 const MACRO_METRIC_GROUPS = [
@@ -485,7 +485,7 @@ function pathEdges(detail) {
 
 function canonicalCaseType(raw, detail) {
   const value = String(raw || "");
-  if (value !== "standard" && value !== "latent") return value;
+  if (value !== "latent") return value;
   const projection = pathProjection(detail);
   const roots = new Set(projection.roots || []);
   const anchors = new Set(projection.anchors || []);

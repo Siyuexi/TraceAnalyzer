@@ -52,7 +52,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from p2a.bonus_map_scope import DIRECT_CASE, EXPOSED_CASE, LATENT_CASE, LEGACY_STANDARD_CASE, enrich_bonus_map_case_metadata
+from p2a.bonus_map_scope import (
+    DIRECT_CASE,
+    EXPOSED_CASE,
+    LATENT_CASE,
+    bonus_map_pattern_computable,
+    enrich_bonus_map_case_metadata,
+)
 from p2a.datasets import parse_string_list, selector_files
 from p2a.trace import (
     TRACE_FILE_PATH,
@@ -1904,12 +1910,12 @@ def compute_dynamic_bonus_map(
             if v.get("rewardable", True) and v.get("normalized_distance", 0) > 0
         )
 
+        result["instance_id"] = instance_id
         if n_intermediate > 0:
-            case_type = LEGACY_STANDARD_CASE
+            result["case_type"] = LATENT_CASE
+            case_type = LATENT_CASE if bonus_map_pattern_computable(result) else EXPOSED_CASE
         else:
             case_type = DIRECT_CASE
-
-        result["instance_id"] = instance_id
         result["case_type"] = case_type
         result["traceable"] = True
         result["error"] = False
@@ -1930,7 +1936,7 @@ def compute_dynamic_bonus_map(
             )
         )
         enrich_bonus_map_case_metadata(result)
-        return _with_metadata(result, reason_code=case_type, diagnostics=f2p_diag)
+        return _with_metadata(result, reason_code=result.get("case_type") or case_type, diagnostics=f2p_diag)
 
     except Exception as e:
         exception_traceback = traceback.format_exc()

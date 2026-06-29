@@ -462,6 +462,9 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             if (run("state.caseFilters.direct") !== true || run("state.caseFilters.latent") !== true || run("state.caseFilters.exposed") !== true || run("state.caseFilters.others") !== false) {
               throw new Error("default case filter should include direct/latent/exposed and exclude others");
             }
+            if (run('BONUS_MAP_METRIC_CASE_TYPES.has("standard")') !== false) {
+              throw new Error("dashboard should not expose legacy standard as a current case type");
+            }
             if (run("state.selectedDataset") !== "swebench-hard") {
               throw new Error("single dataset should be auto-selected");
             }
