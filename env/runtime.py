@@ -406,50 +406,6 @@ class NexusRuntime(AbstractRuntime):
         self._terminal_sessions: dict[str, str] = {}
         self._closed = False
 
-    @staticmethod
-    def _extract_output_from_pane(content: str, command: str, marker: str | None) -> str:
-        """Extract command output from tmux pane content.
-
-        Finds the last occurrence of the typed command in the pane, takes
-        everything after it up to the marker line, and strips prompt lines.
-        """
-        lines = content.split("\n")
-
-        # Find the last line containing the (first line of the) typed command
-        cmd_first_line = command.split("\n")[0].strip()
-        cmd_start = -1
-        for i in range(len(lines) - 1, -1, -1):
-            if cmd_first_line and cmd_first_line in lines[i]:
-                cmd_start = i
-                break
-
-        if cmd_start < 0:
-            cmd_start = 0
-
-        # Find marker line
-        marker_end = len(lines)
-        if marker:
-            for i in range(cmd_start, len(lines)):
-                if marker in lines[i]:
-                    marker_end = i
-                    break
-
-        # Output = lines between command and marker, excluding prompts/echo
-        output_lines = []
-        for i in range(cmd_start + 1, marker_end):
-            line = lines[i]
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if marker and marker in stripped:
-                continue
-            if stripped.startswith("nexus_bash") and stripped.endswith("#"):
-                continue
-            if marker and f'echo "' in stripped and marker in stripped:
-                continue
-            output_lines.append(line)
-        return "\n".join(output_lines).strip()
-
     async def create_session(self, request: CreateBashSessionRequest) -> CreateBashSessionResponse:
         name = request.session
         if name not in self._terminal_sessions:
@@ -460,11 +416,14 @@ class NexusRuntime(AbstractRuntime):
         return CreateBashSessionResponse(output="", session_type="bash")
 
     async def run_in_session(self, action: BashAction | BashInterruptAction) -> BashObservation:
-        """Execute a command using marker-based protocol (matching ARL behavior).
+        """Execute a command via Nexus async terminal API.
 
-        Sends command + ``echo MARKER:$?`` via ``send_keys``, then polls
-        ``capture_terminal_pane`` until the marker appears. On timeout, sends
-        Ctrl+C and returns partial output.
+        Uses ``start_command_in_terminal_session`` (non-blocking) +
+        ``query_terminal_command_status`` (poll until done). Output comes from
+        nexus_bash's fd-redirect hooks (clean stdout/stderr, no prompt/echo).
+
+        On timeout or stuck commands (trailing backslash, unmatched quotes),
+        sends Ctrl+C via ``send_keys`` to recover the session.
         """
         name = getattr(action, "session", "default")
         if getattr(action, "action_type", "command") == "interrupt":
@@ -483,60 +442,75 @@ class NexusRuntime(AbstractRuntime):
 
         sid = self._terminal_sessions[name]
         timeout = float(getattr(action, "timeout", None) or _DEFAULT_CMD_TIMEOUT)
-        marker = f"__NEXUS_END_{uuid.uuid4().hex[:12]}__"
-        pattern = re.compile(rf"{re.escape(marker)}:(\d+)")
 
         try:
-            echo_cmd = f'echo "{marker}:$?"'
-
-            # Send command + marker (same as ARL's send_input pattern)
-            await self._nexus.send_keys_to_terminal_session(
+            # Start command (non-blocking) — returns immediately with command_id
+            info = await self._nexus.start_command_in_terminal_session(
                 session_id=sid,
-                keys=[action.command, "Enter", echo_cmd, "Enter"],
+                command=action.command,
             )
+            command_id = info.command_id
 
-            # Poll capture_pane until marker appears
+            # Poll until command completes (end_time is set by nexus_bash postexec hook)
             deadline = time.monotonic() + timeout
             while True:
                 if time.monotonic() > deadline:
+                    # Timeout — interrupt and recover
                     try:
                         await self._nexus.send_keys_to_terminal_session(
                             session_id=sid, keys=["C-c", "C-c"],
                         )
+                        await asyncio.sleep(1)
+                        await self._nexus.terminate_terminal_session_processes(
+                            session_id=sid,
+                        )
                     except Exception:
                         pass
-                    await asyncio.sleep(0.5)
-                    pane = await self._nexus.capture_terminal_pane(
-                        session_id=sid, capture_entire=True,
-                    )
-                    content = getattr(pane, "content", "") or ""
+                    # Read whatever output was produced before timeout
+                    try:
+                        final = await self._nexus.query_terminal_command_status(
+                            session_id=sid, command_id=command_id,
+                        )
+                        output = final.output or final.stdout or ""
+                    except Exception:
+                        output = ""
                     return BashObservation(
-                        output=self._extract_output_from_pane(content, action.command, None),
+                        output=output,
                         exit_code=-1,
                         failure_reason="timeout",
                         session_type="bash",
                     )
 
                 await asyncio.sleep(_READ_POLL)
-                pane = await self._nexus.capture_terminal_pane(
-                    session_id=sid, capture_entire=True,
+                status = await self._nexus.query_terminal_command_status(
+                    session_id=sid, command_id=command_id,
                 )
-                content = getattr(pane, "content", "") or ""
-                m = pattern.search(content)
-                if m:
-                    exit_code = int(m.group(1))
-                    output = self._extract_output_from_pane(content, action.command, marker)
+                if status.end_time is not None:
+                    stdout = status.stdout or ""
+                    stderr = status.stderr or ""
+                    output = status.output or (stdout + stderr) or ""
+                    exit_code = status.exit_code if status.exit_code is not None else 0
                     return BashObservation(
                         output=output,
                         exit_code=exit_code,
                         failure_reason="",
                         session_type="bash",
                     )
+
         except Exception as exc:
+            # start_command failed — likely bad command stuck in continuation
+            exc_str = str(exc)
+            if "Command failed to start" in exc_str or "command is already running" in exc_str.lower():
+                try:
+                    await self._nexus.send_keys_to_terminal_session(
+                        session_id=sid, keys=["C-c", "C-c"],
+                    )
+                except Exception:
+                    pass
             return BashObservation(
-                output=str(exc),
-                exit_code=-1,
-                failure_reason=f"nexus_error: {exc}",
+                output=exc_str,
+                exit_code=1,
+                failure_reason="",
                 session_type="bash",
             )
 
