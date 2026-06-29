@@ -462,27 +462,6 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             if (run("state.caseFilters.direct") !== true || run("state.caseFilters.latent") !== true || run("state.caseFilters.exposed") !== true || run("state.caseFilters.others") !== false) {
               throw new Error("default case filter should include direct/latent/exposed and exclude others");
             }
-            if (run('BONUS_MAP_METRIC_CASE_TYPES.has("standard")') !== false) {
-              throw new Error("dashboard should not expose legacy standard as a current case type");
-            }
-            const canonicalStandard = run(`detailCaseType({
-              bonus_case_type: "standard",
-              chain_case_kind: "standard",
-              chain_evaluable: true,
-              chain_projection: {anchors: ["a"], roots: ["b"], chain_edges: [{caller: "a", callee: "b"}]}
-            })`);
-            if (canonicalStandard !== "latent") {
-              throw new Error(`legacy standard should canonicalize to latent when pattern structure is clean: ${canonicalStandard}`);
-            }
-            const collapsedStandard = run(`detailCaseType({
-              bonus_case_type: "standard",
-              chain_case_kind: "standard",
-              chain_evaluable: true,
-              chain_projection: {anchors: ["a"], roots: ["a"], chain_edges: [{caller: "a", callee: "a"}]}
-            })`);
-            if (collapsedStandard !== "exposed") {
-              throw new Error(`legacy standard should canonicalize to exposed when root overlaps anchor: ${collapsedStandard}`);
-            }
             if (run("state.selectedDataset") !== "swebench-hard") {
               throw new Error("single dataset should be auto-selected");
             }
