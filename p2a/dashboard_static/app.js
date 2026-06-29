@@ -713,6 +713,11 @@ function ensureSelection(snapshot) {
   if (!state.selectedEvalCellKey || !cells.some((row) => cellKey(row) === state.selectedEvalCellKey)) {
     state.selectedEvalCellKey = cells.length === 1 ? cellKey(cells[0]) : null;
   }
+  if (!state.selectedEvalCellKey && state.selectedDataset) {
+    const visibleCellKeys = new Set(cells.map(cellKey));
+    const visibleRow = activeModelMetrics(snapshot).find((row) => row.dataset === state.selectedDataset && visibleCellKeys.has(cellKey(row)));
+    if (visibleRow) state.selectedEvalCellKey = cellKey(visibleRow);
+  }
   state.selectedExperimentKey = state.selectedEvalCellKey;
   if (!state.selectedEvalCellKey) {
     state.selectedTraceKey = null;
