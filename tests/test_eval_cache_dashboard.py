@@ -1484,20 +1484,11 @@ def test_dashboard_serve_mode_does_not_prebuild_snapshot(monkeypatch, tmp_path):
     assert served == {"db_path": tmp_path / "locked.sqlite", "host": "0.0.0.0", "port": 8766}
 
 
-def test_live_dashboard_root_embeds_initial_snapshot(monkeypatch):
-    snapshot = {
-        "schema_version": "p2a_unified_dashboard_v1",
-        "datasets": [{"dataset": "swebench-hard"}],
-        "eval_cells": [{"eval_cell_key": "cell", "dataset": "swebench-hard"}],
-        "experiments": [{"experiment_key": "cell", "dataset": "swebench-hard"}],
-        "model_metrics": [],
-        "runs": [],
-        "details": [],
-        "summary": {"counts": {"n_records": 0}},
-        "sources": [],
-    }
+def test_live_dashboard_root_does_not_embed_initial_snapshot(monkeypatch):
+    def fail_build(_request):
+        raise AssertionError("live root must not build or embed snapshots")
 
-    monkeypatch.setattr(dashboard_server, "build_dashboard_snapshot", lambda _request: snapshot)
+    monkeypatch.setattr(dashboard_server, "build_dashboard_snapshot", fail_build)
     handler_type = dashboard_server.make_handler(DashboardRequest())
     handler = object.__new__(handler_type)
     payloads = []
@@ -1508,8 +1499,8 @@ def test_live_dashboard_root_embeds_initial_snapshot(monkeypatch):
 
     html = payloads[0][0].decode("utf-8")
     assert payloads[0][1] == "text/html; charset=utf-8"
-    assert "window.__P2A_DASHBOARD_SNAPSHOT__" in html
-    assert "swebench-hard" in html
+    assert "window.__P2A_DASHBOARD_SNAPSHOT__" not in html
+    assert 'src="app.js?' in html
 
 
 def test_dashboard_log_reader_rejects_paths_outside_run_dir(tmp_path):

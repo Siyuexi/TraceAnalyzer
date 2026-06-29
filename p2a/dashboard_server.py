@@ -88,11 +88,7 @@ def make_handler(request: DashboardRequest) -> type[BaseHTTPRequestHandler]:
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path == "/":
-                try:
-                    snapshot = self._build_or_cached_snapshot()
-                except sqlite3.OperationalError:
-                    snapshot = None
-                self._send_bytes(_index_html(embedded_snapshot=snapshot), "text/html; charset=utf-8")
+                self._send_bytes(_index_html(), "text/html; charset=utf-8")
                 return
             if parsed.path == "/api/health":
                 self._send_json({"ok": True, "schema_version": "p2a_unified_dashboard_v1"})
