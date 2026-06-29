@@ -188,7 +188,6 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 "output_tokens": 200,
                 "reasoning_tokens": 50,
                 "cache_hit_tokens": 500,
-                "cost": 1250,
                 "root_hit": True,
                 "anchor_hit": True,
                 "path_hit": True,
@@ -813,7 +812,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
               if (legendHtml.includes(needle)) throw new Error(`trajectory legend should not include long prose: ${needle}`);
             }
             const modelHtml = elements.get("model-table").innerHTML;
-            for (const needle of ["KPI groups", "metric-group-checkbox", "metric-group-graph", "metric-group-path", "Metric definitions", "Graph", "Outcome", "Path", "Pattern", "Purpose Blocks", "Efficiency and Cost", "Graph P.", "Graph R.", "Graph F1", "Path P.", "Path R.", "Path F1", "Symptom hit", "Root cause hit", "Evaluator-resolved pass rate", "Completed cases over planned cases", "Cost units"]) {
+            for (const needle of ["KPI groups", "metric-group-checkbox", "metric-group-graph", "metric-group-path", "Metric definitions", "Graph", "Outcome", "Path", "Pattern", "Purpose Blocks", "Efficiency", "Graph P.", "Graph R.", "Graph F1", "Path P.", "Path R.", "Path F1", "Symptom hit", "Root cause hit", "Evaluator-resolved pass rate", "Completed cases over planned cases"]) {
               if (!modelHtml.includes(needle)) throw new Error(`missing macro glossary fragment: ${needle}`);
             }
             for (const needle of ["Effect and Evidence", "Graph Hits", "Dependency Path", "Exploration Behavior", "Path-read hit ratio", "Trace P.", "Trace R.", "Trace F1", "Trace precision", "Trace recall", "Path node precision", "Path node recall", "Path read precision", "Path hit ratio", "Graph hit ratio", "Read recall", "Not defined: no canonical required-read set", "Scored read actions that hit useful"]) {
@@ -884,7 +883,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             if (!filteredModelHtml.includes("model-a") || filteredModelHtml.includes("model-b")) {
               throw new Error("direct/latent/exposed case filter did not use filtered model rows");
             }
-            for (const needle of ["3.5", "4.5", "5.5", "1.0k", "1.3k"]) {
+            for (const needle of ["3.5", "4.5", "5.5", "1.0k"]) {
               if (!filteredModelHtml.includes(needle)) throw new Error(`filtered metrics missing efficiency fallback: ${needle}`);
             }
             const metricWrap = {dataset: {scrollKey: "model-kpi-table"}, scrollLeft: 640, scrollTop: 12};

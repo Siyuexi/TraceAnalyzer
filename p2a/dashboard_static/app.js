@@ -92,11 +92,10 @@ const MACRO_METRIC_GROUPS = [
   },
   {
     key: "efficiency_cost",
-    title: "Efficiency and Cost",
+    title: "Efficiency",
     items: [
       ["Turns/Tools/Wall", "Average turns, tool calls, and seconds."],
       ["In/Out/Reason", "Average provider token counts."],
-      ["Cost units", "Total provider-reported cost units."],
       ["Cache hit/write", "Provider prompt-cache token ratios."],
     ],
   },
@@ -271,11 +270,6 @@ function token(value) {
   if (value < 1000) return String(Math.round(value));
   if (value < 1000000) return `${(value / 1000).toFixed(1)}k`;
   return `${(value / 1000000).toFixed(1)}m`;
-}
-
-function costUnits(value) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  return token(Number(value));
 }
 
 function badge(label, active = true, tone = "") {
@@ -673,7 +667,6 @@ function metricsFromDetails(details, snapshot) {
       avg_input_tokens: avg(items.map((item) => item.input_tokens)),
       avg_output_tokens: avg(items.map((item) => item.output_tokens)),
       avg_reasoning_tokens: avg(items.map((item) => item.reasoning_tokens)),
-      total_cost: sum(items.map((item) => item.cost)) || null,
       cache_hit_rate: cacheHit && inputTokens + cacheHit ? cacheHit / (inputTokens + cacheHit) : null,
       cache_write_rate: cacheWrite && inputTokens + cacheWrite ? cacheWrite / (inputTokens + cacheWrite) : null,
     };
@@ -1017,7 +1010,6 @@ function kpiColumns(hasCacheWrite) {
     { header: "In", group: "efficiency_cost", value: (row) => withStd(row, "avg_input_tokens", token) },
     { header: "Out", group: "efficiency_cost", value: (row) => withStd(row, "avg_output_tokens", token) },
     { header: "Reason", group: "efficiency_cost", value: (row) => withStd(row, "avg_reasoning_tokens", token) },
-    { header: "Cost units", group: "efficiency_cost", value: (row) => costUnits(row.total_cost) },
     { header: "Cache hit", group: "efficiency_cost", value: (row) => withStd(row, "cache_hit_rate", pct) },
   ];
   if (hasCacheWrite) {
