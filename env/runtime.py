@@ -498,9 +498,22 @@ class NexusRuntime(AbstractRuntime):
                     )
 
         except Exception as exc:
-            # start_command failed — likely bad command stuck in continuation
             exc_str = str(exc)
-            if "Command failed to start" in exc_str or "command is already running" in exc_str.lower():
+            if "Failed to send command" in exc_str:
+                # Shell process died (e.g. `exit` command) — recreate and retry
+                self.logger.warning(f"Shell dead, recreating session {name} and retrying")
+                try:
+                    await self._nexus.destroy_terminal_session(session_id=sid)
+                except Exception:
+                    pass
+                self._terminal_sessions.pop(name, None)
+                try:
+                    await self.create_session(CreateBashSessionRequest(session=name))
+                    return await self.run_in_session(action)
+                except Exception:
+                    pass
+            elif "Command failed to start" in exc_str or "command is already running" in exc_str.lower():
+                # Bad command stuck in continuation — send Ctrl+C to recover
                 try:
                     await self._nexus.send_keys_to_terminal_session(
                         session_id=sid, keys=["C-c", "C-c"],
