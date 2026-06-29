@@ -12,7 +12,7 @@ const state = {
   traceQuery: "",
   refreshTimer: null,
   loadingSnapshot: false,
-  caseFilters: { direct: true, latent: true, exposed: true, others: false },
+  caseFilters: { direct: false, latent: true, exposed: false, others: false },
   metricGroupFilters: {
     scope: true,
     graph: true,
