@@ -12,7 +12,7 @@ const state = {
   traceQuery: "",
   refreshTimer: null,
   loadingSnapshot: false,
-  caseFilters: { direct: true, standard: true, others: false },
+  caseFilters: { direct: true, latent: true, exposed: true, others: false },
   metricGroupFilters: {
     scope: true,
     graph: true,
@@ -27,7 +27,8 @@ const state = {
   passAtK: null,
 };
 
-const BONUS_MAP_METRIC_CASE_TYPES = new Set(["direct", "standard"]);
+const BONUS_MAP_METRIC_CASE_TYPES = new Set(["direct", "latent", "exposed", "standard"]);
+const CASE_FILTER_BUCKETS = ["direct", "latent", "exposed", "others"];
 
 const MACRO_METRIC_GROUPS = [
   {
@@ -70,6 +71,7 @@ const MACRO_METRIC_GROUPS = [
   {
     key: "exploration_behavior",
     title: "Pattern",
+    note: "Reverse and miracle rates use latent traces whose marker is defined, so their denominator can be smaller than the latent trace count.",
     items: [
       ["Order score", "Whether graph hits move from symptom toward root cause."],
       ["Reverse rate", "Filtered Trace share with reverse traversal marker."],
@@ -348,6 +350,7 @@ function metricDefinitions(title, groups) {
     <div class="glossary-title">${esc(title)}</div>
     <div class="metric-def-grid">${groups.map((group) => `<section class="metric-def-group">
       <h4>${esc(group.title)}</h4>
+      ${group.note ? `<p class="metric-def-note">${esc(group.note)}</p>` : ""}
       <div class="metric-def-rows">${[...group.items].sort(([a], [b]) => a.localeCompare(b)).map(([term, text]) => `<div class="metric-def-row">
         <strong>${esc(term)}</strong>
         <span>${esc(text)}</span>
@@ -480,14 +483,25 @@ function pathEdges(detail) {
   return Array.isArray(edges) ? edges : [];
 }
 
+function canonicalCaseType(raw, detail) {
+  const value = String(raw || "");
+  if (value !== "standard" && value !== "latent") return value;
+  const projection = pathProjection(detail);
+  const roots = new Set(projection.roots || []);
+  const anchors = new Set(projection.anchors || []);
+  const edges = pathEdges(detail);
+  if (!roots.size || !anchors.size || !edges.length) return "exposed";
+  return [...roots].some((root) => anchors.has(root)) ? "exposed" : "latent";
+}
+
 function detailCaseType(detail) {
-  return String(detail?.bonus_case_type || pathValue(detail, "path_case_kind", "chain_case_kind", "") || "");
+  const raw = detail?.bonus_case_type || pathValue(detail, "path_case_kind", "chain_case_kind", "") || "";
+  return canonicalCaseType(raw, detail);
 }
 
 function detailCaseFilterBucket(detail) {
   const caseType = detailCaseType(detail);
-  if (pathValue(detail, "path_evaluable", "chain_evaluable") === true && caseType === "direct") return "direct";
-  if (pathValue(detail, "path_evaluable", "chain_evaluable") === true && caseType === "standard") return "standard";
+  if (pathValue(detail, "path_evaluable", "chain_evaluable") === true && CASE_FILTER_BUCKETS.includes(caseType) && caseType !== "others") return caseType;
   return "others";
 }
 
@@ -506,7 +520,7 @@ function hasPathEdges(detail) {
 }
 
 function isOrderMetricDetail(detail) {
-  return isPathMetricDetail(detail) && hasPathEdges(detail) && !hasDualSymptomRoot(detail);
+  return isPathMetricDetail(detail) && detailCaseType(detail) === "latent" && hasPathEdges(detail);
 }
 
 function caseFilterEnabled(detail) {
@@ -525,7 +539,7 @@ function allCaseFiltersEnabled() {
 }
 
 function activeCaseFilterKey() {
-  return ["direct", "standard", "others"].filter((name) => state.caseFilters[name] !== false).join(",");
+  return CASE_FILTER_BUCKETS.filter((name) => state.caseFilters[name] !== false).join(",");
 }
 
 function combinedReverseMarker(item) {
@@ -660,7 +674,7 @@ function mergeMissingMetricFields(rows, fallbackRows) {
 function activeModelMetrics(snapshot) {
   const details = activeDetails(snapshot);
   const fallbackRows = details.length ? metricsFromDetails(details, snapshot) : [];
-  if (state.caseFilters.direct && state.caseFilters.standard && !state.caseFilters.others) {
+  if (state.caseFilters.direct && state.caseFilters.latent && state.caseFilters.exposed && !state.caseFilters.others) {
     const rows = snapshot?.path_metric_model_metrics || snapshot?.dynamic_traceable_model_metrics || [];
     if (rows.length) return mergeMissingMetricFields(rows, fallbackRows);
   }
@@ -779,6 +793,7 @@ function renderSelectedExperiment(snapshot) {
     : "None";
   const label = `Dataset: ${dataset} | Eval cell: ${cell}`;
   const filters = [];
+  if (selected?.selected_scope) filters.push(`scope: ${scopeSummary(selected)}`);
   if (!allCaseFiltersEnabled()) filters.push(`case types: ${activeCaseFilterLabels()}`);
   document.getElementById("selected-experiment").textContent = label + (filters.length ? ` | Filter: ${filters.join("; ")}` : "");
 }
@@ -805,6 +820,18 @@ function progress(row) {
   return `${done}/${target}`;
 }
 
+function scopeSummary(row) {
+  const scope = row?.selected_scope;
+  if (!scope || typeof scope !== "object") return "-";
+  const filter = scope.filter || {};
+  const caseTypes = (filter.case_types || []).join("+") || "all";
+  const sourceSize = scope.source_size ?? "-";
+  const selectedBeforeWindow = scope.selected_size_before_window ?? scope.selected_size ?? "-";
+  const selectedSize = scope.selected_size ?? row?.target ?? "-";
+  const pattern = filter.pattern_computable === true ? " pattern" : "";
+  return `${caseTypes}${pattern} · selected ${selectedBeforeWindow}/${sourceSize} · planned ${selectedSize}`;
+}
+
 function renderExperiments(snapshot) {
   const datasetRowsHtml = datasetRows(snapshot).map((row) => {
     const selected = row.dataset === state.selectedDataset;
@@ -829,13 +856,14 @@ function renderExperiments(snapshot) {
       <td>${esc(row.provider_source)}</td>
       <td>${esc(row.dataset)}</td>
       <td>${esc(row.model_label)}</td>
+      <td>${esc(scopeSummary(row))}</td>
       <td>${esc(progress(row))}</td>
       <td>${esc(row.trajectory_count ?? 0)}</td>
     </tr>`;
   });
   document.getElementById("experiment-table").innerHTML = `
     <section class="subsection"><h3>Datasets</h3>${table(["", "Dataset", "Instances", "Eval cells", "Trajectories", "Models", "Sources"], datasetRowsHtml)}</section>
-    <section class="subsection"><h3>Eval cells${state.selectedDataset ? ` in ${esc(state.selectedDataset)}` : ""}</h3>${table(["", "Kind", "Experiment", "Provider", "Dataset", "Model", "Done", "Traj"], rows)}</section>`;
+    <section class="subsection"><h3>Eval cells${state.selectedDataset ? ` in ${esc(state.selectedDataset)}` : ""}</h3>${table(["", "Kind", "Experiment", "Provider", "Dataset", "Model", "Scope", "Done", "Traj"], rows)}</section>`;
   document.querySelectorAll(".select-dataset, #experiment-table tr[data-dataset]").forEach((el) => {
     el.addEventListener("click", () => {
       const dataset = el.dataset.dataset;

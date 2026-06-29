@@ -14,6 +14,11 @@ from typing import Any
 import yaml
 
 from p2a.api_providers import check_provider_available, normalize_provider_config, provider_source
+from p2a.bonus_map_scope import (
+    BonusMapInstanceFilter,
+    parse_bonus_map_instance_filter,
+    select_rows_by_bonus_map_scope,
+)
 from p2a.datasets import SUPPORTED_EVAL_DATASETS, canonical_dataset
 from p2a.eval_cache import (
     DONE_STATUS,
@@ -28,7 +33,7 @@ from p2a.eval_cache import (
 )
 from p2a.eval_fault_localization import iter_records
 from p2a.hf_assets import project_artifacts_dir
-from p2a.third_party_eval import _instance_id, _load_rows, _select_rows, is_system_error_kind, parse_limit_arg
+from p2a.third_party_eval import _instance_id, _load_rows, is_system_error_kind, parse_limit_arg
 
 
 SUPPORTED_DATASETS = set(SUPPORTED_EVAL_DATASETS)
@@ -64,6 +69,7 @@ class BatchConfig:
     artifacts_dir: Path
     precompute_maps: bool
     bonus_map_dir: Path | None
+    bonus_map_instance_filter: BonusMapInstanceFilter
     models: list[BatchModel]
 
 
@@ -115,12 +121,13 @@ def _redact(value: Any) -> Any:
     return value
 
 
-def sanitized_config_snapshot(config: BatchConfig) -> dict[str, Any]:
+def sanitized_config_snapshot(config: BatchConfig, *, scope: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "schema": "p2a_third_party_batch_v1",
         "source_config": str(config.path),
         "captured_at": utc_now(),
         "config": _redact(config.raw),
+        "selected_scope": scope,
     }
 
 
@@ -133,6 +140,7 @@ def load_batch_config(path: Path) -> BatchConfig:
     dataset_cfg = _as_mapping(payload.get("dataset"), name="dataset")
     experiment_cfg = _as_mapping(payload.get("experiment"), name="experiment")
     storage_cfg = _as_mapping(payload.get("storage"), name="storage")
+    filter_cfg = payload.get("bonus_map_instance_filter", experiment_cfg.get("bonus_map_instance_filter"))
 
     dataset_name = _canonical_dataset(str(dataset_cfg.get("name") or "swebench-hard"))
     dataset_file = Path(dataset_cfg["file"]).expanduser() if dataset_cfg.get("file") else None
@@ -190,6 +198,7 @@ def load_batch_config(path: Path) -> BatchConfig:
             if storage_cfg.get("bonus_map_dir")
             else None
         ),
+        bonus_map_instance_filter=parse_bonus_map_instance_filter(filter_cfg),
         models=models,
     )
 
@@ -260,20 +269,54 @@ def resolve_bonus_map_dir(config: BatchConfig, data_file: Path, *, env: dict[str
     else:
         output_dir = project_artifacts_dir() / "bonus_maps" / config.dataset_name
     setup_env = dict(env)
-    if config.limit is not None:
+    if config.bonus_map_instance_filter.active:
+        setup_env.setdefault("P2A_SETUP_BONUS_OFFSET", "0")
+    elif config.limit is not None:
         setup_env.setdefault("P2A_SETUP_BONUS_LIMIT", str(config.limit))
-    setup_env.setdefault("P2A_SETUP_BONUS_OFFSET", str(config.offset))
+        setup_env.setdefault("P2A_SETUP_BONUS_OFFSET", str(config.offset))
+    else:
+        setup_env.setdefault("P2A_SETUP_BONUS_OFFSET", str(config.offset))
     return Path(_run_setup(["maps", config.dataset_name, str(data_file), str(output_dir)], env=setup_env))
 
 
-def selected_instance_ids(data_file: Path, *, limit: int | None, offset: int) -> list[str]:
-    rows = _select_rows(_load_rows(data_file), limit=limit, offset=offset, instance_ids=None)
+def selected_instance_scope(
+    data_file: Path,
+    *,
+    limit: int | None,
+    offset: int,
+    bonus_map_dir: Path | None,
+    scope_filter: BonusMapInstanceFilter,
+) -> tuple[list[str], dict[str, Any]]:
+    if scope_filter.active and bonus_map_dir is None:
+        raise ValueError("bonus_map_instance_filter requires storage.bonus_map_dir or precompute_maps: true")
+    rows = _load_rows(data_file)
+    scoped = select_rows_by_bonus_map_scope(
+        rows,
+        bonus_map_dir=bonus_map_dir,
+        instance_id=_instance_id,
+        scope_filter=scope_filter,
+        limit=limit,
+        offset=offset,
+    )
     instance_ids = []
-    for row in rows:
+    for row in scoped.rows:
         instance_id = _instance_id(row)
         if not instance_id:
             raise ValueError(f"selected row at offset {offset} has no instance_id")
         instance_ids.append(instance_id)
+    if scope_filter.active and not instance_ids:
+        raise ValueError("bonus_map_instance_filter selected zero rows")
+    return instance_ids, scoped.metadata
+
+
+def selected_instance_ids(data_file: Path, *, limit: int | None, offset: int) -> list[str]:
+    instance_ids, _scope = selected_instance_scope(
+        data_file,
+        limit=limit,
+        offset=offset,
+        bonus_map_dir=None,
+        scope_filter=BonusMapInstanceFilter(),
+    )
     return instance_ids
 
 
@@ -286,6 +329,8 @@ def _model_eval_config(config: BatchConfig, model: BatchModel, run_dir: Path) ->
     for key in ("agent", "analysis"):
         if key in config.raw:
             payload[key] = copy.deepcopy(config.raw[key])
+    if config.bonus_map_instance_filter.active:
+        payload["bonus_map_instance_filter"] = config.bonus_map_instance_filter.metadata()
     payload["provider"] = copy.deepcopy(config.provider)
 
     model_cfg = copy.deepcopy(config.raw.get("model") or {})
@@ -446,7 +491,13 @@ async def run_model_phase(
     env: dict[str, str],
 ) -> dict[str, Any]:
     source = provider_source(config.provider)
-    target_ids = selected_instance_ids(data_file, limit=phase_limit, offset=config.offset)
+    target_ids, scope_metadata = selected_instance_scope(
+        data_file,
+        limit=phase_limit,
+        offset=config.offset,
+        bonus_map_dir=bonus_map_dir,
+        scope_filter=config.bonus_map_instance_filter,
+    )
     target_jobs = _rollout_jobs(target_ids, config.rollouts_per_instance)
     with ensure_db(config.db_path) as conn:
         upsert_experiment(
@@ -454,7 +505,7 @@ async def run_model_phase(
             experiment_id=config.experiment_id,
             provider_source=source,
             dataset=config.dataset_name,
-            config_snapshot=sanitized_config_snapshot(config),
+            config_snapshot=sanitized_config_snapshot(config, scope=scope_metadata),
         )
         upsert_planned_cells(
             conn,

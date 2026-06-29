@@ -16,6 +16,7 @@ import uuid
 import yaml
 
 from p2a.api_providers import make_chat_model, normalize_provider_config, provider_source
+from p2a.bonus_map_scope import parse_bonus_map_instance_filter, select_rows_by_bonus_map_scope
 from p2a.core import BonusMapStore
 from p2a.eval_cache import ensure_db, ingest_artifacts, upsert_experiment
 from p2a.eval_fault_localization import (
@@ -68,6 +69,7 @@ DEFAULT_CONFIG = {
         "near_threshold": 0.5,
         "m_max": 3.0,
     },
+    "bonus_map_instance_filter": {},
 }
 _REDACT_KEYS = ("api_key", "apikey", "token", "secret", "password", "authorization")
 SYSTEM_ERROR_KINDS = {
@@ -174,6 +176,12 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dic
         experiment_cfg["rollouts_per_instance"] = args.rollouts_per_instance
     if getattr(args, "per_instance_parallelism", None) is not None:
         experiment_cfg["per_instance_parallelism"] = args.per_instance_parallelism
+    if getattr(args, "bonus_map_filter_json", None):
+        config["bonus_map_instance_filter"] = json.loads(args.bonus_map_filter_json)
+    if getattr(args, "case_type", None):
+        config.setdefault("bonus_map_instance_filter", {})["case_types"] = args.case_type
+    if getattr(args, "pattern_computable", None) is not None:
+        config.setdefault("bonus_map_instance_filter", {})["pattern_computable"] = args.pattern_computable
     return config
 
 
@@ -270,6 +278,32 @@ def _select_rows(
     if limit is not None:
         rows = rows[:limit]
     return rows
+
+
+def _select_scoped_rows(
+    rows: list[dict[str, Any]],
+    *,
+    limit: int | None,
+    offset: int,
+    instance_ids: set[str] | None,
+    bonus_map_dir: Path | None,
+    scope_filter_config: Any,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    rows = _select_rows(rows, limit=None, offset=0, instance_ids=instance_ids)
+    scope_filter = parse_bonus_map_instance_filter(scope_filter_config)
+    if not scope_filter.active:
+        return _select_rows(rows, limit=limit, offset=offset, instance_ids=None), None
+    if bonus_map_dir is None:
+        raise ValueError("bonus_map_instance_filter requires --bonus-map-dir")
+    scoped = select_rows_by_bonus_map_scope(
+        rows,
+        bonus_map_dir=bonus_map_dir,
+        instance_id=_instance_id,
+        scope_filter=scope_filter,
+        limit=limit,
+        offset=offset,
+    )
+    return scoped.rows, scoped.metadata
 
 
 def parse_limit_arg(value: str) -> int | None:
@@ -681,6 +715,8 @@ def write_analysis(
         near_threshold=float(analysis_cfg.get("near_threshold", 0.5)),
         m_max=float(analysis_cfg.get("m_max", 3.0)),
     )
+    if analysis_cfg.get("scope"):
+        summary["scope"] = analysis_cfg["scope"]
     if details_out:
         write_jsonl(details_out, details)
     if summary_out:
@@ -740,11 +776,19 @@ def format_report(summary: dict[str, Any], details: list[dict[str, Any]]) -> str
                 first_gt=item.get("first_ground_truth_step") if item.get("first_ground_truth_step") is not None else "-",
             )
         )
+    scope = summary.get("scope") if isinstance(summary.get("scope"), dict) else {}
+    scope_lines = []
+    if scope:
+        scope_lines = [
+            f"- Source instances: {scope.get('source_size')}",
+            f"- Selected instances: {scope.get('selected_size')} ({scope.get('filter', {}).get('case_types') or 'all case types'})",
+        ]
     return "\n".join(
         [
             "# Third-Party P2A Localization Baseline",
             "",
             f"- Records: {summary.get('counts', {}).get('n_records', 0)}",
+            *scope_lines,
             f"- Bonus-map coverage: {rates.get('bonus_map_coverage')}",
             f"- Call-graph coverage: {rates.get('call_graph_coverage')}",
             f"- Read rate: {rates.get('read_rate')}",
@@ -772,6 +816,9 @@ def main() -> int:
     parser.add_argument("--n-parallel", type=int, default=1)
     parser.add_argument("--rollouts-per-instance", type=int, default=None)
     parser.add_argument("--per-instance-parallelism", type=int, default=None)
+    parser.add_argument("--case-type", action="append", default=[], help="Filter by bonus-map case type: direct, latent, exposed.")
+    parser.add_argument("--pattern-computable", action="store_true", default=None, help="Keep only pattern-computable bonus-map instances.")
+    parser.add_argument("--bonus-map-filter-json", default=None, help="JSON object matching bonus_map_instance_filter config.")
     parser.add_argument(
         "--rollout-job",
         action="append",
@@ -828,14 +875,18 @@ def main() -> int:
 
     if args.data is None:
         raise ValueError("--data is required unless --provider-smoke-only is set")
-    rows = _select_rows(
+    rows, scope_metadata = _select_scoped_rows(
         _load_rows(args.data),
         limit=args.limit,
         offset=args.offset,
         instance_ids=set(args.instance_id) if args.instance_id else {item[0] for item in args.rollout_job} if args.rollout_job else None,
+        bonus_map_dir=args.bonus_map_dir,
+        scope_filter_config=config.get("bonus_map_instance_filter"),
     )
     if not rows:
         raise ValueError("No rows selected")
+    if scope_metadata:
+        config.setdefault("experiment", {})["scope"] = scope_metadata
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     records = asyncio.run(
@@ -855,13 +906,16 @@ def main() -> int:
 
     if args.bonus_map_dir:
         details_path = args.details_out or args.out.with_suffix(".details.jsonl")
+        analysis_cfg = dict(config.get("analysis") or {})
+        if scope_metadata:
+            analysis_cfg["scope"] = scope_metadata
         write_analysis(
             rollouts=args.out,
             bonus_map_dir=args.bonus_map_dir,
             summary_out=args.summary_out or args.out.with_suffix(".summary.json"),
             details_out=details_path,
             report_out=args.report_out or args.out.with_suffix(".report.md"),
-            analysis_cfg=dict(config.get("analysis") or {}),
+            analysis_cfg=analysis_cfg,
         )
     else:
         details_path = None

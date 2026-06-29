@@ -30,6 +30,12 @@ experiment:
   per_model_concurrency: 8
   model_parallelism: 2
 
+# Optional experiment-scope filter. The source dataset stays swebench-hard, but
+# planned cells and model calls are restricted to matching bonus-map instances.
+# bonus_map_instance_filter:
+#   case_type: latent        # direct | latent | exposed; latent is the clean Pattern subset
+#   pattern_computable: true # optional explicit denominator guard
+
 models:
   - api_name: dummy-model-a
     label: dummy-model-a

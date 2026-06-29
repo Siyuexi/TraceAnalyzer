@@ -13,6 +13,10 @@ Everything is **self-contained**: data comes from HuggingFace, images from the
 pair-diag mirror of the original R2E images. There is **no dependency on the old
 `src-backup` fork**.
 
+> **Terminology**: the repo-root [`GLOSSARY.md`](../GLOSSARY.md) is the canonical
+> term table for the **Graph / Path / Trace** triad and the full role/metric
+> vocabulary used in this README, the code, and the dashboard. Match it.
+
 ## Bonus-map anchors
 
 Dynamic bonus maps keep observed Graph nodes, distances, roles, rewardability,
@@ -487,8 +491,12 @@ marks use structured tool status, nonzero exit codes, explicit error fields, or
 traceback/command-failure output; source code that merely contains words such as
 `Error` is not a failed step. Miracle means root-cause access before the
 symptom/anchor evidence, or before intermediate dependency evidence; dashboard
-miracle/reverse rates are shares of the currently filtered direct/standard
-traces, matching the trace-list pattern markers. If one read step observes the
+miracle/reverse rates are shares of the currently filtered latent traces with
+defined Pattern semantics, matching the trace-list pattern markers. `latent`
+means a formerly standard case with a clean, ordered Path denominator: selected
+anchors exist, root causes do not overlap those anchors, and reward Path edges
+with distinct distances exist. `exposed` is the complementary formerly standard
+case where that clean Pattern denominator is collapsed or unavailable. If one read step observes the
 symptom, intermediate nodes, and root cause together, that simultaneous
 observation is not a miracle. Step colors split into equal role segments when a
 single step hits multiple map roles; a callable that is both symptom and root
@@ -496,7 +504,8 @@ cause uses a diagonal split so it is visually distinct from a multi-node step
 hit. Node Source uses the full captured callable source when the bonus map
 provides it. The
 global case filters keep Overview as the full dataset registry while restricting
-Metrics and Traces to the checked `standard`, `direct`, or `other` case types.
+Metrics and Traces to the checked `direct`, `latent`, `exposed`, or `other` case
+types.
 
 The offline `summary-out` and `details-out` files are post-hoc artifacts for
 inspecting dumped rollouts. Training and validation do not read them; live
@@ -517,6 +526,18 @@ export P2A_THIRD_PARTY_MODEL=deepseek-v4-flash
 
 bash scripts/main_3rd.sh
 ```
+
+To run a pattern-focused subset without creating subtype-specific dataset
+parquets, keep the source dataset and filter through bonus-map metadata:
+
+```bash
+P2A_THIRD_PARTY_CASE_TYPES=latent bash scripts/main_3rd.sh
+```
+
+Batch configs support the same scope as `bonus_map_instance_filter.case_type:
+latent`. Training-time validation uses `P2A_EVAL_CASE_TYPES=latent` with
+`P2A_EVAL_BONUS_MAP_DIR`; the launcher writes a derived eval parquet plus a
+`.scope.json` metadata file while leaving the canonical dataset parquet intact.
 
 For API batches, put a non-secret config under `config/` or a private one under
 `.secrets/`, then run the same entry point in batch mode:
@@ -643,7 +664,7 @@ the training split and `P2A_EVAL_BONUS_MAP_DIR` at the validation split.
 | `avg_path_node_precision` / `avg_path_node_recall` / `avg_path_node_f1` | Dashboard Path P., Path R., and Path F1 over deduplicated Path/context node hits; legacy `avg_chain_*` aliases are kept for old artifacts. |
 | `path_node_recall` / `path_read_precision` | CLI summary aliases for Path node recall and read-level Path hit share; legacy `chain_*` aliases are kept for old artifacts. |
 | `avg_order_score` / `reverse_order_rate` | Kendall-style agreement between read order and movement from tests toward patched callables. |
-| `miracle_rate_over_gt_hits` | Fraction of ground-truth hits that jump directly to patched code before reading intermediate graph levels. |
+| `miracle_rate_over_gt_hits` | Fraction of Pattern-evaluable latent ground-truth hits that jump directly to patched code before reading intermediate graph levels. |
 | `avg_block_order_score` / `block_miracle_rate_over_gt_hits` | Same order and miracle diagnostics after purpose-block segmentation. |
 | `block_achieve_rate` / `block_waste_rate` / `block_loop_rate` | Purpose-block outcomes, including repeated same-action loop blocks. |
 | `avg_block_efficiency_steps` | Average steps to first Graph hit inside achieving read blocks. |
@@ -708,11 +729,12 @@ debugging individual instances and for the unified HTML dashboard. The logger
 metrics above are still returned directly from validation and do not depend on
 `summary-out` / `details-out` from the offline CLI.
 
-Current SWE-bench Verified eval-map sanity check, after the targeted F2P,
+Historical SWE-bench Verified eval-map sanity check, before the `standard` split
+into `latent` and `exposed`, after the targeted F2P,
 trace-capture, unittest-description F2P, zero-test runner, and F2P collection
 guards, is:
 
-| Split | Rows | Dynamic (`standard+direct`) | `standard` | `direct` | `newly_created` | `no_callable` | `no_f2p` | `instrumentation_failed` | `signature_mismatch` | `all_pass` | `no_trace` | `no_gt` |
+| Split | Rows | Dynamic (`legacy standard+direct`) | legacy `standard` | `direct` | `newly_created` | `no_callable` | `no_f2p` | `instrumentation_failed` | `signature_mismatch` | `all_pass` | `no_trace` | `no_gt` |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | hard validation | 45 | 39 (86.7%) | 32 | 7 | 4 | 0 | 1 | 1 | 0 | 0 | 0 | 0 |
 | test rest | 455 | 389 (85.5%) | 258 | 131 | 35 | 18 | 2 | 2 | 7 | 2 | 0 | 0 |

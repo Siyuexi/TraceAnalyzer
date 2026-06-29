@@ -55,6 +55,7 @@ resolve_env_path_if_set() {
 }
 resolve_env_path_if_set P2A_BONUS_MAP_DIR
 resolve_env_path_if_set P2A_EVAL_BONUS_MAP_DIR
+resolve_env_path_if_set P2A_EVAL_FILTER_BONUS_MAP_DIR
 resolve_env_path_if_set P2A_EVAL_DETAILS_DIR
 RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/swe_agent/runtime_env_arl.yaml"}
 # Agent-loop actors on every node load this path, so it must resolve on all of
@@ -197,6 +198,45 @@ fi
 "${PYTHON_BIN}" -m p2a.runtime_env "${RUNTIME_ENV}" --src-root "${SRC_ROOT}" --drop-working-dir
 
 ensure_model_path
+
+if [[ -n "${P2A_EVAL_CASE_TYPES:-}${P2A_EVAL_PATTERN_COMPUTABLE:-}" ]]; then
+    eval_pattern_computable="${P2A_EVAL_PATTERN_COMPUTABLE:-}"
+    eval_filter_bonus_map_dir="${P2A_EVAL_FILTER_BONUS_MAP_DIR:-${P2A_EVAL_BONUS_MAP_DIR:-}}"
+    if [[ -z "${eval_filter_bonus_map_dir}" ]]; then
+        echo "[P2A] P2A_EVAL_CASE_TYPES/P2A_EVAL_PATTERN_COMPUTABLE requires P2A_EVAL_BONUS_MAP_DIR or P2A_EVAL_FILTER_BONUS_MAP_DIR." >&2
+        exit 2
+    fi
+    scope_slug="${P2A_EVAL_CASE_TYPES:-all}"
+    scope_slug="${scope_slug//,/+}"
+    scope_slug="${scope_slug//\//_}"
+    if [[ "${eval_pattern_computable}" == "1" || "${eval_pattern_computable,,}" == "true" ]]; then
+        scope_slug="${scope_slug}+pattern"
+    fi
+    test_stem="$(basename "${TEST_FILE}")"
+    test_stem="${test_stem%.*}"
+    filtered_test_file="${P2A_FILTERED_TEST_FILE:-$(dirname "${TEST_FILE}")/${test_stem}.${scope_slug}.parquet}"
+    filter_cmd=(
+        "${PYTHON_BIN}" -m p2a.filter_bonus_map_instances
+        "${TEST_FILE}"
+        --bonus-map-dir "${eval_filter_bonus_map_dir}"
+        --out "${filtered_test_file}"
+    )
+    if [[ -n "${P2A_EVAL_CASE_TYPES:-}" ]]; then
+        IFS=',' read -r -a eval_case_types <<< "${P2A_EVAL_CASE_TYPES}"
+        for case_type in "${eval_case_types[@]}"; do
+            [[ -n "${case_type}" ]] && filter_cmd+=(--case-type "${case_type}")
+        done
+    fi
+    if [[ "${eval_pattern_computable}" == "1" || "${eval_pattern_computable,,}" == "true" ]]; then
+        filter_cmd+=(--pattern-computable true)
+    fi
+    "${filter_cmd[@]}"
+    TEST_FILE="${filtered_test_file}"
+    export TEST_FILE
+    export P2A_EVAL_SCOPE_FILE="${filtered_test_file}.scope.json"
+    echo "[P2A] filtered validation data: ${TEST_FILE}"
+    echo "[P2A] validation scope metadata: ${P2A_EVAL_SCOPE_FILE}"
+fi
 
 if [[ "${P2A_SKIP_MEGATRON_PREFLIGHT:-0}" != "1" ]]; then
     "${PYTHON_BIN}" - <<'PY'

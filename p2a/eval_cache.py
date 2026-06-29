@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import quote
 
+from p2a.bonus_map_scope import LATENT_CASE, PATH_CASE_TYPES, canonical_detail_case_type
 from p2a.eval_fault_localization import _json_default, _sync_path_aliases, iter_records
 
 
@@ -37,7 +38,7 @@ LEGACY_PATH_PATTERN_KEYS = (
     "error_spiral_on_chain",
 )
 CHAIN_BAD_PATTERN_KEYS = LEGACY_PATH_PATTERN_KEYS
-PATH_METRIC_CASE_TYPES = {"direct", "standard"}
+PATH_METRIC_CASE_TYPES = PATH_CASE_TYPES
 DYNAMIC_TRACEABLE_CASE_TYPES = PATH_METRIC_CASE_TYPES
 
 
@@ -799,32 +800,23 @@ def _detail_distribution(details: list[dict[str, Any]], key: str) -> dict[str, i
 
 
 def _detail_case_type(detail: dict[str, Any]) -> str:
-    return str(detail.get("bonus_case_type") or _path_value(detail, "path_case_kind", "chain_case_kind", "") or "")
+    return canonical_detail_case_type(detail)
 
 
 def _is_path_metric_detail(detail: dict[str, Any]) -> bool:
     return _path_value(detail, "path_evaluable", "chain_evaluable") is True and _detail_case_type(detail) in PATH_METRIC_CASE_TYPES
 
 
-def _is_dynamic_traceable_detail(detail: dict[str, Any]) -> bool:
-    """Compatibility wrapper for old code paths; prefer _is_path_metric_detail."""
-    return _is_path_metric_detail(detail)
-
-
-def _has_dual_symptom_root(detail: dict[str, Any]) -> bool:
-    projection = _path_projection(detail)
-    anchors = set(projection.get("anchors") or [])
-    roots = set(projection.get("roots") or [])
-    return bool(anchors & roots)
-
-
-def _has_path_edges(detail: dict[str, Any]) -> bool:
-    projection = _path_projection(detail)
+def _is_order_metric_detail(detail: dict[str, Any]) -> bool:
+    if not _is_path_metric_detail(detail) or _detail_case_type(detail) != LATENT_CASE:
+        return False
+    projection = detail.get("path_projection") or detail.get("chain_projection") or {}
     return bool(projection.get("path_edges") or projection.get("chain_edges") or [])
 
 
-def _is_order_metric_detail(detail: dict[str, Any]) -> bool:
-    return _is_path_metric_detail(detail) and _has_path_edges(detail) and not _has_dual_symptom_root(detail)
+def _is_dynamic_traceable_detail(detail: dict[str, Any]) -> bool:
+    """Compatibility wrapper for old code paths; prefer _is_path_metric_detail."""
+    return _is_path_metric_detail(detail)
 
 
 def _path_pattern_distribution(details: list[dict[str, Any]], keys: Iterable[str] = PATH_PATTERN_KEYS) -> dict[str, int]:
@@ -1031,6 +1023,23 @@ def _pass_at_payload(metric_rows: list[sqlite3.Row], *, rollout_n: int) -> dict[
     return out
 
 
+def _selected_scope_from_snapshot(value: str | None) -> dict[str, Any] | None:
+    snapshot = json_loads(value, {})
+    if not isinstance(snapshot, dict):
+        return None
+    for candidate in (
+        snapshot.get("selected_scope"),
+        snapshot.get("scope"),
+        (snapshot.get("experiment") or {}).get("scope") if isinstance(snapshot.get("experiment"), dict) else None,
+        ((snapshot.get("config") or {}).get("experiment") or {}).get("scope")
+        if isinstance(snapshot.get("config"), dict)
+        else None,
+    ):
+        if isinstance(candidate, dict) and candidate:
+            return candidate
+    return None
+
+
 def aggregate_model_metrics(
     conn: sqlite3.Connection,
     *,
@@ -1067,6 +1076,7 @@ def aggregate_model_metrics(
           c.model_label,
           c.status,
           c.error,
+          e.config_snapshot,
           q.reward,
           q.resolved,
           q.p2a_read,
@@ -1085,6 +1095,10 @@ def aggregate_model_metrics(
           q.cost,
           q.metrics_json
         FROM run_cells c
+        LEFT JOIN experiments e
+          ON e.experiment_id = c.experiment_id
+         AND e.provider_source = c.provider_source
+         AND e.dataset = c.dataset
         LEFT JOIN quantitative_metrics q ON q.cell_id = c.id
         {where_sql}
         ORDER BY c.model_label, c.instance_id, c.rollout_index
@@ -1142,6 +1156,7 @@ def aggregate_model_metrics(
                 "errors": len(errors),
                 "pending": sum(1 for row in group if row["status"] in {PENDING_STATUS, RUNNING_STATUS}),
                 "rollouts_per_instance": rollout_n,
+                "selected_scope": _selected_scope_from_snapshot(group[0]["config_snapshot"]),
                 "pass_at_n": pass_at.get(str(rollout_n)),
                 "pass_at": pass_at,
                 "avg_at": avg_at,

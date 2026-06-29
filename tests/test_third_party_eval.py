@@ -7,6 +7,7 @@ from p2a.core import BonusMapStore
 from p2a.eval_fault_localization import score_record
 from p2a.third_party_eval import (
     _prompt,
+    _select_scoped_rows,
     _select_rows,
     apply_cli_overrides,
     build_dump_record,
@@ -148,6 +149,48 @@ def test_select_rows_treats_none_limit_as_unlimited():
 
     assert _select_rows(rows, limit=None, offset=1, instance_ids=None) == rows[1:]
     assert _select_rows(rows, limit=1, offset=1, instance_ids=None) == rows[1:2]
+
+
+def test_select_scoped_rows_applies_bonus_map_filter_before_limit(tmp_path):
+    bonus_dir = tmp_path / "bonus"
+    bonus_dir.mkdir()
+    (bonus_dir / "case-a.json").write_text(
+        json.dumps(
+            {
+                "case_type": "standard",
+                "selected_issue_anchor_nodes": ["pkg/root.py::root"],
+                "root_cause_nodes": ["pkg/root.py::root"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (bonus_dir / "case-b.json").write_text(
+        json.dumps(
+            {
+                "case_type": "standard",
+                "selected_issue_anchor_nodes": ["pkg/symptom.py::symptom"],
+                "root_cause_nodes": ["pkg/root.py::root"],
+                "reward_path_edges": [["pkg/symptom.py::symptom", "pkg/root.py::root"]],
+                "call_graph_nodes": {
+                    "pkg/symptom.py::symptom": {"normalized_distance": 1.0},
+                    "pkg/root.py::root": {"normalized_distance": 0.0},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows, scope = _select_scoped_rows(
+        [{"instance_id": "case-a"}, {"instance_id": "case-b"}],
+        limit=1,
+        offset=0,
+        instance_ids=None,
+        bonus_map_dir=bonus_dir,
+        scope_filter_config={"case_type": "latent"},
+    )
+
+    assert rows == [{"instance_id": "case-b"}]
+    assert scope["source_size"] == 2
+    assert scope["selected_size_before_window"] == 1
 
 
 def test_build_step_traces_preserves_structured_tool_calls():

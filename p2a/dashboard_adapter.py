@@ -13,6 +13,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
+from p2a.bonus_map_scope import (
+    CASE_FILTER_BUCKETS,
+    LATENT_CASE,
+    PATH_CASE_TYPES,
+    canonical_detail_case_type,
+)
 from p2a.core import BonusMapStore, _bonus_map_candidate_ids, normalize_action, reads_from_step_trace, writes_from_step_trace
 from p2a.eval_cache import aggregate_model_metrics, connect_readonly, json_loads
 from p2a.eval_fault_localization import (
@@ -58,9 +64,8 @@ LEGACY_PATH_PATTERN_KEYS = (
     "error_spiral_on_chain",
 )
 CHAIN_BAD_PATTERN_KEYS = LEGACY_PATH_PATTERN_KEYS
-PATH_METRIC_CASE_TYPES = {"direct", "standard"}
+PATH_METRIC_CASE_TYPES = PATH_CASE_TYPES
 DYNAMIC_TRACEABLE_CASE_TYPES = PATH_METRIC_CASE_TYPES
-CASE_FILTER_BUCKETS = ("direct", "standard", "others")
 DATASET_PARQUET_FILENAMES = {
     "swebench-hard": ("swe_bench_verified_hard.parquet",),
     "swebench-verified": ("swe_bench_verified.parquet",),
@@ -1687,12 +1692,12 @@ def _distribution(items: Iterable[dict[str, Any]], key: str) -> dict[str, int]:
 
 
 def _detail_case_type(detail: dict[str, Any]) -> str:
-    return str(detail.get("bonus_case_type") or _path_value(detail, "path_case_kind", "chain_case_kind", "") or "")
+    return canonical_detail_case_type(detail)
 
 
 def _case_filter_bucket(detail: dict[str, Any]) -> str:
     case_type = _detail_case_type(detail)
-    if _path_value(detail, "path_evaluable", "chain_evaluable") is True and case_type in {"direct", "standard"}:
+    if _path_value(detail, "path_evaluable", "chain_evaluable") is True and case_type in CASE_FILTER_BUCKETS:
         return case_type
     return "others"
 
@@ -1718,7 +1723,7 @@ def _has_path_edges(detail: dict[str, Any]) -> bool:
 
 
 def _is_order_metric_detail(detail: dict[str, Any]) -> bool:
-    return _is_path_metric_detail(detail) and _has_path_edges(detail) and not _has_dual_symptom_root(detail)
+    return _is_path_metric_detail(detail) and _detail_case_type(detail) == LATENT_CASE and _has_path_edges(detail)
 
 
 def _instance_key(detail: dict[str, Any]) -> str:
@@ -1755,7 +1760,7 @@ def _dataset_distributions(details: list[dict[str, Any]]) -> dict[str, dict[str,
             "not_chain_evaluable": 0,
         }
         for item in items:
-            case_types[str(item.get("bonus_case_type") or "missing_bonus_map")] += 1
+            case_types[_detail_case_type(item) or "missing_bonus_map"] += 1
             if item.get("has_bonus_map"):
                 availability["with_bonus_map"] += 1
             if item.get("has_call_graph"):
@@ -2141,7 +2146,7 @@ def _merge_model_metrics(base_rows: list[dict[str, Any]], detail_rows: list[dict
     for row in detail_rows:
         current = merged.get(row["eval_cell_key"], {})
         merged_row = dict(row)
-        for key in ("target", "done", "errors", "pending"):
+        for key in ("target", "done", "errors", "pending", "selected_scope"):
             if current.get(key) is not None:
                 merged_row[key] = current[key]
         merged[row["eval_cell_key"]] = _normalize_model_row(merged_row)
@@ -2175,6 +2180,7 @@ def _eval_cell_registry(model_metrics: list[dict[str, Any]], details: list[dict[
                 "done": row.get("done"),
                 "errors": row.get("errors"),
                 "pending": row.get("pending"),
+                "selected_scope": row.get("selected_scope"),
                 "detail_count": detail_counts.get(key, 0),
                 "trajectory_count": trace_counts.get(key, 0),
                 "resolved_rate": row.get("resolved_rate"),

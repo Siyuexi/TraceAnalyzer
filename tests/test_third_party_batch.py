@@ -11,6 +11,7 @@ from p2a.third_party_batch import (
     resolve_bonus_map_dir,
     run_batch,
     sanitized_config_snapshot,
+    selected_instance_scope,
 )
 from p2a.third_party_eval import run_batch as run_eval_batch
 
@@ -121,6 +122,50 @@ models:
     assert calls[0][-1] == str(artifacts_root / "bonus_maps" / "swebench-hard")
 
 
+def test_scoped_bonus_map_precompute_uses_full_source_window(monkeypatch, tmp_path):
+    artifacts_root = tmp_path / "artifacts"
+    monkeypatch.setenv("P2A_ARTIFACTS_DIR", str(artifacts_root))
+    path = tmp_path / "batch.yaml"
+    path.write_text(
+        """
+provider:
+  source: openai_compatible
+dataset:
+  name: swebench-hard
+experiment:
+  limit: 2
+  offset: 7
+bonus_map_instance_filter:
+  case_type: latent
+models:
+  - api_name: dummy-model
+""",
+        encoding="utf-8",
+    )
+    config = load_batch_config(path)
+    setup_envs = []
+
+    def fake_run_setup(args, *, env):
+        setup_envs.append(dict(env))
+        return args[-1]
+
+    monkeypatch.setattr("p2a.third_party_batch._run_setup", fake_run_setup)
+
+    out = resolve_bonus_map_dir(config, tmp_path / "data.parquet", env={})
+
+    assert out == artifacts_root / "bonus_maps" / "swebench-hard"
+    assert setup_envs[0]["P2A_SETUP_BONUS_OFFSET"] == "0"
+    assert "P2A_SETUP_BONUS_LIMIT" not in setup_envs[0]
+
+
+def test_main_3rd_scoped_precompute_resets_default_bonus_offset():
+    script = Path("scripts/main_3rd.sh").read_text(encoding="utf-8")
+
+    assert 'P2A_THIRD_PARTY_SCOPE_FILTER_ACTIVE=1' in script
+    assert 'P2A_THIRD_PARTY_BONUS_LIMIT="all"' in script
+    assert 'P2A_THIRD_PARTY_BONUS_OFFSET="0"' in script
+
+
 def test_batch_config_accepts_swebench_pro_alias(monkeypatch, tmp_path):
     monkeypatch.setenv("P2A_SHARED_ROOT", str(tmp_path / "shared"))
     monkeypatch.setenv("P2A_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
@@ -169,6 +214,81 @@ storage:
 
     assert config.rollouts_per_instance == 8
     assert config.per_instance_parallelism == 2
+
+
+def test_selected_instance_scope_filters_by_bonus_map_type(monkeypatch, tmp_path):
+    monkeypatch.setenv("P2A_SHARED_ROOT", str(tmp_path / "shared"))
+    monkeypatch.setenv("P2A_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    path = tmp_path / "batch.yaml"
+    path.write_text(
+        """
+provider:
+  source: openai_compatible
+dataset:
+  name: swebench-hard
+bonus_map_instance_filter:
+  case_type: latent
+models:
+  - api_name: dummy-model
+storage:
+  precompute_maps: false
+  bonus_map_dir: data/bonus_maps/swebench-hard
+""",
+        encoding="utf-8",
+    )
+    data = tmp_path / "data.jsonl"
+    data.write_text(
+        "\n".join(
+            [
+                json.dumps({"instance_id": "case-exposed"}),
+                json.dumps({"instance_id": "case-latent"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    bonus_dir = tmp_path / "artifacts" / "bonus_maps" / "swebench-hard"
+    bonus_dir.mkdir(parents=True)
+    (bonus_dir / "case-exposed.json").write_text(
+        json.dumps(
+            {
+                "case_type": "standard",
+                "selected_issue_anchor_nodes": ["pkg/root.py::root"],
+                "root_cause_nodes": ["pkg/root.py::root"],
+                "reward_path_edges": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (bonus_dir / "case-latent.json").write_text(
+        json.dumps(
+            {
+                "case_type": "standard",
+                "selected_issue_anchor_nodes": ["pkg/symptom.py::symptom"],
+                "root_cause_nodes": ["pkg/root.py::root"],
+                "reward_path_edges": [["pkg/symptom.py::symptom", "pkg/root.py::root"]],
+                "call_graph_nodes": {
+                    "pkg/symptom.py::symptom": {"normalized_distance": 1.0},
+                    "pkg/root.py::root": {"normalized_distance": 0.0},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = load_batch_config(path)
+
+    ids, scope = selected_instance_scope(
+        data,
+        limit=None,
+        offset=0,
+        bonus_map_dir=config.bonus_map_dir,
+        scope_filter=config.bonus_map_instance_filter,
+    )
+
+    assert ids == ["case-latent"]
+    assert scope["source_size"] == 2
+    assert scope["selected_size"] == 1
+    assert scope["filter"]["case_types"] == ["latent"]
 
 
 def test_eval_batch_expands_rollouts_per_instance(monkeypatch):

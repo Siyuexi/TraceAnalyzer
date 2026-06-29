@@ -513,6 +513,48 @@ def test_unified_dashboard_snapshot_includes_db_model_metrics(tmp_path):
     assert snapshot["details"][0]["step_inspection"][0]["recovered_reads"][0]["file_path"] == "a.py"
 
 
+def test_model_metrics_read_direct_run_scope_from_experiment_snapshot(tmp_path):
+    db = tmp_path / "traces.sqlite"
+    scope = {
+        "source_size": 500,
+        "selected_size_before_window": 17,
+        "selected_size": 3,
+        "filter": {"case_types": ["latent"], "pattern_computable": True},
+    }
+    with ensure_db(db) as conn:
+        upsert_experiment(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            dataset="swebench-hard",
+            config_snapshot={"experiment": {"scope": scope}},
+        )
+        upsert_planned_cells(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            instance_ids=["case-1"],
+        )
+        upsert_rollout_record(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            record=_rollout("case-1"),
+            detail=_detail("case-1", case_type="direct"),
+        )
+        conn.commit()
+
+        rows = aggregate_model_metrics(conn, experiment_id="exp")
+
+    assert rows[0]["selected_scope"] == scope
+
+
 def test_eval_cache_aggregates_pass_at_n_and_avg_at_n(tmp_path):
     db = tmp_path / "traces.sqlite"
     with ensure_db(db) as conn:
@@ -778,7 +820,7 @@ def test_model_metrics_ignore_other_case_bonus_map_fields(tmp_path):
     assert rows[0]["miracle_rate"] is None
 
 
-def test_case_filter_metrics_bucket_non_evaluable_standard_as_others():
+def test_case_filter_metrics_bucket_non_evaluable_legacy_standard_as_others():
     detail = _standard_order_detail("case-1")
     detail["path_evaluable"] = False
     detail["chain_evaluable"] = False
@@ -787,8 +829,8 @@ def test_case_filter_metrics_bucket_non_evaluable_standard_as_others():
 
     rows = _case_filter_model_metrics([detail])
 
-    assert rows["standard"] == []
-    assert rows["direct,standard"] == []
+    assert rows["latent"] == []
+    assert rows["direct,latent,exposed"] == []
     assert rows["others"][0]["target"] == 1
     assert rows["others"][0]["not_path_evaluable_reasons"] == {"missing_anchor": 1}
     assert rows["others"][0]["not_chain_evaluable_reasons"] == {"missing_anchor": 1}

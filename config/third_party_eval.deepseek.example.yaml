@@ -37,3 +37,8 @@ analysis:
   tracking_mode: view_and_bash
   near_threshold: 0.5
   m_max: 3.0
+
+# Optional direct-run scope filter. Requires --bonus-map-dir.
+# bonus_map_instance_filter:
+#   case_type: latent        # clean Pattern subset
+#   pattern_computable: true # optional explicit denominator guard

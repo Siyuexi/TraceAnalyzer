@@ -459,8 +459,8 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             vm.createContext(context);
             vm.runInContext(fs.readFileSync(appPath, "utf8"), context);
             function run(expr) { return vm.runInContext(expr, context); }
-            if (run("state.caseFilters.direct") !== true || run("state.caseFilters.standard") !== true || run("state.caseFilters.others") !== false) {
-              throw new Error("default case filter should include direct/standard and exclude others");
+            if (run("state.caseFilters.direct") !== true || run("state.caseFilters.latent") !== true || run("state.caseFilters.exposed") !== true || run("state.caseFilters.others") !== false) {
+              throw new Error("default case filter should include direct/latent/exposed and exclude others");
             }
             if (run("state.selectedDataset") !== "swebench-hard") {
               throw new Error("single dataset should be auto-selected");
@@ -857,7 +857,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             if (collapsedSourceHtml.includes("Node Source") || collapsedSourceHtml.includes("pkg/root.py:1-10")) {
               throw new Error("graph source panel should disappear after node selection is cleared");
             }
-            run("state.caseFilters.direct = false; state.caseFilters.standard = false; state.caseFilters.others = true; render();");
+            run("state.caseFilters.direct = false; state.caseFilters.latent = false; state.caseFilters.exposed = false; state.caseFilters.others = true; render();");
             const othersModelHtml = elements.get("model-table").innerHTML;
             if (!othersModelHtml.includes("model-b") || othersModelHtml.includes("model-a")) {
               throw new Error("others case filter did not use backend filtered model rows");
@@ -868,15 +868,15 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             if (!othersModelHtml.includes("case types: others")) {
               throw new Error("case filter scope note missing");
             }
-            run("state.caseFilters.direct = true; state.caseFilters.standard = true; state.caseFilters.others = false; render();");
+            run("state.caseFilters.direct = true; state.caseFilters.latent = true; state.caseFilters.exposed = true; state.caseFilters.others = false; render();");
             const filteredModelHtml = elements.get("model-table").innerHTML;
             if (!filteredModelHtml.includes("model-a") || filteredModelHtml.includes("model-b")) {
-              throw new Error("direct/standard case filter did not use filtered model rows");
+              throw new Error("direct/latent/exposed case filter did not use filtered model rows");
             }
             for (const needle of ["3.5", "4.5", "5.5", "1.0k", "$1.2500"]) {
               if (!filteredModelHtml.includes(needle)) throw new Error(`filtered metrics missing efficiency fallback: ${needle}`);
             }
-            run("state.caseFilters.direct = true; state.caseFilters.standard = true; state.caseFilters.others = true; render();");
+            run("state.caseFilters.direct = true; state.caseFilters.latent = true; state.caseFilters.exposed = true; state.caseFilters.others = true; render();");
             const stepThumbs = (stepHtml.match(/step-thumb/g) || []).length;
             if (stepThumbs < 2) throw new Error("purpose block timeline did not render trace-indexed steps");
             const before = run("state.selectedTraceKey + '|' + state.selectedStepIndex");

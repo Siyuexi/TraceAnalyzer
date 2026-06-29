@@ -441,6 +441,12 @@ tr.is-selected td {
   color: var(--muted);
   font-size: 12px;
 }
+.metric-def-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0 0 8px;
+}
 .kpi-table table {
   min-width: 2100px;
 }

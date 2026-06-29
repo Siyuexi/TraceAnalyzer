@@ -26,6 +26,8 @@ Common overrides:
   THIRD_PARTY_DATASET=swebench-hard|swebench-verified|swebench-pro|r2e-gym-subset
   THIRD_PARTY_DATA_FILE=/path/to/custom.parquet
   P2A_THIRD_PARTY_LIMIT=1
+  P2A_THIRD_PARTY_CASE_TYPES=latent              # comma-separated: direct,latent,exposed
+  P2A_THIRD_PARTY_PATTERN_COMPUTABLE=1
   P2A_THIRD_PARTY_ROLLOUTS_PER_INSTANCE=1      # override experiment.rollouts_per_instance
   P2A_THIRD_PARTY_PER_INSTANCE_PARALLELISM=1   # override experiment.per_instance_parallelism
   P2A_THIRD_PARTY_MAX_TURNS=3
@@ -92,8 +94,22 @@ P2A_THIRD_PARTY_SKIP_TOOL_INSTALL="${P2A_THIRD_PARTY_SKIP_TOOL_INSTALL:-str_repl
 P2A_THIRD_PARTY_PRECOMPUTE_MAPS="${P2A_THIRD_PARTY_PRECOMPUTE_MAPS:-1}"
 P2A_THIRD_PARTY_BONUS_MODE="${P2A_THIRD_PARTY_BONUS_MODE:-dynamic}"
 P2A_THIRD_PARTY_BONUS_N_PARALLEL="${P2A_THIRD_PARTY_BONUS_N_PARALLEL:-4}"
-P2A_THIRD_PARTY_BONUS_LIMIT="${P2A_THIRD_PARTY_BONUS_LIMIT:-${P2A_THIRD_PARTY_LIMIT}}"
-P2A_THIRD_PARTY_BONUS_OFFSET="${P2A_THIRD_PARTY_BONUS_OFFSET:-${P2A_THIRD_PARTY_OFFSET}}"
+P2A_THIRD_PARTY_CASE_TYPES="${P2A_THIRD_PARTY_CASE_TYPES:-}"
+P2A_THIRD_PARTY_PATTERN_COMPUTABLE="${P2A_THIRD_PARTY_PATTERN_COMPUTABLE:-}"
+P2A_THIRD_PARTY_SCOPE_FILTER_ACTIVE=0
+if [[ -n "${P2A_THIRD_PARTY_CASE_TYPES}${P2A_THIRD_PARTY_PATTERN_COMPUTABLE}" ]]; then
+  P2A_THIRD_PARTY_SCOPE_FILTER_ACTIVE=1
+fi
+if [[ "${P2A_THIRD_PARTY_SCOPE_FILTER_ACTIVE}" == "1" && -z "${P2A_THIRD_PARTY_BONUS_LIMIT+x}" ]]; then
+  P2A_THIRD_PARTY_BONUS_LIMIT="all"
+else
+  P2A_THIRD_PARTY_BONUS_LIMIT="${P2A_THIRD_PARTY_BONUS_LIMIT:-${P2A_THIRD_PARTY_LIMIT}}"
+fi
+if [[ "${P2A_THIRD_PARTY_SCOPE_FILTER_ACTIVE}" == "1" && -z "${P2A_THIRD_PARTY_BONUS_OFFSET+x}" ]]; then
+  P2A_THIRD_PARTY_BONUS_OFFSET="0"
+else
+  P2A_THIRD_PARTY_BONUS_OFFSET="${P2A_THIRD_PARTY_BONUS_OFFSET:-${P2A_THIRD_PARTY_OFFSET}}"
+fi
 P2A_THIRD_PARTY_RUN_TIMEOUT="${P2A_THIRD_PARTY_RUN_TIMEOUT:-15m}"
 ARTIFACTS_DIR="$(project_artifacts_dir)"
 P2A_THIRD_PARTY_DB="${P2A_THIRD_PARTY_DB:-${ARTIFACTS_DIR}/evals/traces.sqlite}"
@@ -154,6 +170,15 @@ fi
 if [[ -n "${P2A_THIRD_PARTY_LIMIT}" ]]; then
   run_cmd+=(--limit "${P2A_THIRD_PARTY_LIMIT}")
 fi
+if [[ -n "${P2A_THIRD_PARTY_CASE_TYPES}" ]]; then
+  IFS=',' read -r -a case_types <<< "${P2A_THIRD_PARTY_CASE_TYPES}"
+  for case_type in "${case_types[@]}"; do
+    [[ -n "${case_type}" ]] && run_cmd+=(--case-type "${case_type}")
+  done
+fi
+if [[ "${P2A_THIRD_PARTY_PATTERN_COMPUTABLE}" == "1" || "${P2A_THIRD_PARTY_PATTERN_COMPUTABLE,,}" == "true" ]]; then
+  run_cmd+=(--pattern-computable)
+fi
 if [[ -n "${P2A_THIRD_PARTY_DB}" && "${P2A_THIRD_PARTY_DB}" != "0" ]]; then
   run_cmd+=(
     --cache-db "${P2A_THIRD_PARTY_DB}"
@@ -186,6 +211,7 @@ cat <<EOF
 [third-party] api_key: ${API_KEY_STATUS}
 [third-party] rollouts: ${ROLLOUT_OUT}
 [third-party] maps: ${BONUS_MAP_DIR}
+[third-party] case_types: ${P2A_THIRD_PARTY_CASE_TYPES:-all}
 EOF
 
 if [[ -n "${P2A_THIRD_PARTY_RUN_TIMEOUT}" && "${P2A_THIRD_PARTY_RUN_TIMEOUT}" != "0" ]]; then

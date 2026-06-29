@@ -27,6 +27,15 @@ from p2a.core import (
     segment_purpose_blocks,
     writes_from_step_trace,
 )
+from p2a.bonus_map_scope import (
+    LATENT_CASE,
+    PATH_CASE_TYPES,
+    bonus_map_pattern_computable,
+    bonus_map_root_anchor_overlap,
+    canonical_bonus_case_type,
+    canonical_detail_case_type,
+    traceable_case_family,
+)
 
 SUMMARY_SCHEMA_VERSION = "p2a_eval_fault_localization_v1"
 TEXT_FIELDS = (
@@ -49,7 +58,6 @@ EXECUTION_ERROR_TEXT_PATTERN = re.compile(
 # Persisted eval artifacts historically used `chain_*` keys for what the
 # dashboard now calls Path. New code should prefer the `path_*` aliases; the
 # legacy keys remain readable/writable for old DB rows and detail JSON files.
-PATH_CASE_TYPES = {"standard", "direct"}
 LEGACY_NODE_ROLE_ALIASES = {
     "pre_symptom": "test_adapter",
 }
@@ -823,7 +831,7 @@ def _can_reach(starts: set[str], edges: list[tuple[str, str]]) -> set[str]:
 def _path_evaluability(bonus_map: dict | None) -> tuple[bool, str | None]:
     if not bonus_map:
         return False, "missing_bonus_map"
-    case_type = str(bonus_map.get("case_type") or "")
+    case_type = canonical_bonus_case_type(bonus_map)
     anchors = _string_list(bonus_map.get("selected_issue_anchor_nodes"))
     if case_type not in PATH_CASE_TYPES:
         return False, str(bonus_map.get("reason_code") or case_type or "missing_case_type")
@@ -935,7 +943,11 @@ def _path_projection(
 
 def _path_case_kind(item: dict[str, Any]) -> str | None:
     value = item.get("path_case_kind", item.get("chain_case_kind"))
-    return str(value) if value is not None else None
+    if value is None:
+        value = item.get("bonus_case_type")
+    if value is None:
+        return None
+    return canonical_detail_case_type(item)
 
 
 def _is_path_metric_evaluable(item: dict[str, Any]) -> bool:
@@ -946,11 +958,9 @@ def _is_path_metric_evaluable(item: dict[str, Any]) -> bool:
 def _is_order_metric_evaluable(item: dict[str, Any]) -> bool:
     if not _is_path_metric_evaluable(item):
         return False
-    projection = item.get("path_projection") or item.get("chain_projection") or {}
-    anchors = set(projection.get("anchors") or [])
-    roots = set(projection.get("roots") or [])
-    if anchors & roots:
+    if canonical_detail_case_type(item) != LATENT_CASE:
         return False
+    projection = item.get("path_projection") or item.get("chain_projection") or {}
     return bool(projection.get("path_edges") or projection.get("chain_edges") or [])
 
 
@@ -1025,7 +1035,7 @@ def _path_pattern_flags(
         and any(step >= first_anchor_step for step in root_hit_steps)
     )
     root_before_anchor = (
-        path_case_kind != "direct"
+        path_case_kind == LATENT_CASE
         and first_anchor_step is not None
         and first_root_step is not None
         and first_root_step < first_anchor_step
@@ -1453,7 +1463,13 @@ def score_record(
     if not bonus_map:
         return _sync_path_aliases(result)
 
-    result["bonus_case_type"] = bonus_map.get("case_type")
+    raw_case_type = bonus_map.get("case_type")
+    canonical_case_type = canonical_bonus_case_type(bonus_map)
+    result["bonus_case_type"] = canonical_case_type
+    result["bonus_case_type_raw"] = raw_case_type
+    result["traceable_case_family"] = traceable_case_family(canonical_case_type)
+    result["pattern_computable"] = bonus_map_pattern_computable(bonus_map)
+    result["root_anchor_overlap"] = bonus_map.get("root_anchor_overlap") or bonus_map_root_anchor_overlap(bonus_map)
     result["bonus_traceable"] = bool(bonus_map.get("traceable"))
     nodes = bonus_map.get("call_graph_nodes", {})
     rewardable_nodes = {key: node for key, node in nodes.items() if is_rewardable_graph_node(node)}
@@ -1520,7 +1536,7 @@ def score_record(
         result["path_read_precision"] = (
             path_stats["read_hits_path"] / n_path_scored_reads if n_path_scored_reads else None
         )
-        if result["path_case_kind"] != "direct" and first_anchor is not None and first_root is not None:
+        if result["path_case_kind"] == LATENT_CASE and first_anchor is not None and first_root is not None:
             result["steps_anchor_to_root"] = first_root - first_anchor
             result["anchor_before_root"] = first_anchor <= first_root
         result["path_pattern_flags"] = _path_pattern_flags(
@@ -1671,7 +1687,7 @@ def summarize(details: list[dict], *, source: Path, bonus_map_dir: Path, trackin
                 times_to_anchor.append(item["first_anchor_step"])
             if item.get("first_root_step") is not None:
                 times_to_root.append(item["first_root_step"])
-            if item.get("path_case_kind") != "direct":
+            if _is_order_metric_evaluable(item):
                 counts["n_chain_order_candidates"] += 1
                 if item.get("anchor_before_root") is not None:
                     counts["n_chain_order_defined"] += 1
@@ -1733,7 +1749,7 @@ def summarize(details: list[dict], *, source: Path, bonus_map_dir: Path, trackin
         if _is_order_metric_evaluable(item) and item["block_miracle_step"] is True:
             counts["n_block_miracle"] += 1
 
-        case_type = item["bonus_case_type"] or "missing_bonus_map"
+        case_type = canonical_detail_case_type(item) or "missing_bonus_map"
         bucket = by_case[case_type]
         bucket["n"] += 1
         if item["has_call_graph"]:

@@ -21,7 +21,12 @@ Classification decision tree (evaluated top-to-bottom, first match wins):
       no_gt          – traces exist but none contain a GT callable (error=True)
       no_f2p         – GT traces exist, tests fail, but F2P filter removed all (error=True)
       trace_cap_inconclusive – a trace cap was reached before no_f2p could be proven (error=True)
-      standard       – F2P→GT call chain with intermediate nodes (traceable=True)
+      latent         – F2P→GT call chain with intermediate nodes and at least
+                       one root cause not exposed as the selected symptom anchor
+                       (traceable=True)
+      exposed        – F2P→GT call chain with intermediate nodes where every
+                       root cause is already exposed as the selected symptom
+                       anchor (traceable=True)
       direct         – F2P→GT call chain, test calls GT directly (traceable=True)
 
 Usage:
@@ -47,6 +52,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from p2a.bonus_map_scope import DIRECT_CASE, EXPOSED_CASE, LATENT_CASE, LEGACY_STANDARD_CASE, enrich_bonus_map_case_metadata
 from p2a.datasets import parse_string_list, selector_files
 from p2a.trace import (
     TRACE_FILE_PATH,
@@ -1380,7 +1386,7 @@ def compute_dynamic_bonus_map(
 
     Implements the decision tree:
       1. newly_created / no_callable  (static layer)
-      2. instrumentation_failed → all_pass → no_trace → no_gt → no_f2p/trace_cap_inconclusive → standard / direct
+      2. instrumentation_failed -> all_pass -> no_trace -> no_gt -> no_f2p/trace_cap_inconclusive -> latent / exposed / direct
     """
     from p2a.test_setup import parse_fixups, startup_fixup_command
     from p2a.trace import (
@@ -1899,9 +1905,9 @@ def compute_dynamic_bonus_map(
         )
 
         if n_intermediate > 0:
-            case_type = "standard"
+            case_type = LEGACY_STANDARD_CASE
         else:
-            case_type = "direct"
+            case_type = DIRECT_CASE
 
         result["instance_id"] = instance_id
         result["case_type"] = case_type
@@ -1923,6 +1929,7 @@ def compute_dynamic_bonus_map(
                 max_output_chars=max_sidecar_output_chars,
             )
         )
+        enrich_bonus_map_case_metadata(result)
         return _with_metadata(result, reason_code=case_type, diagnostics=f2p_diag)
 
     except Exception as e:
@@ -2239,7 +2246,7 @@ def main() -> int:
             case_counts[case_type] += 1
             done = sum(case_counts.values())
             if done % 100 == 0:
-                traceable = case_counts["direct"] + case_counts["standard"]
+                traceable = case_counts[DIRECT_CASE] + case_counts[LATENT_CASE] + case_counts[EXPOSED_CASE]
                 print(f"  Progress: {done}/{total} (traceable: {traceable}, errors: {error_count})")
     else:
         with ThreadPoolExecutor(max_workers=args.n_parallel) as executor:
@@ -2258,11 +2265,11 @@ def main() -> int:
                     _append_failure_manifest(failure_manifest_path, [failure])
                 case_counts[case_type] += 1
                 if done_count % 100 == 0:
-                    traceable = case_counts["direct"] + case_counts["standard"]
+                    traceable = case_counts[DIRECT_CASE] + case_counts[LATENT_CASE] + case_counts[EXPOSED_CASE]
                     print(f"  Progress: {done_count}/{total} (traceable: {traceable}, errors: {error_count})")
 
     # Summary table
-    traceable = case_counts["direct"] + case_counts["standard"]
+    traceable = case_counts[DIRECT_CASE] + case_counts[LATENT_CASE] + case_counts[EXPOSED_CASE]
     sum(case_counts[ct] for ct in ("no_trace", "no_gt", "no_f2p"))
 
     print(f"\n{'=' * 50}")
@@ -2270,8 +2277,9 @@ def main() -> int:
     print(f"{'=' * 50}")
 
     print(f"\ntraceable/          {traceable:5d}  ({100 * traceable / total:.1f}%)")
-    print(f"  direct             {case_counts['direct']:5d}")
-    print(f"  standard           {case_counts['standard']:5d}")
+    print(f"  direct             {case_counts[DIRECT_CASE]:5d}")
+    print(f"  latent             {case_counts[LATENT_CASE]:5d}")
+    print(f"  exposed            {case_counts[EXPOSED_CASE]:5d}")
 
     print(f"\nuntraceable/        {total - traceable:5d}  ({100 * (total - traceable) / total:.1f}%)")
     print(f"  newly_created      {case_counts['newly_created']:5d}")
