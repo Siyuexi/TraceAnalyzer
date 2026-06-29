@@ -372,9 +372,12 @@ function visualLegend(title, items) {
 }
 
 function captureInspectorScroll() {
+  const graphWrap = typeof document.querySelector === "function" ? document.querySelector("#trace-graph-pane .graph-wrap") : null;
   return {
     left: document.getElementById("trace-left-pane")?.scrollTop || 0,
     graph: document.getElementById("trace-graph-pane")?.scrollTop || 0,
+    graphWrapLeft: graphWrap?.scrollLeft || 0,
+    graphWrapTop: graphWrap?.scrollTop || 0,
     middle: document.getElementById("trace-middle-pane")?.scrollTop || 0,
     right: document.getElementById("trace-right-pane")?.scrollTop || 0,
   };
@@ -393,6 +396,11 @@ function restoreInspectorScroll(scrollState) {
       const el = document.getElementById(id);
       if (el) el.scrollTop = scrollTop || 0;
     });
+    const graphWrap = typeof document.querySelector === "function" ? document.querySelector("#trace-graph-pane .graph-wrap") : null;
+    if (graphWrap) {
+      graphWrap.scrollLeft = scrollState.graphWrapLeft || 0;
+      graphWrap.scrollTop = scrollState.graphWrapTop || 0;
+    }
   };
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(apply);
   else apply();

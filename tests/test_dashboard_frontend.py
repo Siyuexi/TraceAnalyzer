@@ -432,16 +432,20 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 this.innerHTML = "";
                 this.textContent = "";
                 this.dataset = {};
+                this.scrollLeft = 0;
+                this.scrollTop = 0;
                 this.classList = { toggle() {}, add() {}, remove() {}, contains() { return false; } };
               }
               addEventListener() {}
             }
             const elements = new Map();
+            const selectorElements = new Map();
             const document = {
               getElementById(id) {
                 if (!elements.has(id)) elements.set(id, new Element(id));
                 return elements.get(id);
               },
+              querySelector(selector) { return selectorElements.get(selector) || null; },
               querySelectorAll() { return []; },
             };
             const context = {
@@ -838,6 +842,15 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             const sourceHtml = elements.get("trace-inspector").innerHTML;
             for (const needle of ["code-view language-python", "tok-keyword", "tok-symbol", "tok-lhs", "tok-dot", "tok-property", "def", "self", "value", "obj", "good", "pkg/root.py:1-10"]) {
               if (!sourceHtml.includes(needle)) throw new Error(`missing graph source fragment: ${needle}`);
+            }
+            const graphWrap = {scrollLeft: 320, scrollTop: 24};
+            selectorElements.set("#trace-graph-pane .graph-wrap", graphWrap);
+            const savedGraphScroll = run("captureInspectorScroll()");
+            graphWrap.scrollLeft = 0;
+            graphWrap.scrollTop = 0;
+            run(`restoreInspectorScroll(${JSON.stringify(savedGraphScroll)})`);
+            if (graphWrap.scrollLeft !== 320 || graphWrap.scrollTop !== 24) {
+              throw new Error(`graph viewport scroll was not restored: ${graphWrap.scrollLeft}/${graphWrap.scrollTop}`);
             }
             run("state.selectedGraphNodeKey = null; renderTraceInspector(state.snapshot);");
             const collapsedSourceHtml = elements.get("trace-inspector").innerHTML;
