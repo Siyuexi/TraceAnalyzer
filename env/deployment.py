@@ -140,6 +140,7 @@ class ArlDeployment(AbstractDeployment):
                     resources=self._config.resources,
                     workspace_dir=self._config.workspace_dir,
                     max_replicas=self._config.max_replicas,
+                    api_key=os.getenv("ARL_API_KEY") or os.getenv("ARL_TOKEN"),
                 )
                 # ManagedSession is lazy: the sandbox/pod is provisioned only
                 # when create_sandbox() runs (it sets session_id + pool_ref).
