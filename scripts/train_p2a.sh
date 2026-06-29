@@ -37,7 +37,7 @@ cd "${SRC_ROOT}"
 project_name='P2A-SWE-Agent'
 exp_name='P2A-GSPO-R2E-Fully-Async'
 
-RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
+RAY_DATA_HOME=${RAY_DATA_HOME:-"/apdcephfs_sgfd/share_303735497/yixianliu/arimazhu/verl"}
 MODEL_PATH=${MODEL_PATH:-"$(default_model_path)"}
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
 TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/swe_agent/r2e_gym_subset_p2a.train.parquet"}
@@ -171,7 +171,7 @@ train_prompt_bsz=0
 n_resp_per_prompt=8
 train_prompt_mini_bsz=16
 total_rollout_steps=200000
-test_freq=10
+test_freq=100
 val_before_train=${VAL_BEFORE_TRAIN:-True}
 staleness_threshold=1.0
 trigger_parameter_sync_step=4
@@ -344,7 +344,7 @@ PY
     actor_rollout_ref.rollout.response_length=${max_response_length} \
     actor_rollout_ref.rollout.multi_turn.enable=True \
     actor_rollout_ref.rollout.multi_turn.max_parallel_calls=1 \
-    actor_rollout_ref.rollout.agent.num_workers=${NUM_AGENT_WORKERS:-8} \
+    actor_rollout_ref.rollout.agent.num_workers=${NUM_AGENT_WORKERS:-128} \
     actor_rollout_ref.rollout.agent.agent_loop_config_path=${AGENT_CONFIG_PATH} \
     actor_rollout_ref.rollout.agent.default_agent_loop=swe_agent \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \

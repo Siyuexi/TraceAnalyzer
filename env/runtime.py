@@ -418,6 +418,14 @@ class NexusRuntime(AbstractRuntime):
     async def run_in_session(self, action: BashAction | BashInterruptAction) -> BashObservation:
         name = getattr(action, "session", "default")
         if getattr(action, "action_type", "command") == "interrupt":
+            sid = self._terminal_sessions.get(name)
+            if sid:
+                try:
+                    await self._nexus.run_command_in_terminal_session(
+                        session_id=sid, command="\x03", timeout=5,
+                    )
+                except Exception:
+                    pass
             return BashObservation(output="", exit_code=0, session_type="bash")
 
         if name not in self._terminal_sessions:
@@ -452,10 +460,18 @@ class NexusRuntime(AbstractRuntime):
                 session_type="bash",
             )
         except Exception as exc:
+            terminal_busy = "Command failed to start" in str(exc) or "command is already running" in str(exc).lower()
+            if terminal_busy:
+                try:
+                    await self._nexus.run_command_in_terminal_session(
+                        session_id=sid, command="\x03", timeout=5,
+                    )
+                except Exception:
+                    pass
             return BashObservation(
-                output="",
+                output=str(exc),
                 exit_code=-1,
-                failure_reason=f"nexus_error: {exc}",
+                failure_reason="",
                 session_type="bash",
             )
 
@@ -576,5 +592,5 @@ class NexusRuntime(AbstractRuntime):
         if self._closed:
             return CloseResponse()
         self._closed = True
-        self._sessions.clear()
+        self._terminal_sessions.clear()
         return CloseResponse()
