@@ -470,7 +470,7 @@ class NexusRuntime(AbstractRuntime):
             deadline = time.monotonic() + timeout
             while True:
                 if time.monotonic() > deadline:
-                    # Timeout — interrupt and recover
+                    # Timeout — interrupt and wait for nexus to mark command done
                     try:
                         await self._nexus.send_keys_to_terminal_session(
                             session_id=sid, keys=["C-c", "C-c"],
@@ -481,14 +481,19 @@ class NexusRuntime(AbstractRuntime):
                         )
                     except Exception:
                         pass
-                    # Read whatever output was produced before timeout
-                    try:
-                        final = await self._nexus.query_terminal_command_status(
-                            session_id=sid, command_id=command_id,
-                        )
-                        output = final.output or final.stdout or ""
-                    except Exception:
-                        output = ""
+                    # Poll until nexus marks the command as finished
+                    output = ""
+                    for _ in range(30):
+                        try:
+                            final = await self._nexus.query_terminal_command_status(
+                                session_id=sid, command_id=command_id,
+                            )
+                            output = final.output or final.stdout or ""
+                            if final.end_time is not None:
+                                break
+                        except Exception:
+                            break
+                        await asyncio.sleep(1)
                     return BashObservation(
                         output=output,
                         exit_code=-1,
