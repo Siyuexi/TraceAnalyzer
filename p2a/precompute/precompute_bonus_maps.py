@@ -1588,6 +1588,55 @@ def compute_dynamic_bonus_map(
             capture_diag["test_exit_overridden_from_output"] = True
             test_exit = 1
 
+        all_pass_reason = _all_pass_reason_code(
+            test_exit,
+            capture_diag,
+            swebench_f2p_collection_missing=swebench_f2p_collection_missing,
+        )
+        if all_pass_reason:
+            all_pass_diag = _base_diagnostics(
+                test_exit=test_exit,
+                total_trace_entries=None,
+                raw_gt_trace_count=None,
+                instrumented_callables_count=len(instrumented_callables),
+                stdout=stdout,
+                stderr=stderr,
+                test_output_capture="file",
+            )
+            all_pass_diag.update(env_diag)
+            all_pass_diag.update(test_script_diag)
+            patch_stdout = str(test_script_diag.get("swebench_test_script_patch_stdout") or "")
+            all_pass_diag["swebench_targeted_f2p"] = bool(re.search(r"targeted_(pytest|django|sympy)=[1-9]", patch_stdout))
+            all_pass_diag["swebench_verified"] = env.swebench_verified
+            all_pass_diag["swebench_pro"] = bool(getattr(env, "swebench_pro", False))
+            all_pass_diag["test_timeout"] = test_timeout
+            all_pass_diag["trace_event_cap"] = _env_int("P2A_TRACE_MAX_EVENTS", DEFAULT_TRACE_MAX_EVENTS, minimum=0)
+            all_pass_diag["trace_frame_cap"] = _env_int("P2A_TRACE_MAX_FRAMES", DEFAULT_TRACE_MAX_FRAMES, minimum=0)
+            all_pass_diag["trace_parse_line_cap"] = _env_positive_int_or_none("P2A_TRACE_PARSE_MAX_LINES")
+            all_pass_diag["trace_parse_chunk_lines"] = None
+            all_pass_diag["trace_file_line_count"] = None
+            all_pass_diag["trace_event_cap_reached"] = False
+            all_pass_diag["trace_parse_line_cap_reached"] = False
+            all_pass_diag["trace_parse_skipped"] = True
+            all_pass_diag["trace_parse_skip_reason"] = "all_pass"
+            all_pass_diag["test_output_capture_detail"] = capture_diag
+            all_pass_diag["parsed_trace_count"] = 0
+            all_pass_diag["swebench_f2p_failure_observed"] = swebench_f2p_failure_observed
+            all_pass_diag["swebench_f2p_observed_nodeids"] = swebench_f2p_observation["observed"]
+            all_pass_diag["swebench_f2p_missing_nodeids"] = swebench_f2p_observation["missing"]
+            all_pass_diag["swebench_f2p_collection_missing"] = swebench_f2p_collection_missing
+            all_pass_diag["raw_gt_test_funcs"] = []
+            print(f"  [{instance_id}] all_pass: buggy F2P run exited cleanly. test_exit={test_exit}")
+            return _make_result(
+                instance_id,
+                "all_pass",
+                all_modified,
+                newly_created,
+                error=True,
+                reason_code=all_pass_reason,
+                diagnostics=all_pass_diag,
+            )
+
         # ── Decision node: NO_TRACE ──────────────────────────────────
         # Also check the raw trace file for total entry count (including
         # traces without GT) to distinguish no_trace from no_gt.
@@ -1674,23 +1723,6 @@ def compute_dynamic_bonus_map(
                 max_output_chars=max_sidecar_output_chars,
             )
         )
-
-        all_pass_reason = _all_pass_reason_code(
-            test_exit,
-            capture_diag,
-            swebench_f2p_collection_missing=swebench_f2p_collection_missing,
-        )
-        if all_pass_reason:
-            print(f"  [{instance_id}] all_pass: buggy F2P run exited cleanly. test_exit={test_exit}")
-            return _make_result(
-                instance_id,
-                "all_pass",
-                all_modified,
-                newly_created,
-                error=True,
-                reason_code=all_pass_reason,
-                diagnostics=common_diag,
-            )
 
         if parsed_trace_count == 0:
             import_targets = _detect_import_targets(env, all_modified)

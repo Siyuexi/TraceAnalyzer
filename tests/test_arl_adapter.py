@@ -1048,6 +1048,101 @@ class ArlAdapterTests(unittest.TestCase):
             )
         )
 
+    def test_all_pass_short_circuits_before_trace_parse(self) -> None:
+        from p2a.precompute import precompute_bonus_maps as bonus_maps
+
+        modified = [
+            {
+                "name": "demo",
+                "qualified_name": "demo",
+                "file_path": "pkg/demo.py",
+                "start_line": 10,
+                "end_line": 12,
+            }
+        ]
+
+        class FakeEnv:
+            swebench_verified = True
+            repo_path = "/testbed"
+            alt_path = "/root"
+
+            def start(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def checkout_buggy_commit(self, task, *, instance_id):
+                return {"buggy_checkout_ref": "abc123^", "buggy_checkout_exit": 0}
+
+            def _run(self, command: str, timeout: int | float | None = None):
+                return "", ""
+
+            def _execute_raw(self, command: str, timeout: int | float | None = None):
+                raise AssertionError(f"trace parsing should be skipped for all_pass: {command}")
+
+            def write_file(self, path: str, content: str) -> None:
+                pass
+
+        task = {
+            "instance_id": "pytest__pytest-1",
+            "repo": "pytest-dev/pytest",
+            "patch": "diff --git a/pkg/demo.py b/pkg/demo.py\n",
+            "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_foo"]),
+            "extra_info": {
+                "tools_kwargs": {
+                    "reward": {"name": "swe_bench", "metadata": {}},
+                }
+            },
+        }
+
+        with (
+            patch.object(bonus_maps, "find_modified_callables_from_task", return_value=modified),
+            patch.object(bonus_maps, "find_newly_created_callables", return_value=[]),
+            patch.object(
+                bonus_maps,
+                "_prepare_swebench_test_script",
+                return_value={"swebench_test_script_patch_stdout": "targeted_pytest=1\n"},
+            ),
+            patch.object(
+                bonus_maps,
+                "_run_tests_with_file_capture",
+                return_value=(
+                    "tests/test_demo.py::test_foo PASSED\n",
+                    "",
+                    0,
+                    {
+                        "stdout_read_exit": 0,
+                        "stderr_read_exit": 0,
+                        "exit_read_exit": 0,
+                        "wrapper_exit": 0,
+                        "exit_parse_failed": False,
+                        "all_three_read_failed": False,
+                        "trusted_test_exit": True,
+                    },
+                ),
+            ),
+            patch(
+                "p2a.precompute.uni_agent_sandbox.create_uni_agent_sandbox",
+                return_value=FakeEnv(),
+            ),
+            patch("p2a.trace.instrument_sandbox", return_value=modified),
+            patch(
+                "p2a.trace.parse_fault_traces_from_file",
+                side_effect=AssertionError("trace parser should not run for all_pass"),
+            ),
+        ):
+            result = bonus_maps.compute_dynamic_bonus_map(task)
+
+        self.assertEqual(result["case_type"], "all_pass")
+        self.assertEqual(result["reason_code"], "buggy_version_passes")
+        self.assertTrue(result["trace_parse_skipped"])
+        self.assertEqual(result["trace_parse_skip_reason"], "all_pass")
+        self.assertIsNone(result["trace_file_line_count"])
+        self.assertEqual(result["parsed_trace_count"], 0)
+        self.assertEqual(result["swebench_f2p_observed_nodeids"], ["tests/test_demo.py::test_foo"])
+        self.assertEqual(result["swebench_f2p_missing_nodeids"], [])
+
     def test_swebench_missing_f2p_collection_is_not_all_pass(self) -> None:
         from p2a.precompute import precompute_bonus_maps as bonus_maps
 
