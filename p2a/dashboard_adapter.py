@@ -262,6 +262,20 @@ def _content_block_text(value: Any, *, types: set[str]) -> str:
     return "".join(parts)
 
 
+def _join_unique_text(parts: Iterable[str | None]) -> str:
+    selected: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        if not part:
+            continue
+        text = str(part).strip()
+        if not text or text in seen:
+            continue
+        selected.append(text)
+        seen.add(text)
+    return "\n\n".join(selected)
+
+
 def _split_reasoning_and_chat(trace: dict[str, Any], tool_calls: list[Any]) -> tuple[str, str, list[dict[str, Any]]]:
     response_text = _first_text(trace, ("completion", "response_text", "response", "assistant_response", "content"))
     reasoning = _first_text(trace, ("reasoning", "reasoning_content", "reasoning_text"))
@@ -272,13 +286,13 @@ def _split_reasoning_and_chat(trace: dict[str, Any], tool_calls: list[Any]) -> t
     if content_reasoning:
         reasoning_parts.append(content_reasoning)
     if reasoning_parts:
-        reasoning = "\n\n".join([part for part in [reasoning, *reasoning_parts] if part])
+        reasoning = _join_unique_text([reasoning, *reasoning_parts])
     text_block_chat = "\n\n".join(_block_values(trace.get("text_blocks")))
     if not response_text:
         response_text = text_block_chat or _content_block_text(trace.get("content"), types={"text", "output_text", "message"})
     think_parts = [match.group(1).strip() for match in THINK_BLOCK_RE.finditer(response_text) if match.group(1).strip()]
     if think_parts:
-        reasoning = "\n\n".join([part for part in [reasoning, *think_parts] if part])
+        reasoning = _join_unique_text([reasoning, *think_parts])
     chat = THINK_BLOCK_RE.sub("", response_text).strip()
     parsed_calls = [_parsed_tool_call(call) for call in tool_calls]
     if not parsed_calls:

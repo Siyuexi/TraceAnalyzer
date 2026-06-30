@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import io
 import logging
 import os
@@ -145,6 +146,13 @@ def _extract_gateway_url(session: Any, explicit: str | None) -> str:
     )
 
 
+def _supported_kwargs(callable_obj: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    parameters = inspect.signature(callable_obj).parameters
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
+        return {key: value for key, value in kwargs.items() if value is not None}
+    return {key: value for key, value in kwargs.items() if key in parameters and value is not None}
+
+
 class ArlRuntime(AbstractRuntime):
     """swe-rex ``AbstractRuntime`` backed by an ARL ``ManagedSession``."""
 
@@ -155,12 +163,14 @@ class ArlRuntime(AbstractRuntime):
         run_id: str,
         logger: Any | None = None,
         gateway_url: str | None = None,
+        api_key: str | None = None,
         startup_commands: list[str] | None = None,
     ) -> None:
         self._session = session
         self.run_id = run_id
         self.logger = logger or logging.getLogger(f"arl-runtime.{run_id}")
         self._gateway_url = _extract_gateway_url(session, gateway_url)
+        self._api_key = api_key
         self._shells: dict[str, Any] = {}  # session name -> InteractiveShellClient
         self._startup_commands = [command for command in (startup_commands or []) if command.strip()]
         self._shell_startup_sources: dict[str, list[str]] = {}
@@ -232,7 +242,12 @@ class ArlRuntime(AbstractRuntime):
     def _open_shell(self, name: str, startup_source: list[str] | None) -> str:
         from arl.interactive_shell_client import InteractiveShellClient
 
-        shell = InteractiveShellClient(gateway_url=self._gateway_url)
+        shell = InteractiveShellClient(
+            **_supported_kwargs(
+                InteractiveShellClient,
+                {"gateway_url": self._gateway_url, "api_key": self._api_key},
+            )
+        )
         self._retry_sync("interactive shell connect", shell.connect, self._arl_session_id)
         self._shell_startup_sources[name] = list(startup_source or [])
         # Suppress PTY echo/prompt and disable readline bracketed-paste before any

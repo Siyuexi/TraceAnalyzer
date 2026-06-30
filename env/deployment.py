@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import inspect
 import os
 import shlex
 import uuid
@@ -25,6 +26,13 @@ def require_arl_gateway_url(explicit: str | None = None) -> str:
     if not gateway_url:
         raise RuntimeError("ARL_GATEWAY_URL is required; set it or source .secrets/ips.sh.")
     return gateway_url
+
+
+def _supported_kwargs(callable_obj: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    parameters = inspect.signature(callable_obj).parameters
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
+        return {key: value for key, value in kwargs.items() if value is not None}
+    return {key: value for key, value in kwargs.items() if key in parameters and value is not None}
 
 
 def _missing_pool_ref_payload(exc: BaseException) -> dict[str, Any] | None:
@@ -84,6 +92,8 @@ class ArlDeploymentConfig:
     type: str = "arl"
     gateway_url: str | None = None
     namespace: str = "default"
+    profile: str = "default"
+    api_key: str | None = None
     experiment_id: str | None = None
     timeout: float = 600.0
     startup_timeout: float = 240.0
@@ -178,6 +188,7 @@ class ArlDeployment(AbstractDeployment):
             ) from exc
 
         gateway_url = require_arl_gateway_url(self._config.gateway_url)
+        api_key = self._config.api_key or os.getenv("ARL_API_KEY")
         experiment_id = self._config.experiment_id or os.getenv("ARL_EXPERIMENT_ID", "p2a-uniagent-arl")
 
         self.logger.info(f"Starting ARL deployment image={self._config.image} gateway={gateway_url}")
@@ -186,17 +197,22 @@ class ArlDeployment(AbstractDeployment):
         last_error: Exception | None = None
         for retry in range(max_retries):
             try:
-                session = await self._blocking(
+                session_kwargs = _supported_kwargs(
                     ManagedSession,
-                    image=self._config.image,
-                    experiment_id=experiment_id,
-                    namespace=self._config.namespace,
-                    gateway_url=gateway_url,
-                    timeout=self._config.timeout,
-                    resources=self._config.resources,
-                    workspace_dir=self._config.workspace_dir,
-                    max_replicas=self._config.max_replicas,
+                    {
+                        "image": self._config.image,
+                        "experiment_id": experiment_id,
+                        "namespace": self._config.namespace,
+                        "profile": self._config.profile,
+                        "gateway_url": gateway_url,
+                        "timeout": self._config.timeout,
+                        "resources": self._config.resources,
+                        "workspace_dir": self._config.workspace_dir,
+                        "max_replicas": self._config.max_replicas,
+                        "api_key": api_key,
+                    },
                 )
+                session = await self._blocking(ManagedSession, **session_kwargs)
                 # ManagedSession is lazy: the sandbox/pod is provisioned only
                 # when create_sandbox() runs (it sets session_id + pool_ref).
                 # The interactive-shell runtime needs session_id, so provision
@@ -242,6 +258,7 @@ class ArlDeployment(AbstractDeployment):
             self._session,
             run_id=self.run_id,
             logger=self.logger,
+            api_key=api_key,
             startup_commands=startup_commands,
         )
         self._hooks.on_custom_step("Waiting for ARL execute readiness")

@@ -1060,6 +1060,37 @@ def test_dashboard_step_inspection_splits_local_think_and_xml_tool_call(tmp_path
     ]
 
 
+def test_dashboard_step_inspection_deduplicates_reasoning_blocks(tmp_path):
+    bonus_dir = tmp_path / "bonus"
+    bonus_dir.mkdir()
+    (bonus_dir / "case-1.json").write_text(json.dumps(_bonus_map("case-1")), encoding="utf-8")
+    record = _rollout("case-1")
+    record["p2a_step_traces"] = [
+        {
+            "step_idx": 1,
+            "reasoning_content": "inspect before reading",
+            "reasoning_blocks": [{"type": "reasoning", "value": "inspect before reading"}],
+            "response_text": "",
+            "tool_calls": [
+                {
+                    "function": {
+                        "name": "str_replace_editor",
+                        "arguments": {"command": "view", "path": "/testbed/a.py"},
+                    }
+                }
+            ],
+            "tool_results": [],
+        }
+    ]
+    rollouts = tmp_path / "rollouts.jsonl"
+    rollouts.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    snapshot = build_dashboard_snapshot(DashboardRequest(rollouts=(rollouts,), bonus_map_dir=bonus_dir))
+    step = snapshot["details"][0]["step_inspection"][0]
+
+    assert step["reasoning_text"] == "inspect before reading"
+
+
 def test_dashboard_step_inspection_marks_root_edits_and_execution_errors(tmp_path):
     bonus_dir = tmp_path / "bonus"
     bonus_dir.mkdir()

@@ -54,6 +54,8 @@ class ArlAdapterTests(unittest.TestCase):
                 "image": "registry.local/r2e:latest",
                 "gateway_url": "http://gateway",
                 "namespace": "p2a",
+                "profile": "gpu",
+                "api_key": "secret",
                 "experiment_id": "exp-1",
                 "startup_timeout": 12,
                 "max_replicas": 2,
@@ -69,6 +71,8 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertEqual(env_config.deployment.image, "registry.local/r2e:latest")
         self.assertEqual(env_config.deployment.gateway_url, "http://gateway")
         self.assertEqual(env_config.deployment.namespace, "p2a")
+        self.assertEqual(env_config.deployment.profile, "gpu")
+        self.assertEqual(env_config.deployment.api_key, "secret")
         self.assertEqual(env_config.deployment.experiment_id, "exp-1")
         self.assertEqual(env_config.deployment.startup_timeout, 12)
         self.assertEqual(env_config.deployment.max_replicas, 2)
@@ -86,6 +90,37 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertEqual(deployment.run_id, "run-1")
         with self.assertRaisesRegex(Exception, "runtime not started"):
             _ = deployment.runtime
+
+    def test_arl_deployment_filters_managed_session_kwargs_by_sdk_signature(self) -> None:
+        from env.deployment import _supported_kwargs
+
+        def old_sdk(image, experiment_id, namespace, gateway_url, timeout, workspace_dir, max_replicas):
+            return None
+
+        def new_sdk(image, experiment_id, gateway_url, timeout, resources, workspace_dir, profile, api_key):
+            return None
+
+        kwargs = {
+            "image": "img",
+            "experiment_id": "exp",
+            "namespace": "arl",
+            "profile": "default",
+            "gateway_url": "http://gateway",
+            "timeout": 1,
+            "resources": {"cpu": 1},
+            "workspace_dir": "/workspace",
+            "max_replicas": 1,
+            "api_key": "secret",
+        }
+
+        self.assertEqual(
+            set(_supported_kwargs(old_sdk, kwargs)),
+            {"image", "experiment_id", "namespace", "gateway_url", "timeout", "workspace_dir", "max_replicas"},
+        )
+        self.assertEqual(
+            set(_supported_kwargs(new_sdk, kwargs)),
+            {"image", "experiment_id", "gateway_url", "timeout", "resources", "workspace_dir", "profile", "api_key"},
+        )
 
     def test_arl_deployment_attaches_managed_session_without_pool_ref(self) -> None:
         from env.deployment import _attach_managed_session_payload, _missing_pool_ref_payload
@@ -132,6 +167,20 @@ class ArlAdapterTests(unittest.TestCase):
 
         runtime = ArlRuntime(FakeSession(), run_id="run-1")
         self.assertEqual(runtime._arl_session_id, "arl-session-1")
+
+    def test_arl_runtime_filters_interactive_shell_kwargs_by_sdk_signature(self) -> None:
+        from env.runtime import _supported_kwargs
+
+        def old_shell(gateway_url):
+            return None
+
+        def new_shell(gateway_url, api_key=None):
+            return None
+
+        kwargs = {"gateway_url": "http://gateway", "api_key": "secret"}
+
+        self.assertEqual(_supported_kwargs(old_shell, kwargs), {"gateway_url": "http://gateway"})
+        self.assertEqual(_supported_kwargs(new_shell, kwargs), kwargs)
 
     def test_arl_runtime_strips_pty_control_sequences_from_shell_output(self) -> None:
         from env.runtime import ArlRuntime, _strip_terminal_controls
