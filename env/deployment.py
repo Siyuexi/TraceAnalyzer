@@ -232,7 +232,7 @@ class NexusDeploymentConfig:
     timeout: float = 1200.0
     startup_timeout: float = 600.0
     environment: dict[str, str] | None = field(default=None)
-    resource_spec: dict[str, int] | None = field(default=None)
+    resource_spec: dict[str, int] | None = field(default_factory=lambda: {"cpu": 16, "memory": 16})
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> NexusDeploymentConfig:

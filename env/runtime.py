@@ -415,7 +415,8 @@ class NexusRuntime(AbstractRuntime):
             self.logger.info(f"Created terminal session: {name} -> {sid}")
             try:
                 await self._nexus.start_command_in_terminal_session(
-                    session_id=sid, command="BASH_ARGV0=bash",
+                    session_id=sid,
+                    command="BASH_ARGV0=bash; bind 'set enable-bracketed-paste off' 2>/dev/null",
                 )
             except Exception:
                 pass
