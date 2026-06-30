@@ -323,6 +323,7 @@ class NexusDeployment(AbstractDeployment):
                 self._nexus_runtime = await self._provider.acquire(
                     name=self._runtime_name,
                     environment=environment,
+                    runtime_id=f"nexus-{uuid.uuid4().hex}",
                 )
                 break
             except Exception as exc:

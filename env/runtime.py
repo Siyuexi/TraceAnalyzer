@@ -409,8 +409,9 @@ class NexusRuntime(AbstractRuntime):
     async def create_session(self, request: CreateBashSessionRequest) -> CreateBashSessionResponse:
         name = request.session
         if name not in self._terminal_sessions:
-            resp = await self._nexus.create_terminal_session(session_id=name)
-            sid = getattr(resp, "session_id", None) or name
+            unique_sid = f"{name}-{self.run_id}"
+            resp = await self._nexus.create_terminal_session(session_id=unique_sid)
+            sid = getattr(resp, "session_id", None) or unique_sid
             self._terminal_sessions[name] = sid
             self.logger.info(f"Created terminal session: {name} -> {sid}")
             try:
