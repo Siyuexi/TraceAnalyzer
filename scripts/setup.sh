@@ -101,6 +101,11 @@ p2a_setup_ensure_dataset() {
   custom_file="${2:-}"
   p2a_setup_select_dataset "${dataset}" "${custom_file}"
   if [[ -f "${P2A_SETUP_DATA_FILE}" ]]; then
+    if [[ "${P2A_SETUP_DATASET_SLUG}" == "swebench-pro" ]]; then
+      python_cmd="$(p2a_setup_python_cmd)"
+      PYTHONPATH=".:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess:${PYTHONPATH:-}" \
+        ${python_cmd} scripts/build_data.py validate-swebench-pro --path "${P2A_SETUP_DATA_FILE}"
+    fi
     echo "[setup] data exists: ${P2A_SETUP_DATA_FILE}"
     return 0
   fi

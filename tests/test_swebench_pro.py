@@ -51,6 +51,13 @@ def _sample(repo_language="python"):
     }
 
 
+def _write_pro_scripts(scripts_dir: Path, instance_id: str | None = None) -> None:
+    instance_dir = scripts_dir / (instance_id or _sample()["instance_id"])
+    instance_dir.mkdir(parents=True)
+    (instance_dir / "run_script.sh").write_text("pytest \"$@\"\n", encoding="utf-8")
+    (instance_dir / "parser.py").write_text("print('parse')\n", encoding="utf-8")
+
+
 def test_parse_string_list_accepts_python_repr_and_json():
     assert parse_string_list("['a', 'b']") == ["a", "b"]
     assert parse_string_list('["a", "b"]') == ["a", "b"]
@@ -120,10 +127,7 @@ def test_cmd_swebench_pro_builds_python_subset_with_scripts(monkeypatch, tmp_pat
     build_data = _load_build_data_module()
 
     scripts_dir = tmp_path / "run_scripts"
-    instance_dir = scripts_dir / _sample()["instance_id"]
-    instance_dir.mkdir(parents=True)
-    (instance_dir / "run_script.sh").write_text("pytest \"$@\"\n", encoding="utf-8")
-    (instance_dir / "parser.py").write_text("print('parse')\n", encoding="utf-8")
+    _write_pro_scripts(scripts_dir)
     out = tmp_path / "swe_bench_pro.parquet"
 
     monkeypatch.setattr("p2a.hf_assets.load_shared_dataset", lambda *_args, **_kwargs: [_sample(), _sample("go")])
@@ -156,11 +160,13 @@ def test_cmd_swebench_pro_skips_selected_tests_that_do_not_cover_p2p(monkeypatch
     build_data = _load_build_data_module()
     sample = _sample()
     sample["selected_test_files_to_run"] = '["tests/unit/utils/test_qtlog.py"]'
+    scripts_dir = tmp_path / "run_scripts"
+    scripts_dir.mkdir()
     out = tmp_path / "out.parquet"
 
     monkeypatch.setattr("p2a.hf_assets.load_shared_dataset", lambda *_args, **_kwargs: [sample])
 
-    rc = build_data.cmd_swebench_pro(SimpleNamespace(out=str(out), language="python", scripts_dir=None))
+    rc = build_data.cmd_swebench_pro(SimpleNamespace(out=str(out), language="python", scripts_dir=str(scripts_dir)))
 
     assert rc == 0
     assert pd.read_parquet(out).empty
@@ -170,16 +176,61 @@ def test_cmd_swebench_pro_keeps_empty_selected_tests_for_runtime_fallback(monkey
     build_data = _load_build_data_module()
     sample = _sample()
     sample["selected_test_files_to_run"] = "[]"
+    scripts_dir = tmp_path / "run_scripts"
+    _write_pro_scripts(scripts_dir)
     out = tmp_path / "out.parquet"
 
     monkeypatch.setattr("p2a.hf_assets.load_shared_dataset", lambda *_args, **_kwargs: [sample])
 
-    rc = build_data.cmd_swebench_pro(SimpleNamespace(out=str(out), language="python", scripts_dir=None))
+    rc = build_data.cmd_swebench_pro(SimpleNamespace(out=str(out), language="python", scripts_dir=str(scripts_dir)))
 
     assert rc == 0
     rows = pd.read_parquet(out).to_dict(orient="records")
     assert len(rows) == 1
     assert json.loads(rows[0]["selected_test_files_to_run"]) == []
+    assert rows[0]["run_tests"] == "pytest \"$@\"\n"
+
+
+def test_cmd_swebench_pro_requires_scripts_dir(monkeypatch, tmp_path):
+    build_data = _load_build_data_module()
+    out = tmp_path / "out.parquet"
+
+    monkeypatch.setattr("p2a.hf_assets.load_shared_dataset", lambda *_args, **_kwargs: [_sample()])
+
+    with pytest.raises(ValueError, match="requires --scripts-dir"):
+        build_data.cmd_swebench_pro(SimpleNamespace(out=str(out), language="python", scripts_dir=None))
+    assert not out.exists()
+
+
+def test_cmd_swebench_pro_rejects_missing_instance_scripts(monkeypatch, tmp_path):
+    build_data = _load_build_data_module()
+    scripts_dir = tmp_path / "run_scripts"
+    scripts_dir.mkdir()
+    out = tmp_path / "out.parquet"
+
+    monkeypatch.setattr("p2a.hf_assets.load_shared_dataset", lambda *_args, **_kwargs: [_sample()])
+
+    with pytest.raises(ValueError, match="missing required SWE-Bench-Pro run scripts"):
+        build_data.cmd_swebench_pro(SimpleNamespace(out=str(out), language="python", scripts_dir=str(scripts_dir)))
+    assert not out.exists()
+
+
+def test_validate_swebench_pro_parquet_rejects_empty_scripts(tmp_path):
+    build_data = _load_build_data_module()
+    path = tmp_path / "bad.parquet"
+    pd.DataFrame(
+        [
+            {
+                "data_source": "swebench-pro",
+                "instance_id": "demo",
+                "run_tests": "",
+                "swebench_pro_parser": None,
+            }
+        ]
+    ).to_parquet(path, index=False)
+
+    with pytest.raises(ValueError, match="empty run_tests, swebench_pro_parser"):
+        build_data.validate_swebench_pro_parquet(path)
 
 
 def test_swebench_pro_reward_grades_f2p_and_p2p():
@@ -509,6 +560,58 @@ def test_swebench_pro_precompute_short_circuits_empty_f2p():
 
     assert result["case_type"] == "no_f2p"
     assert result["reason_code"] == "missing_fail_to_pass"
+
+
+def test_swebench_pro_precompute_missing_scripts_is_precompute_failure():
+    from p2a.precompute import precompute_bonus_maps as bonus_maps
+
+    modified = [
+        {
+            "name": "demo",
+            "qualified_name": "demo",
+            "file_path": "pkg/demo.py",
+            "start_line": 10,
+            "end_line": 12,
+        }
+    ]
+
+    class FakeEnv:
+        swebench_verified = False
+        swebench_pro = True
+        repo_path = "/app"
+        alt_path = "/root"
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+        def checkout_buggy_commit(self, task, *, instance_id):
+            return {"buggy_checkout_ref": "abc123^", "buggy_checkout_exit": 0}
+
+        def _run(self, command, timeout=None):
+            raise AssertionError("missing Pro scripts must not run commands")
+
+    with (
+        patch.object(bonus_maps, "find_modified_callables_from_task", return_value=modified),
+        patch.object(bonus_maps, "find_newly_created_callables", return_value=[]),
+        patch("p2a.precompute.uni_agent_sandbox.create_uni_agent_sandbox", return_value=FakeEnv()),
+    ):
+        result = bonus_maps.compute_dynamic_bonus_map(
+            {
+                "instance_id": "demo",
+                "data_source": "swebench-pro",
+                "patch": "diff --git a/pkg/demo.py b/pkg/demo.py\n",
+                "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_bug"]),
+            }
+        )
+
+    assert result["case_type"] == "precompute_failed"
+    assert result["reason_code"] == "missing_swebench_pro_scripts"
+    assert result["precompute_failure"] is True
+    assert result["failure_kind"] == "missing_swebench_pro_scripts"
+    assert result["missing_swebench_pro_fields"] == ["run_tests", "swebench_pro_parser"]
 
 
 def test_swebench_pro_task_detection_does_not_match_generic_python_docker_rows():

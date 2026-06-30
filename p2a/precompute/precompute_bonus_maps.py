@@ -1129,15 +1129,7 @@ def _prepare_swebench_pro_test_script(env, task: dict, test_script: str) -> dict
     diag["swebench_f2p_nodeids"] = f2p_nodeids
     diag["swebench_test_script_patch_stdout"] = "targeted_pytest=1\n" if f2p_nodeids else "targeted_pytest=0\n"
     if not isinstance(run_tests, str) or not run_tests.strip():
-        env.write_file(
-            test_script,
-            "#!/bin/bash\n"
-            "echo 'SWE-Bench-Pro run_script.sh is missing from task metadata' >&2\n"
-            "exit 127\n",
-        )
-        env._run(f"chmod +x {shlex.quote(test_script)}", timeout=60)
-        diag["swebench_pro_run_tests_source"] = "missing"
-        return diag
+        raise ValueError("SWE-Bench-Pro run_tests is required for dynamic precompute")
 
     official_script = "/tmp/p2a_swebench_pro_official_run.sh"
     selected_arg = shlex.quote(",".join(selected_files)) if selected_files else ""
@@ -1161,6 +1153,15 @@ def _prepare_swebench_pro_test_script(env, task: dict, test_script: str) -> dict
     diag["swebench_pro_prepare_stdout"] = stdout
     diag["swebench_pro_prepare_stderr"] = stderr
     return diag
+
+
+def _missing_swebench_pro_script_fields(task: dict) -> list[str]:
+    missing = []
+    for field in ("run_tests", "swebench_pro_parser"):
+        value = task.get(field)
+        if not isinstance(value, str) or not value.strip():
+            missing.append(field)
+    return missing
 
 
 def _module_name_from_file_path(file_path: str) -> str | None:
@@ -1505,6 +1506,24 @@ def compute_dynamic_bonus_map(
                 reason_code="missing_fail_to_pass",
                 diagnostics={**env_diag, "swebench_pro": True, "swebench_pro_f2p_nodeids": []},
             )
+        if getattr(env, "swebench_pro", False):
+            missing_script_fields = _missing_swebench_pro_script_fields(task)
+            if missing_script_fields:
+                return _make_result(
+                    instance_id,
+                    "precompute_failed",
+                    all_modified,
+                    newly_created,
+                    error=True,
+                    reason_code="missing_swebench_pro_scripts",
+                    diagnostics={
+                        **env_diag,
+                        "precompute_failure": True,
+                        "failure_kind": "missing_swebench_pro_scripts",
+                        "swebench_pro": True,
+                        "missing_swebench_pro_fields": missing_script_fields,
+                    },
+                )
 
         _debug_progress(instance_id, "instrument")
         instrumented_callables = instrument_sandbox(env, all_modified)

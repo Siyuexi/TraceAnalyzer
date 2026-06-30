@@ -230,6 +230,51 @@ def _read_swebench_pro_scripts(scripts_dir: str | None, instance_id: str) -> dic
     }
 
 
+def _require_swebench_pro_scripts_dir(scripts_dir: str | None) -> Path:
+    if not scripts_dir:
+        raise ValueError(
+            "swebench-pro requires --scripts-dir <SWE-bench_Pro-os/run_scripts> "
+            "or P2A_SWEBENCH_PRO_SCRIPTS_DIR"
+        )
+    path = Path(scripts_dir).expanduser()
+    if not path.is_dir():
+        raise ValueError(f"swebench-pro scripts dir does not exist or is not a directory: {path}")
+    return path
+
+
+def validate_swebench_pro_parquet(path: str | Path) -> None:
+    parquet_path = Path(path)
+    df = pd.read_parquet(parquet_path)
+    required = ("run_tests", "swebench_pro_parser")
+    missing_columns = [column for column in required if column not in df.columns]
+    if missing_columns:
+        raise ValueError(
+            f"swebench-pro parquet {parquet_path} is missing required columns: "
+            f"{', '.join(missing_columns)}"
+        )
+    if df.empty:
+        return
+    bad_columns = [
+        column
+        for column in required
+        if df[column].fillna("").astype(str).str.strip().eq("").any()
+    ]
+    if bad_columns:
+        bad_count = int(
+            df[list(bad_columns)]
+            .fillna("")
+            .astype(str)
+            .apply(lambda col: col.str.strip().eq(""))
+            .any(axis=1)
+            .sum()
+        )
+        raise ValueError(
+            f"swebench-pro parquet {parquet_path} has {bad_count} row(s) with empty "
+            f"{', '.join(bad_columns)}; rebuild with --scripts-dir "
+            "<SWE-bench_Pro-os/run_scripts>"
+        )
+
+
 def cmd_swebench_pro(args) -> int:
     from env.images import mirror_image
     from p2a.hf_assets import load_shared_dataset
@@ -243,7 +288,33 @@ def cmd_swebench_pro(args) -> int:
         raise ValueError("Phase 1 supports only --language python")
 
     scripts_dir = args.scripts_dir or os.getenv("P2A_SWEBENCH_PRO_SCRIPTS_DIR") or os.getenv("SWEBENCH_PRO_SCRIPTS_DIR")
+    allow_missing_scripts = bool(getattr(args, "allow_missing_scripts", False))
+    if not allow_missing_scripts:
+        scripts_dir = str(_require_swebench_pro_scripts_dir(scripts_dir))
+    output_columns = [
+        "prompt",
+        "data_source",
+        "instance_id",
+        "agent_name",
+        "reward_model",
+        "extra_info",
+        "repo",
+        "repo_language",
+        "base_commit",
+        "patch",
+        "problem_statement",
+        "requirements",
+        "interface",
+        "FAIL_TO_PASS",
+        "PASS_TO_PASS",
+        "selected_test_files_to_run",
+        "dockerhub_tag",
+        "docker_image",
+        "run_tests",
+        "swebench_pro_parser",
+    ]
     rows, total, skipped_language, skipped_invalid_selected, scripts_hit, scripts_miss = [], 0, 0, 0, 0, 0
+    missing_script_ids: list[str] = []
     for raw in load_shared_dataset("ScaleAI/SWE-bench_Pro", split="test"):
         total += 1
         ex = dict(raw)
@@ -272,6 +343,9 @@ def cmd_swebench_pro(args) -> int:
             scripts_hit += 1
         else:
             scripts_miss += 1
+            if not allow_missing_scripts:
+                missing_script_ids.append(iid)
+                continue
 
         metadata = {
             **ex,
@@ -323,7 +397,17 @@ def cmd_swebench_pro(args) -> int:
         }
         rows.append(row)
 
-    pd.DataFrame(rows).to_parquet(args.out, index=False)
+    if missing_script_ids:
+        examples = ", ".join(missing_script_ids[:5])
+        suffix = "" if len(missing_script_ids) <= 5 else f", ... (+{len(missing_script_ids) - 5} more)"
+        raise ValueError(
+            f"missing required SWE-Bench-Pro run scripts for {len(missing_script_ids)} "
+            f"instance(s): {examples}{suffix}. Expected run_script.sh and parser.py under "
+            f"{scripts_dir}/<instance_id>/"
+        )
+
+    pd.DataFrame(rows, columns=output_columns).to_parquet(args.out, index=False)
+    validate_swebench_pro_parquet(args.out)
     print(
         f"swebench-pro phase1 language={language}: {len(rows)}/{total} "
         f"(skipped_language={skipped_language}, skipped_invalid_selected={skipped_invalid_selected}, "
@@ -336,6 +420,12 @@ def cmd_swebench_pro(args) -> int:
             "--scripts-dir <SWE-bench_Pro-os/run_scripts> or P2A_SWEBENCH_PRO_SCRIPTS_DIR.",
             file=sys.stderr,
         )
+    return 0
+
+
+def cmd_validate_swebench_pro(args) -> int:
+    validate_swebench_pro_parquet(args.path)
+    print(f"swebench-pro parquet valid: {args.path}")
     return 0
 
 
@@ -415,9 +505,18 @@ def main() -> int:
     pro.add_argument(
         "--scripts-dir",
         default=os.getenv("P2A_SWEBENCH_PRO_SCRIPTS_DIR") or os.getenv("SWEBENCH_PRO_SCRIPTS_DIR"),
-        help="Optional path to SWE-bench_Pro-os/run_scripts; embeds run_script.sh/parser.py into rows",
+        help="Required path to SWE-bench_Pro-os/run_scripts; embeds run_script.sh/parser.py into rows",
+    )
+    pro.add_argument(
+        "--allow-missing-scripts",
+        action="store_true",
+        help="Debug only: write rows even when official run scripts are unavailable",
     )
     pro.set_defaults(func=cmd_swebench_pro)
+
+    validate_pro = sub.add_parser("validate-swebench-pro", help="validate executable SWE-Bench-Pro parquet fields")
+    validate_pro.add_argument("--path", required=True)
+    validate_pro.set_defaults(func=cmd_validate_swebench_pro)
 
     k = sub.add_parser("skip-list", help="regenerate config/bad_instances.json from gate results")
     k.add_argument("--gate", action="append", default=[], required=True)

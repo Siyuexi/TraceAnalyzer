@@ -191,7 +191,7 @@ PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
 PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py swebench-hard --out $DATA/swe_bench_verified_hard.parquet
 
-# Optional Phase 1 SWE-Bench-Pro eval subset: Python repos only, never training.
+# Phase 1 SWE-Bench-Pro eval subset: Python repos only, never training.
 export P2A_SWEBENCH_PRO_SCRIPTS_DIR=/path/to/SWE-bench_Pro-os/run_scripts
 PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py swebench-pro \
@@ -204,8 +204,10 @@ The two upstream cache directories are expected: `SWE-Bench-Verified/` carries
 R2E-Gym eval rows, while `SWE-bench_Verified/` carries Princeton difficulty labels.
 `swebench-pro` stores the upstream `repo_language`, normalized `FAIL_TO_PASS` /
 `PASS_TO_PASS`, the mirrored `jefzda/sweap-images:{dockerhub_tag}` image, and
-the per-instance SWE-Bench-Pro run script/parser when `--scripts-dir` points at
-the official open-source `run_scripts/` checkout. Pro images use `/app` as the
+the per-instance SWE-Bench-Pro run script/parser from the official open-source
+`run_scripts/` checkout. `--scripts-dir` is required because the HuggingFace
+dataset does not carry `run_script.sh` or `parser.py`; setup rejects existing
+SWE-Bench-Pro parquets with empty script fields. Pro images use `/app` as the
 repository root, so the generated setup and verifier metadata keep that path
 separate from SWE-bench Verified's `/testbed`. Dynamic ARL precompute also
 requires the corresponding `sweap-images` tags to be present in the pair-diag
