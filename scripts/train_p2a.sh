@@ -169,7 +169,7 @@ nccl_timeout="${P2A_NCCL_TIMEOUT:-9600}"
 
 train_prompt_bsz=0
 n_resp_per_prompt=8
-train_prompt_mini_bsz=16
+train_prompt_mini_bsz=${TRAIN_PROMPT_MINI_BSZ:-16}
 total_rollout_steps=200000
 test_freq=100
 val_before_train=${VAL_BEFORE_TRAIN:-True}

@@ -46,7 +46,7 @@ class ArlDeploymentConfig:
     image: str
     type: str = "arl"
     gateway_url: str | None = None
-    namespace: str = "default"
+    namespace: str = "arl"
     experiment_id: str | None = None
     timeout: float = 600.0
     startup_timeout: float = 240.0

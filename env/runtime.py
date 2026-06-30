@@ -413,6 +413,12 @@ class NexusRuntime(AbstractRuntime):
             sid = getattr(resp, "session_id", None) or name
             self._terminal_sessions[name] = sid
             self.logger.info(f"Created terminal session: {name} -> {sid}")
+            try:
+                await self._nexus.start_command_in_terminal_session(
+                    session_id=sid, command="BASH_ARGV0=bash",
+                )
+            except Exception:
+                pass
         return CreateBashSessionResponse(output="", session_type="bash")
 
     async def run_in_session(self, action: BashAction | BashInterruptAction) -> BashObservation:

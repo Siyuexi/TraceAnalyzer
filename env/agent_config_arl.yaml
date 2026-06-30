@@ -9,8 +9,8 @@
   tool_parser: qwen3_coder
 
   interaction:
-    action_timeout: 300
-    max_turns: 100
+    action_timeout: 600
+    max_turns: 50
 
   env:
     deployment:
