@@ -415,10 +415,17 @@ class NexusRuntime(AbstractRuntime):
             self._terminal_sessions[name] = sid
             self.logger.info(f"Created terminal session: {name} -> {sid}")
             try:
-                await self._nexus.start_command_in_terminal_session(
+                info = await self._nexus.start_command_in_terminal_session(
                     session_id=sid,
                     command="BASH_ARGV0=bash; bind 'set enable-bracketed-paste off' 2>/dev/null",
                 )
+                cid = getattr(info, "command_id", None)
+                if cid is not None:
+                    for _ in range(50):
+                        await asyncio.sleep(0.1)
+                        st = await self._nexus.query_terminal_command_status(sid, cid)
+                        if st.end_time is not None:
+                            break
             except Exception:
                 pass
         return CreateBashSessionResponse(output="", session_type="bash")
