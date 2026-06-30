@@ -8,6 +8,7 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from swerex.deployment.abstract import AbstractDeployment
@@ -23,6 +24,49 @@ def require_arl_gateway_url(explicit: str | None = None) -> str:
     if not gateway_url:
         raise RuntimeError("ARL_GATEWAY_URL is required; set it or source .secrets/ips.sh.")
     return gateway_url
+
+
+def _missing_pool_ref_payload(exc: BaseException) -> dict[str, Any] | None:
+    errors = getattr(exc, "errors", None)
+    if not callable(errors):
+        return None
+    try:
+        validation_errors = errors()
+    except Exception:
+        return None
+    if not isinstance(validation_errors, list):
+        return None
+    for item in validation_errors:
+        if not isinstance(item, dict) or item.get("type") != "missing":
+            continue
+        loc = item.get("loc") or ()
+        loc_parts = {str(part) for part in loc} if isinstance(loc, (list, tuple)) else {str(loc)}
+        if not ({"poolRef", "pool_ref"} & loc_parts):
+            continue
+        payload = item.get("input")
+        if isinstance(payload, dict) and payload.get("id"):
+            return payload
+    return None
+
+
+def _attach_managed_session_payload(session: Any, payload: dict[str, Any]) -> Any:
+    session_id = str(payload["id"])
+    pool_ref = str(payload.get("poolRef") or payload.get("pool_ref") or "")
+    setattr(session, "_session_id", session_id)
+    setattr(session, "pool_ref", pool_ref)
+    info = SimpleNamespace(
+        id=session_id,
+        sandbox_name=payload.get("sandboxName") or payload.get("sandbox_name") or session_id,
+        namespace=payload.get("namespace") or getattr(session, "namespace", ""),
+        pool_ref=pool_ref,
+        pod_ip=payload.get("podIP") or payload.get("pod_ip") or "",
+        pod_name=payload.get("podName") or payload.get("pod_name") or "",
+        created_at=payload.get("createdAt") or payload.get("created_at"),
+        experiment_id=payload.get("experimentId") or payload.get("experiment_id") or "",
+        managed=bool(payload.get("managed", True)),
+    )
+    setattr(session, "_session_info", info)
+    return info
 
 
 @dataclass
@@ -154,7 +198,16 @@ class ArlDeployment(AbstractDeployment):
                 # when create_sandbox() runs (it sets session_id + pool_ref).
                 # The interactive-shell runtime needs session_id, so provision
                 # here, inside the retry loop, before attaching the adapter.
-                info = await self._blocking(session.create_sandbox)
+                try:
+                    info = await self._blocking(session.create_sandbox)
+                except Exception as exc:
+                    payload = _missing_pool_ref_payload(exc)
+                    if payload is None:
+                        raise
+                    info = _attach_managed_session_payload(session, payload)
+                    self.logger.warning(
+                        f"ARL managed-session response omitted poolRef; continuing with session_id={info.id}"
+                    )
                 if not (getattr(session, "session_id", None) or getattr(session, "_session_id", None)):
                     session_id = getattr(info, "id", None)
                     if session_id:

@@ -85,6 +85,39 @@ class ArlAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "runtime not started"):
             _ = deployment.runtime
 
+    def test_arl_deployment_attaches_managed_session_without_pool_ref(self) -> None:
+        from env.deployment import _attach_managed_session_payload, _missing_pool_ref_payload
+
+        class MissingPoolRefError(Exception):
+            def errors(self):
+                return [
+                    {
+                        "type": "missing",
+                        "loc": ("poolRef",),
+                        "input": {
+                            "id": "gw-1",
+                            "sandboxName": "gw-1",
+                            "namespace": "arl",
+                            "podIP": "172.31.0.10",
+                            "podName": "managed-pod",
+                            "managed": True,
+                            "experimentId": "exp-1",
+                        },
+                    }
+                ]
+
+        session = SimpleNamespace(namespace="arl")
+        payload = _missing_pool_ref_payload(MissingPoolRefError())
+        self.assertIsNotNone(payload)
+        info = _attach_managed_session_payload(session, payload)
+
+        self.assertEqual(session._session_id, "gw-1")
+        self.assertEqual(session.pool_ref, "")
+        self.assertIs(session._session_info, info)
+        self.assertEqual(info.id, "gw-1")
+        self.assertEqual(info.pool_ref, "")
+        self.assertEqual(info.pod_name, "managed-pod")
+
     def test_arl_runtime_uses_managed_session_private_id(self) -> None:
         from env.runtime import ArlRuntime
 
@@ -505,6 +538,37 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertEqual(sandbox.writes["/testbed/pkg/demo.py"], "def demo():\n    return 'old'\n")
         self.assertNotIn("sandbox_code_state_mismatch", diag)
 
+    def test_r2e_buggy_checkout_accepts_hash_ref_when_expected_stdout_is_empty(self) -> None:
+        from p2a.precompute.uni_agent_sandbox import UniAgentSandboxAdapter
+
+        commit = "30379ea6e225e37833a764ac2da7b7fadf5fe374"
+
+        class FakeSandbox(UniAgentSandboxAdapter):
+            repo_path = "/testbed"
+            swebench_pro = False
+
+            def __init__(self):
+                pass
+
+            def _execute_raw(self, command: str, timeout: int | float | None = None):
+                if "git rev-parse --verify" in command:
+                    return "", "", 0
+                if "git checkout" in command:
+                    return "", "", 0
+                if "git rev-parse HEAD" in command:
+                    return f"{commit}\n", "", 0
+                return "", "", 0
+
+            def write_file(self, path: str | Path, content: str) -> None:
+                raise AssertionError("no old sources should be written")
+
+        diag = FakeSandbox().checkout_buggy_commit({"base_commit": commit}, instance_id="sympy__sympy-13372")
+
+        self.assertTrue(diag["buggy_checkout_verified"])
+        self.assertEqual(diag["sandbox_code_state"], "git_checkout_verified")
+        self.assertEqual(diag["buggy_checkout_verification"], "commit_ref_head")
+        self.assertNotIn("sandbox_code_state_mismatch", diag)
+
     def test_r2e_buggy_checkout_reports_code_state_mismatch_without_fallback(self) -> None:
         from p2a.precompute.uni_agent_sandbox import UniAgentSandboxAdapter
 
@@ -732,15 +796,229 @@ class ArlAdapterTests(unittest.TestCase):
             text = Path(script).read_text(encoding="utf-8")
 
         self.assertIn("targeted_sympy=0", diag["swebench_test_script_patch_stdout"])
+        self.assertIn("sympy_file_level_selection=1", diag["swebench_test_script_patch_stdout"])
+        self.assertIn("sympy_f2p_file_coverage_complete=0", diag["swebench_test_script_patch_stdout"])
         self.assertIn("bin/test -C --verbose sympy/printing/tests/test_latex.py", text)
         self.assertNotIn(" -k ", text)
 
+    def test_swebench_sympy_file_level_selection_covers_all_f2p(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import _prepare_swebench_test_script
+
+        class FakeEnv:
+            def write_file(self, path: str, content: str) -> None:
+                Path(path).write_text(content, encoding="utf-8")
+
+            def _run(self, command: str, timeout: int | float | None = None) -> tuple[str, str]:
+                if "python - <<'PY'" not in command:
+                    return "", ""
+                result = subprocess.run(command, shell=True, text=True, capture_output=True, check=False)
+                return result.stdout, result.stderr
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = str(Path(tmp) / "run_tests.sh")
+            diag = _prepare_swebench_test_script(
+                FakeEnv(),
+                {
+                    "repo": "sympy/sympy",
+                    "FAIL_TO_PASS": '["test_evalf_bugs"]',
+                    "test_patch": "\n".join(
+                        [
+                            "diff --git a/sympy/core/tests/test_evalf.py b/sympy/core/tests/test_evalf.py",
+                            "--- a/sympy/core/tests/test_evalf.py",
+                            "+++ b/sympy/core/tests/test_evalf.py",
+                            "@@ -220,10 +220,11 @@ def test_evalf_helpers():",
+                            " def test_evalf_bugs():",
+                            "     assert True",
+                            "+    assert 1 == 1",
+                        ]
+                    ),
+                    "run_tests": "\n".join(
+                        [
+                            "#!/bin/bash",
+                            "python -m pip install -e .",
+                            "PYTHONWARNINGS='ignore::UserWarning' bin/test -C --verbose sympy/core/tests/test_evalf.py",
+                        ]
+                    ),
+                },
+                script,
+            )
+
+        stdout = diag["swebench_test_script_patch_stdout"]
+        self.assertIn("sympy_file_level_selection=1", stdout)
+        self.assertIn("sympy_f2p_file_coverage_complete=1", stdout)
+        self.assertIn('"test_evalf_bugs": ["sympy/core/tests/test_evalf.py"]', stdout)
+        self.assertIn("sympy_f2p_uncovered_nodeids=[]", stdout)
+
+    def test_swebench_sympy_file_level_selection_rejects_partial_f2p_coverage(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import _prepare_swebench_test_script
+
+        class FakeEnv:
+            def write_file(self, path: str, content: str) -> None:
+                Path(path).write_text(content, encoding="utf-8")
+
+            def _run(self, command: str, timeout: int | float | None = None) -> tuple[str, str]:
+                if "python - <<'PY'" not in command:
+                    return "", ""
+                result = subprocess.run(command, shell=True, text=True, capture_output=True, check=False)
+                return result.stdout, result.stderr
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = str(Path(tmp) / "run_tests.sh")
+            diag = _prepare_swebench_test_script(
+                FakeEnv(),
+                {
+                    "repo": "sympy/sympy",
+                    "FAIL_TO_PASS": '["test_a", "test_b"]',
+                    "test_patch": "\n".join(
+                        [
+                            "diff --git a/sympy/core/tests/test_a.py b/sympy/core/tests/test_a.py",
+                            "--- a/sympy/core/tests/test_a.py",
+                            "+++ b/sympy/core/tests/test_a.py",
+                            "@@ -1,3 +1,4 @@ def test_a():",
+                            "+    assert True",
+                            "diff --git a/sympy/core/tests/test_b.py b/sympy/core/tests/test_b.py",
+                            "--- a/sympy/core/tests/test_b.py",
+                            "+++ b/sympy/core/tests/test_b.py",
+                            "@@ -1,3 +1,4 @@ def test_b():",
+                            "+    assert True",
+                        ]
+                    ),
+                    "run_tests": "\n".join(
+                        [
+                            "#!/bin/bash",
+                            "python -m pip install -e .",
+                            "bin/test -C --verbose sympy/core/tests/test_a.py",
+                        ]
+                    ),
+                },
+                script,
+            )
+
+        stdout = diag["swebench_test_script_patch_stdout"]
+        self.assertIn("sympy_file_level_selection=1", stdout)
+        self.assertIn("sympy_f2p_file_coverage_complete=0", stdout)
+        self.assertIn('"test_a": ["sympy/core/tests/test_a.py"]', stdout)
+        self.assertIn('"test_b": []', stdout)
+        self.assertIn('sympy_f2p_uncovered_nodeids=["test_b"]', stdout)
+
+    def test_swebench_sympy_file_level_selection_covers_helper_patch_file(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import _prepare_swebench_test_script
+
+        class FakeEnv:
+            def write_file(self, path: str, content: str) -> None:
+                Path(path).write_text(content, encoding="utf-8")
+
+            def _run(self, command: str, timeout: int | float | None = None) -> tuple[str, str]:
+                if "python - <<'PY'" not in command:
+                    return "", ""
+                result = subprocess.run(command, shell=True, text=True, capture_output=True, check=False)
+                return result.stdout, result.stderr
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = str(Path(tmp) / "run_tests.sh")
+            diag = _prepare_swebench_test_script(
+                FakeEnv(),
+                {
+                    "repo": "sympy/sympy",
+                    "FAIL_TO_PASS": '["test_sparse_matrix"]',
+                    "test_patch": "\n".join(
+                        [
+                            "diff --git a/sympy/matrices/tests/test_sparse.py b/sympy/matrices/tests/test_sparse.py",
+                            "--- a/sympy/matrices/tests/test_sparse.py",
+                            "+++ b/sympy/matrices/tests/test_sparse.py",
+                            "@@ -26,6 +26,12 @@ def sparse_zeros(n):",
+                            "+    sparse_matrices = [SparseMatrix.zeros(0, n) for n in range(4)]",
+                            "+    assert SparseMatrix.hstack(*sparse_matrices) == Matrix(0, 6, [])",
+                        ]
+                    ),
+                    "run_tests": "\n".join(
+                        [
+                            "#!/bin/bash",
+                            "python -m pip install -e .",
+                            "bin/test -C --verbose sympy/matrices/tests/test_sparse.py",
+                        ]
+                    ),
+                },
+                script,
+            )
+
+        stdout = diag["swebench_test_script_patch_stdout"]
+        self.assertIn("sympy_file_level_selection=1", stdout)
+        self.assertIn("sympy_f2p_file_coverage_complete=1", stdout)
+        self.assertIn('sympy_helper_fallback_files=["sympy/matrices/tests/test_sparse.py"]', stdout)
+        self.assertIn('"test_sparse_matrix": ["sympy/matrices/tests/test_sparse.py"]', stdout)
+        self.assertIn('sympy_f2p_helper_file_fallback={"test_sparse_matrix": ["sympy/matrices/tests/test_sparse.py"]}', stdout)
+        self.assertIn("sympy_f2p_uncovered_nodeids=[]", stdout)
+
+    def test_swebench_sympy_file_mapping_ignores_non_definition_mentions(self) -> None:
+        from p2a.precompute.precompute_bonus_maps import _prepare_swebench_test_script
+
+        class FakeEnv:
+            def write_file(self, path: str, content: str) -> None:
+                Path(path).write_text(content, encoding="utf-8")
+
+            def _run(self, command: str, timeout: int | float | None = None) -> tuple[str, str]:
+                if "python - <<'PY'" not in command:
+                    return "", ""
+                result = subprocess.run(command, shell=True, text=True, capture_output=True, check=False)
+                return result.stdout, result.stderr
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = str(Path(tmp) / "run_tests.sh")
+            diag = _prepare_swebench_test_script(
+                FakeEnv(),
+                {
+                    "repo": "sympy/sympy",
+                    "FAIL_TO_PASS": '["test_real_f2p"]',
+                    "test_patch": "\n".join(
+                        [
+                            "diff --git a/sympy/core/tests/test_wrong.py b/sympy/core/tests/test_wrong.py",
+                            "--- a/sympy/core/tests/test_wrong.py",
+                            "+++ b/sympy/core/tests/test_wrong.py",
+                            "@@ -1,5 +1,8 @@ def test_other():",
+                            " def test_other():",
+                            "+    # mention test_real_f2p without defining it",
+                            "+    name = 'test_real_f2p'",
+                            "+    helper(test_real_f2p)",
+                        ]
+                    ),
+                    "run_tests": "\n".join(
+                        [
+                            "#!/bin/bash",
+                            "python -m pip install -e .",
+                            "bin/test -C --verbose sympy/core/tests/test_wrong.py",
+                        ]
+                    ),
+                },
+                script,
+            )
+
+        stdout = diag["swebench_test_script_patch_stdout"]
+        self.assertIn("sympy_file_level_selection=1", stdout)
+        self.assertIn("sympy_f2p_file_coverage_complete=0", stdout)
+        self.assertIn("sympy_helper_fallback_files=[]", stdout)
+        self.assertIn('"test_real_f2p": []', stdout)
+        self.assertIn('sympy_f2p_uncovered_nodeids=["test_real_f2p"]', stdout)
+
     def test_swebench_zero_tests_output_is_detected(self) -> None:
-        from p2a.precompute.precompute_bonus_maps import _swebench_output_has_zero_tests
+        from p2a.precompute.precompute_bonus_maps import (
+            _swebench_output_has_zero_tests,
+            _swebench_output_known_clean,
+        )
 
         self.assertTrue(_swebench_output_has_zero_tests("tests finished: 0 passed, in 0.00 seconds"))
         self.assertTrue(_swebench_output_has_zero_tests("no tests ran in 0.01s"))
         self.assertFalse(_swebench_output_has_zero_tests("Ran 1 test in 0.007s\n\nOK"))
+        self.assertTrue(_swebench_output_known_clean("tests finished: 1 passed, in 0.10 seconds"))
+        self.assertTrue(_swebench_output_known_clean("1 passed, 2 warnings in 0.10s"))
+        self.assertFalse(
+            _swebench_output_known_clean(
+                "Traceback (most recent call last):\nImportError: broken\n1 passed in 0.10s"
+            )
+        )
+        self.assertFalse(_swebench_output_known_clean("ERROR collecting sympy/core/tests/test_evalf.py"))
+        self.assertFalse(_swebench_output_known_clean("tests finished: 16 passed, 1 failed, in 0.10 seconds"))
+        self.assertFalse(_swebench_output_known_clean("tests finished: 16 passed, 1 error, in 0.10 seconds"))
 
     def test_trace_instrumentation_caches_tracer_after_future_imports(self) -> None:
         from p2a.trace import instrument_source
@@ -1047,6 +1325,15 @@ class ArlAdapterTests(unittest.TestCase):
                 swebench_f2p_collection_missing=True,
             )
         )
+        self.assertEqual(
+            _all_pass_reason_code(
+                0,
+                {"all_three_read_failed": False},
+                swebench_f2p_collection_missing=True,
+                allow_missing_f2p_collection=True,
+            ),
+            "buggy_version_passes",
+        )
 
     def test_all_pass_short_circuits_before_trace_parse(self) -> None:
         from p2a.precompute import precompute_bonus_maps as bonus_maps
@@ -1085,10 +1372,10 @@ class ArlAdapterTests(unittest.TestCase):
                 pass
 
         task = {
-            "instance_id": "pytest__pytest-1",
-            "repo": "pytest-dev/pytest",
+            "instance_id": "sympy__sympy-13372",
+            "repo": "sympy/sympy",
             "patch": "diff --git a/pkg/demo.py b/pkg/demo.py\n",
-            "FAIL_TO_PASS": json.dumps(["tests/test_demo.py::test_foo"]),
+            "FAIL_TO_PASS": json.dumps(["test_foo"]),
             "extra_info": {
                 "tools_kwargs": {
                     "reward": {"name": "swe_bench", "metadata": {}},
@@ -1102,13 +1389,19 @@ class ArlAdapterTests(unittest.TestCase):
             patch.object(
                 bonus_maps,
                 "_prepare_swebench_test_script",
-                return_value={"swebench_test_script_patch_stdout": "targeted_pytest=1\n"},
+                return_value={
+                    "swebench_test_script_patch_stdout": (
+                        "targeted_sympy=0\n"
+                        "sympy_file_level_selection=1\n"
+                        "sympy_f2p_file_coverage_complete=1\n"
+                    )
+                },
             ),
             patch.object(
                 bonus_maps,
                 "_run_tests_with_file_capture",
                 return_value=(
-                    "tests/test_demo.py::test_foo PASSED\n",
+                    "1 passed, 2 warnings in 0.10s\n",
                     "",
                     0,
                     {
@@ -1140,8 +1433,109 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertEqual(result["trace_parse_skip_reason"], "all_pass")
         self.assertIsNone(result["trace_file_line_count"])
         self.assertEqual(result["parsed_trace_count"], 0)
-        self.assertEqual(result["swebench_f2p_observed_nodeids"], ["tests/test_demo.py::test_foo"])
-        self.assertEqual(result["swebench_f2p_missing_nodeids"], [])
+        self.assertTrue(result["swebench_f2p_collection_missing_allowed"])
+        self.assertTrue(result["swebench_sympy_f2p_file_coverage_complete"])
+        self.assertEqual(result["swebench_f2p_observed_nodeids"], [])
+        self.assertEqual(result["swebench_f2p_missing_nodeids"], ["test_foo"])
+
+    def test_sympy_masked_collection_error_is_not_all_pass(self) -> None:
+        from p2a.precompute import precompute_bonus_maps as bonus_maps
+
+        modified = [
+            {
+                "name": "demo",
+                "qualified_name": "demo",
+                "file_path": "pkg/demo.py",
+                "start_line": 10,
+                "end_line": 12,
+            }
+        ]
+
+        class FakeEnv:
+            swebench_verified = True
+            repo_path = "/testbed"
+            alt_path = "/root"
+
+            def start(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+            def checkout_buggy_commit(self, task, *, instance_id):
+                return {"buggy_checkout_ref": "abc123^", "buggy_checkout_exit": 0}
+
+            def _run(self, command: str, timeout: int | float | None = None):
+                return "", ""
+
+            def _execute_raw(self, command: str, timeout: int | float | None = None):
+                if "wc -l" in command:
+                    return "0\n", "", 0
+                return "", "", 0
+
+            def write_file(self, path: str, content: str) -> None:
+                pass
+
+        task = {
+            "instance_id": "sympy__masked-error",
+            "repo": "sympy/sympy",
+            "patch": "diff --git a/pkg/demo.py b/pkg/demo.py\n",
+            "FAIL_TO_PASS": json.dumps(["test_foo"]),
+            "extra_info": {
+                "tools_kwargs": {
+                    "reward": {"name": "swe_bench", "metadata": {}},
+                }
+            },
+        }
+
+        with (
+            patch.object(bonus_maps, "find_modified_callables_from_task", return_value=modified),
+            patch.object(bonus_maps, "find_newly_created_callables", return_value=[]),
+            patch.object(
+                bonus_maps,
+                "_prepare_swebench_test_script",
+                return_value={
+                    "swebench_test_script_patch_stdout": (
+                        "targeted_sympy=0\n"
+                        "sympy_file_level_selection=1\n"
+                        "sympy_f2p_file_coverage_complete=1\n"
+                    )
+                },
+            ),
+            patch.object(
+                bonus_maps,
+                "_run_tests_with_file_capture",
+                return_value=(
+                    "ERROR collecting sympy/core/tests/test_evalf.py\n"
+                    "Traceback (most recent call last):\n"
+                    "ImportError: broken import\n",
+                    "",
+                    0,
+                    {
+                        "stdout_read_exit": 0,
+                        "stderr_read_exit": 0,
+                        "exit_read_exit": 0,
+                        "wrapper_exit": 0,
+                        "exit_parse_failed": False,
+                        "all_three_read_failed": False,
+                        "trusted_test_exit": True,
+                    },
+                ),
+            ),
+            patch(
+                "p2a.precompute.uni_agent_sandbox.create_uni_agent_sandbox",
+                return_value=FakeEnv(),
+            ),
+            patch("p2a.trace.instrument_sandbox", return_value=modified),
+            patch("p2a.trace.parse_fault_traces_from_file", return_value=[]),
+        ):
+            result = bonus_maps.compute_dynamic_bonus_map(task)
+
+        self.assertEqual(result["case_type"], "no_trace")
+        self.assertEqual(result["reason_code"], "f2p_collection_missing")
+        self.assertFalse(result["swebench_output_known_clean"])
+        self.assertFalse(result["swebench_f2p_collection_missing_allowed"])
+        self.assertTrue(result["swebench_sympy_f2p_file_coverage_complete"])
 
     def test_swebench_missing_f2p_collection_is_not_all_pass(self) -> None:
         from p2a.precompute import precompute_bonus_maps as bonus_maps

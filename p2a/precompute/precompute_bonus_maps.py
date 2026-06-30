@@ -542,6 +542,7 @@ def find_newly_created_callables(task: dict) -> list[dict]:
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 _PARAMETRIZE_SUFFIX_RE = re.compile(r"\[.*\]$")
 _TEST_FUNC_RE = re.compile(r"(?<![A-Za-z0-9_])(test[A-Za-z0-9_]*)(?=$|[^A-Za-z0-9_])")
+_TEST_DEF_RE = re.compile(r"^\s*(?:async\s+)?def\s+(test[A-Za-z0-9_]*)\s*\(")
 _PYTEST_STATUS_RE = re.compile(r"\b(PASSED|FAILED|ERROR)\b")
 _UNITTEST_FAILURE_HEADER_RE = re.compile(r"^(?:FAIL|ERROR):\s+([A-Za-z_][A-Za-z0-9_]*)\s+\(([^)]+)\)\s*$")
 
@@ -981,6 +982,121 @@ def _swebench_output_has_zero_tests(raw_output: str) -> bool:
     )
 
 
+def _repo_relative_test_file(value: str) -> str | None:
+    path = str(value or "").strip().strip("'\"")
+    if not path:
+        return None
+    if path.startswith("a/") or path.startswith("b/"):
+        path = path[2:]
+    if path.startswith("./"):
+        path = path[2:]
+    if path.endswith(".py") and _is_test_file(path):
+        return path
+    return None
+
+
+def _selector_test_file(selector: str) -> str | None:
+    head = str(selector or "").strip().split("::", 1)[0].split(" ", 1)[0]
+    return _repo_relative_test_file(head)
+
+
+def _test_patch_function_files(patch_text: str | None) -> dict[str, set[str]]:
+    current_file: str | None = None
+    in_hunk = False
+    by_func: dict[str, set[str]] = {}
+    for line in str(patch_text or "").splitlines():
+        diff_match = re.match(r"^diff --git a/(.+?) b/(.+)$", line)
+        if diff_match:
+            current_file = _repo_relative_test_file(diff_match.group(2))
+            in_hunk = False
+            continue
+        if line.startswith("+++ "):
+            target = line[4:].strip()
+            if target != "/dev/null":
+                current_file = _repo_relative_test_file(target)
+            in_hunk = False
+            continue
+        if not current_file:
+            continue
+
+        search_text = ""
+        if line.startswith("@@"):
+            in_hunk = True
+            parts = line.split("@@", 2)
+            if len(parts) >= 3:
+                search_text = parts[2]
+        elif not in_hunk:
+            continue
+        elif line.startswith("+") and not line.startswith("+++"):
+            search_text = line[1:]
+        elif line.startswith(" "):
+            search_text = line[1:]
+
+        if not search_text:
+            continue
+        match = _TEST_DEF_RE.match(search_text)
+        if match:
+            by_func.setdefault(_strip_parametrize(match.group(1)), set()).add(current_file)
+    return by_func
+
+
+def _test_patch_files(patch_text: str | None) -> list[str]:
+    files: set[str] = set()
+    for line in str(patch_text or "").splitlines():
+        diff_match = re.match(r"^diff --git a/(.+?) b/(.+)$", line)
+        if diff_match:
+            path = _repo_relative_test_file(diff_match.group(2))
+            if path:
+                files.add(path)
+            continue
+        if line.startswith("+++ "):
+            target = line[4:].strip()
+            if target != "/dev/null":
+                path = _repo_relative_test_file(target)
+                if path:
+                    files.add(path)
+    return sorted(files)
+
+
+def _swebench_f2p_file_candidates(task: dict, f2p_nodeids: list[str]) -> dict[str, list[str]]:
+    patch_func_files = _test_patch_function_files(task.get("test_patch"))
+    candidates: dict[str, list[str]] = {}
+    for nodeid in f2p_nodeids:
+        selector = str(nodeid or "").strip()
+        files: set[str] = set()
+        selector_file = _selector_test_file(selector)
+        if selector_file:
+            files.add(selector_file)
+        bare = _normalize_test_func_name(selector)
+        if bare:
+            files.update(patch_func_files.get(bare, set()))
+        candidates[selector] = sorted(files)
+    return candidates
+
+
+_TEST_OUTPUT_FAILURE_RE = re.compile(
+    r"Traceback \(most recent call last\)|"
+    r"\b(?:FAILED|ERROR|FAILURES|INTERNALERROR)\b|"
+    r"\b(?:ImportError|ModuleNotFoundError|SyntaxError):",
+    re.IGNORECASE,
+)
+_TEST_OUTPUT_PASS_RE = re.compile(
+    r"\btests finished:\s*[1-9][0-9]*\s+passed\b|"
+    r"\b[1-9][0-9]*\s+passed\b|"
+    r"\bOK\b",
+    re.IGNORECASE,
+)
+
+
+def _swebench_output_known_clean(raw_output: str) -> bool:
+    if not raw_output:
+        return False
+    text = _ANSI_ESCAPE_RE.sub("", raw_output)
+    if _TEST_OUTPUT_FAILURE_RE.search(text):
+        return False
+    return bool(_TEST_OUTPUT_PASS_RE.search(text))
+
+
 def _prepare_swebench_test_script(
     env,
     task: dict,
@@ -1000,9 +1116,19 @@ def _prepare_swebench_test_script(
     f2p_nodeids = _swebench_f2p_nodeids(task)
     f2p_django_labels = _django_labels_from_f2p(f2p_nodeids)
     f2p_bare_funcs = sorted({_normalize_test_func_name(nodeid) for nodeid in f2p_nodeids if _normalize_test_func_name(nodeid)})
+    f2p_files = sorted({str(nodeid).split("::", 1)[0] for nodeid in f2p_nodeids if ".py" in str(nodeid)})
+    f2p_file_candidates = _swebench_f2p_file_candidates(task, f2p_nodeids)
+    test_patch_files = _test_patch_files(task.get("test_patch"))
+    test_patch_test_def_files = sorted(
+        {file_path for files in _test_patch_function_files(task.get("test_patch")).values() for file_path in files}
+    )
     diag["swebench_f2p_nodeids"] = f2p_nodeids
     diag["swebench_f2p_django_labels"] = f2p_django_labels
     diag["swebench_f2p_bare_funcs"] = f2p_bare_funcs
+    diag["swebench_f2p_files"] = f2p_files
+    diag["swebench_f2p_file_candidates"] = f2p_file_candidates
+    diag["swebench_test_patch_files"] = test_patch_files
+    diag["swebench_test_patch_test_def_files"] = test_patch_test_def_files
     skip_editable_module = {
         "scikit-learn": "sklearn",
         "scikit-learn/scikit-learn": "sklearn",
@@ -1036,6 +1162,7 @@ def _prepare_swebench_test_script(
     diag["swebench_prepare_stderr"] = setup_stderr
 
     patch_script = f"""python - <<'PY'
+import json
 import shlex
 from pathlib import Path
 
@@ -1046,6 +1173,10 @@ replace_tox_current_env = {replace_tox_current_env!r}
 f2p_nodeids = {f2p_nodeids!r}
 f2p_django_labels = {f2p_django_labels!r}
 f2p_bare_funcs = {f2p_bare_funcs!r}
+f2p_files = {f2p_files!r}
+f2p_file_candidates = {f2p_file_candidates!r}
+test_patch_files = {test_patch_files!r}
+test_patch_test_def_files = {test_patch_test_def_files!r}
 before = path.read_text()
 lines = before.splitlines()
 changed = False
@@ -1054,9 +1185,17 @@ replaced_tox = 0
 targeted_pytest = 0
 targeted_django = 0
 targeted_sympy = 0
+sympy_file_level_selection = 0
+sympy_selected_files = set()
 
 def quote_join(items):
     return " ".join(shlex.quote(str(item)) for item in items)
+
+def clean_path(value):
+    path = str(value or "").strip().strip("'\\\"")
+    if path.startswith("./"):
+        path = path[2:]
+    return path
 
 for i, line in enumerate(lines):
     stripped = line.strip()
@@ -1085,6 +1224,18 @@ for i, line in enumerate(lines):
         # SymPy's historical bin/test runners do not consistently implement
         # pytest-style -k expressions; the SWE-bench script already narrows the
         # run to patched test files.
+        try:
+            parts = shlex.split(stripped)
+        except ValueError:
+            parts = stripped.split()
+        selected_here = set()
+        for part in parts:
+            selected = clean_path(part)
+            if selected.endswith(".py"):
+                selected_here.add(selected)
+        sympy_selected_files.update(selected_here)
+        if selected_here:
+            sympy_file_level_selection += 1
         continue
     if "python -m pip install" not in line or " -e ." not in line:
         continue
@@ -1106,6 +1257,32 @@ print("replaced_tox=" + str(replaced_tox))
 print("targeted_pytest=" + str(targeted_pytest))
 print("targeted_django=" + str(targeted_django))
 print("targeted_sympy=" + str(targeted_sympy))
+print("sympy_file_level_selection=" + str(sympy_file_level_selection))
+sympy_f2p_file_coverage = {{}}
+sympy_selected_patch_files = sympy_selected_files & {{clean_path(item) for item in test_patch_files}}
+sympy_helper_fallback_files = sympy_selected_patch_files - {{clean_path(item) for item in test_patch_test_def_files}}
+sympy_f2p_helper_file_fallback = {{}}
+for selector in f2p_nodeids:
+    candidates = [clean_path(item) for item in f2p_file_candidates.get(str(selector), [])]
+    coverage = sorted(set(candidates) & sympy_selected_files)
+    fallback = []
+    if not coverage and not candidates and len(sympy_helper_fallback_files) == 1:
+        fallback = sorted(sympy_helper_fallback_files)
+        coverage = fallback
+    sympy_f2p_file_coverage[str(selector)] = coverage
+    sympy_f2p_helper_file_fallback[str(selector)] = fallback
+sympy_f2p_uncovered_nodeids = [
+    str(selector)
+    for selector in f2p_nodeids
+    if not sympy_f2p_file_coverage.get(str(selector))
+]
+print("sympy_selected_files=" + json.dumps(sorted(sympy_selected_files)))
+print("sympy_selected_patch_files=" + json.dumps(sorted(sympy_selected_patch_files)))
+print("sympy_helper_fallback_files=" + json.dumps(sorted(sympy_helper_fallback_files)))
+print("sympy_f2p_file_coverage=" + json.dumps(sympy_f2p_file_coverage, sort_keys=True))
+print("sympy_f2p_helper_file_fallback=" + json.dumps(sympy_f2p_helper_file_fallback, sort_keys=True))
+print("sympy_f2p_uncovered_nodeids=" + json.dumps(sympy_f2p_uncovered_nodeids))
+print("sympy_f2p_file_coverage_complete=" + str(int(bool(f2p_nodeids) and not sympy_f2p_uncovered_nodeids)))
 PY"""
     stdout, stderr = env._run(f"chmod +x {shlex.quote(test_script)} && {patch_script}", timeout=60)
     diag.update({
@@ -1247,10 +1424,13 @@ def _all_pass_reason_code(
     capture_diag: dict | None = None,
     *,
     swebench_f2p_collection_missing: bool = False,
+    allow_missing_f2p_collection: bool = False,
 ) -> str | None:
     if test_exit != 0:
         return None
-    if _capture_failed(capture_diag) or swebench_f2p_collection_missing:
+    if _capture_failed(capture_diag):
+        return None
+    if swebench_f2p_collection_missing and not allow_missing_f2p_collection:
         return None
     return "buggy_version_passes"
 
@@ -1588,10 +1768,23 @@ def compute_dynamic_bonus_map(
             capture_diag["test_exit_overridden_from_output"] = True
             test_exit = 1
 
+        patch_stdout = str(test_script_diag.get("swebench_test_script_patch_stdout") or "")
+        swebench_targeted_f2p = bool(re.search(r"targeted_(pytest|django|sympy)=[1-9]", patch_stdout))
+        swebench_sympy_file_level_selection = bool(re.search(r"sympy_file_level_selection=[1-9]", patch_stdout))
+        swebench_sympy_f2p_file_coverage_complete = bool(
+            re.search(r"sympy_f2p_file_coverage_complete=1", patch_stdout)
+        )
+        swebench_output_known_clean = _swebench_output_known_clean(raw_output)
+        allow_missing_f2p_collection = bool(
+            swebench_f2p_collection_missing
+            and swebench_sympy_f2p_file_coverage_complete
+            and swebench_output_known_clean
+        )
         all_pass_reason = _all_pass_reason_code(
             test_exit,
             capture_diag,
             swebench_f2p_collection_missing=swebench_f2p_collection_missing,
+            allow_missing_f2p_collection=allow_missing_f2p_collection,
         )
         if all_pass_reason:
             all_pass_diag = _base_diagnostics(
@@ -1605,8 +1798,12 @@ def compute_dynamic_bonus_map(
             )
             all_pass_diag.update(env_diag)
             all_pass_diag.update(test_script_diag)
-            patch_stdout = str(test_script_diag.get("swebench_test_script_patch_stdout") or "")
-            all_pass_diag["swebench_targeted_f2p"] = bool(re.search(r"targeted_(pytest|django|sympy)=[1-9]", patch_stdout))
+            all_pass_diag["swebench_targeted_f2p"] = swebench_targeted_f2p
+            all_pass_diag["swebench_sympy_file_level_selection"] = swebench_sympy_file_level_selection
+            all_pass_diag["swebench_sympy_f2p_file_coverage_complete"] = (
+                swebench_sympy_f2p_file_coverage_complete
+            )
+            all_pass_diag["swebench_output_known_clean"] = swebench_output_known_clean
             all_pass_diag["swebench_verified"] = env.swebench_verified
             all_pass_diag["swebench_pro"] = bool(getattr(env, "swebench_pro", False))
             all_pass_diag["test_timeout"] = test_timeout
@@ -1625,6 +1822,7 @@ def compute_dynamic_bonus_map(
             all_pass_diag["swebench_f2p_observed_nodeids"] = swebench_f2p_observation["observed"]
             all_pass_diag["swebench_f2p_missing_nodeids"] = swebench_f2p_observation["missing"]
             all_pass_diag["swebench_f2p_collection_missing"] = swebench_f2p_collection_missing
+            all_pass_diag["swebench_f2p_collection_missing_allowed"] = allow_missing_f2p_collection
             all_pass_diag["raw_gt_test_funcs"] = []
             print(f"  [{instance_id}] all_pass: buggy F2P run exited cleanly. test_exit={test_exit}")
             return _make_result(
@@ -1687,8 +1885,10 @@ def compute_dynamic_bonus_map(
         )
         common_diag.update(env_diag)
         common_diag.update(test_script_diag)
-        patch_stdout = str(test_script_diag.get("swebench_test_script_patch_stdout") or "")
-        common_diag["swebench_targeted_f2p"] = bool(re.search(r"targeted_(pytest|django|sympy)=[1-9]", patch_stdout))
+        common_diag["swebench_targeted_f2p"] = swebench_targeted_f2p
+        common_diag["swebench_sympy_file_level_selection"] = swebench_sympy_file_level_selection
+        common_diag["swebench_sympy_f2p_file_coverage_complete"] = swebench_sympy_f2p_file_coverage_complete
+        common_diag["swebench_output_known_clean"] = swebench_output_known_clean
         common_diag["swebench_verified"] = env.swebench_verified
         common_diag["swebench_pro"] = bool(getattr(env, "swebench_pro", False))
         common_diag["test_timeout"] = test_timeout
@@ -1709,6 +1909,7 @@ def compute_dynamic_bonus_map(
         common_diag["swebench_f2p_observed_nodeids"] = swebench_f2p_observation["observed"]
         common_diag["swebench_f2p_missing_nodeids"] = swebench_f2p_observation["missing"]
         common_diag["swebench_f2p_collection_missing"] = swebench_f2p_collection_missing
+        common_diag["swebench_f2p_collection_missing_allowed"] = allow_missing_f2p_collection
         common_diag["raw_gt_test_funcs"] = _test_func_names_from_traces(raw_traces)
         common_diag.update(
             _write_trace_sidecar(

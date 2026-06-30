@@ -18,6 +18,19 @@ from pathlib import Path
 from typing import Any
 
 
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+def _hash_ref_matches_head(commit_ref: str, actual_head: str | None) -> bool:
+    ref = commit_ref.strip().lower()
+    head = (actual_head or "").strip().lower()
+    if not (7 <= len(ref) <= 40) or not all(ch in _HEX_DIGITS for ch in ref):
+        return False
+    if len(head) < len(ref) or not all(ch in _HEX_DIGITS for ch in head):
+        return False
+    return head.startswith(ref)
+
+
 R2E_POST_SETUP_CMD = """
 export PIP_CACHE_DIR=~/.cache/pip
 export PATH=/root/.venv/bin:/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
@@ -424,9 +437,15 @@ class UniAgentSandboxAdapter:
             "buggy_checkout_head_full": actual_head,
             "buggy_checkout_stderr": stderr.strip()[-500:] if exit_code != 0 else "",
         }
-        if exit_code == 0 and expected_commit and actual_head == expected_commit:
+        if exit_code == 0 and actual_head and (
+            (expected_commit and actual_head == expected_commit)
+            or _hash_ref_matches_head(commit_ref, actual_head)
+        ):
             diag["buggy_checkout_verified"] = True
             diag["sandbox_code_state"] = "git_checkout_verified"
+            diag["buggy_checkout_verification"] = (
+                "expected_head" if expected_commit and actual_head == expected_commit else "commit_ref_head"
+            )
             if self.swebench_pro:
                 diag.update(self._restore_swebench_pro_tests(task))
             return diag
