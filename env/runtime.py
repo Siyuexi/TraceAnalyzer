@@ -419,9 +419,6 @@ class NexusRuntime(AbstractRuntime):
                     session_id=sid,
                     command="BASH_ARGV0=bash; bind 'set enable-bracketed-paste off' 2>/dev/null; true",
                 )
-                await self._nexus.start_command_in_terminal_session(
-                    session_id=sid, command="true",
-                )
             except Exception:
                 pass
         return CreateBashSessionResponse(output="", session_type="bash")
