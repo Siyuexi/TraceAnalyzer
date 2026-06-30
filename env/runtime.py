@@ -455,11 +455,19 @@ class NexusRuntime(AbstractRuntime):
         timeout = float(getattr(action, "timeout", None) or _DEFAULT_CMD_TIMEOUT)
 
         try:
-            # Start command (non-blocking) — returns immediately with command_id
-            info = await self._nexus.start_command_in_terminal_session(
-                session_id=sid,
-                command=action.command,
-            )
+            # Start command — retry if previous command hasn't fully cleared
+            info = None
+            for _attempt in range(3):
+                try:
+                    info = await self._nexus.start_command_in_terminal_session(
+                        session_id=sid,
+                        command=action.command,
+                    )
+                    break
+                except RuntimeError as start_exc:
+                    if "already running" not in str(start_exc).lower() or _attempt == 2:
+                        raise
+                    await asyncio.sleep(2)
             command_id = info.command_id
 
             # Poll until command completes (end_time is set by nexus_bash postexec hook)
