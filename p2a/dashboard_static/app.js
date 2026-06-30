@@ -532,7 +532,8 @@ function pathEdges(detail) {
 
 function canonicalCaseType(raw, detail) {
   const value = String(raw || "");
-  if (value !== "latent") return value;
+  if (BONUS_MAP_METRIC_CASE_TYPES.has(value)) return value;
+  if (value !== "standard") return value;
   const projection = pathProjection(detail);
   const roots = new Set(projection.roots || []);
   const anchors = new Set(projection.anchors || []);

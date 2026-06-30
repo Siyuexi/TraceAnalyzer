@@ -836,6 +836,18 @@ def test_case_filter_metrics_bucket_non_evaluable_legacy_standard_as_others():
     assert rows["others"][0]["not_chain_evaluable_reasons"] == {"missing_anchor": 1}
 
 
+def test_case_filter_metrics_respect_explicit_latent_detail_without_trace_path_edges():
+    detail = _detail("case-1", case_type="latent")
+    detail["path_projection"]["anchors"] = ["a.py::symptom"]
+    detail["path_projection"]["roots"] = ["a.py::root"]
+    detail["path_projection"]["path_edges"] = []
+
+    rows = _case_filter_model_metrics([detail])
+
+    assert rows["latent"][0]["target"] == 1
+    assert rows["exposed"] == []
+
+
 def test_dashboard_does_not_reinfer_miracle_from_stored_first_hit_steps(tmp_path):
     db = tmp_path / "traces.sqlite"
     detail = _standard_order_detail("case-1")

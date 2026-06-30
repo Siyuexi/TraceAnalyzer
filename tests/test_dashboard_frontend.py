@@ -550,6 +550,26 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             if (run('BONUS_MAP_METRIC_CASE_TYPES.has("standard")') !== false) {
               throw new Error("dashboard should not expose legacy standard as a current case type");
             }
+            const explicitLatentBucket = run(`detailCaseFilterBucket({
+              bonus_case_type: "latent",
+              path_evaluable: true,
+              path_projection: {anchors: ["pkg/symptom.py::symptom"], roots: ["pkg/root.py::root"], path_edges: []}
+            })`);
+            if (explicitLatentBucket !== "latent") {
+              throw new Error(`explicit latent detail should stay latent, got ${explicitLatentBucket}`);
+            }
+            const legacyStandardBucket = run(`detailCaseFilterBucket({
+              bonus_case_type: "standard",
+              path_evaluable: true,
+              path_projection: {
+                anchors: ["pkg/symptom.py::symptom"],
+                roots: ["pkg/root.py::root"],
+                path_edges: [{caller: "pkg/symptom.py::symptom", callee: "pkg/root.py::root"}]
+              }
+            })`);
+            if (legacyStandardBucket !== "latent") {
+              throw new Error(`legacy standard detail should canonicalize to latent, got ${legacyStandardBucket}`);
+            }
             run("state.caseFilters.direct = true;");
             if (run("state.selectedDataset") !== "swebench-hard") {
               throw new Error("single dataset should be auto-selected");

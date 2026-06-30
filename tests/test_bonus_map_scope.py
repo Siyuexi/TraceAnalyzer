@@ -5,6 +5,7 @@ from p2a.bonus_map_scope import (
     LATENT_CASE,
     bonus_map_pattern_computable,
     canonical_bonus_case_type,
+    canonical_detail_case_type,
     enrich_bonus_map_case_metadata,
     parse_bonus_map_instance_filter,
     select_rows_by_bonus_map_scope,
@@ -97,6 +98,35 @@ def test_raw_latent_without_clean_pattern_structure_is_exposed():
 
     assert canonical_bonus_case_type(bonus_map) == EXPOSED_CASE
     assert bonus_map_pattern_computable(bonus_map) is False
+
+
+def test_detail_primary_case_type_is_authoritative_over_trace_projection():
+    detail = {
+        "bonus_case_type": LATENT_CASE,
+        "path_projection": {
+            "anchors": ["pkg/symptom.py::symptom"],
+            "roots": ["pkg/root.py::root"],
+            "path_edges": [],
+        },
+    }
+
+    assert canonical_detail_case_type(detail) == LATENT_CASE
+
+
+def test_detail_legacy_standard_is_split_from_trace_projection():
+    detail = {
+        "bonus_case_type": "standard",
+        "path_projection": {
+            "anchors": ["pkg/symptom.py::symptom"],
+            "roots": ["pkg/root.py::root"],
+            "path_edges": [["pkg/symptom.py::symptom", "pkg/root.py::root"]],
+        },
+    }
+
+    assert canonical_detail_case_type(detail) == LATENT_CASE
+
+    detail["path_projection"]["path_edges"] = []
+    assert canonical_detail_case_type(detail) == EXPOSED_CASE
 
 
 def test_scope_filter_selects_rows_by_bonus_map_case_type(tmp_path):

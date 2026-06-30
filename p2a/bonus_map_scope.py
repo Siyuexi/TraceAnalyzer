@@ -149,7 +149,9 @@ def canonical_bonus_case_type(bonus_map: dict[str, Any] | None) -> str:
 
 
 def canonical_detail_case_type(detail: dict[str, Any]) -> str:
-    raw = detail.get("bonus_case_type") or detail.get("path_case_kind") or detail.get("chain_case_kind") or ""
+    raw = str(detail.get("bonus_case_type") or detail.get("path_case_kind") or detail.get("chain_case_kind") or "").strip()
+    if raw in PRIMARY_CASE_TYPES:
+        return raw
     projection = detail.get("path_projection") or detail.get("chain_projection") or {}
     roots, anchors = _projection_roots_anchors(projection if isinstance(projection, dict) else {})
     edges = []
