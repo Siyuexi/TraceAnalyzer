@@ -13,6 +13,7 @@ from p2a.third_party_batch import (
     sanitized_config_snapshot,
     selected_instance_scope,
 )
+from p2a.eval_cache import ensure_db, upsert_rollout_record
 from p2a.third_party_eval import run_batch as run_eval_batch
 
 
@@ -437,16 +438,27 @@ storage:
         seen.extend(item for index, item in enumerate(command) if index and command[index - 1] == "--rollout-job")
         run_dir = Path(command[command.index("--out") + 1]).parent
         run_dir.mkdir(parents=True, exist_ok=True)
+        records = [
+            {"run_id": "r0", "instance_id": "case-1", "rollout_index": 0, "data_source": "swebench-hard"},
+            {"run_id": "r1", "instance_id": "case-1", "rollout_index": 1, "data_source": "swebench-hard"},
+        ]
         (run_dir / "rollouts.jsonl").write_text(
-            "\n".join(
-                [
-                    json.dumps({"run_id": "r0", "instance_id": "case-1", "rollout_index": 0, "data_source": "swebench-hard"}),
-                    json.dumps({"run_id": "r1", "instance_id": "case-1", "rollout_index": 1, "data_source": "swebench-hard"}),
-                ]
-            )
-            + "\n",
+            "\n".join(json.dumps(record) for record in records) + "\n",
             encoding="utf-8",
         )
+        with ensure_db(Path(command[command.index("--cache-db") + 1])) as conn:
+            for record in records:
+                upsert_rollout_record(
+                    conn,
+                    experiment_id=command[command.index("--experiment-id") + 1],
+                    provider_source="openai_compatible",
+                    model_api_name="dummy-model",
+                    model_label=command[command.index("--model-label") + 1],
+                    dataset=command[command.index("--dataset-name") + 1],
+                    record=record,
+                    artifact_rollouts=run_dir / "rollouts.jsonl",
+                )
+            conn.commit()
         return 0, "ok"
 
     monkeypatch.setattr("p2a.third_party_batch.check_provider_available", lambda *_args, **_kwargs: None)
@@ -458,3 +470,72 @@ storage:
 
     assert seen == ["case-1:0", "case-1:1"]
     assert results[0]["n_ingested"] == 2
+    with ensure_db(config.db_path) as conn:
+        statuses = [
+            row["status"]
+            for row in conn.execute("SELECT status FROM run_cells ORDER BY rollout_index").fetchall()
+        ]
+    assert statuses == ["done", "done"]
+
+
+def test_run_batch_keeps_streamed_rollout_when_subprocess_crashes(monkeypatch, tmp_path):
+    monkeypatch.setenv("P2A_SHARED_ROOT", str(tmp_path / "shared"))
+    monkeypatch.setenv("P2A_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    path = tmp_path / "batch.yaml"
+    path.write_text(
+        """
+provider:
+  source: openai_compatible
+dataset:
+  name: swebench-hard
+experiment:
+  id: demo
+  stage: full
+  limit: 1
+  rollouts_per_instance: 2
+models:
+  - api_name: dummy-model
+storage:
+  precompute_maps: false
+""",
+        encoding="utf-8",
+    )
+    data = tmp_path / "data.jsonl"
+    data.write_text(json.dumps({"instance_id": "case-1", "data_source": "swebench-hard"}) + "\n", encoding="utf-8")
+    config = load_batch_config(path)
+
+    async def fake_run_subprocess(command, **_kwargs):
+        run_dir = Path(command[command.index("--out") + 1]).parent
+        run_dir.mkdir(parents=True, exist_ok=True)
+        record = {"run_id": "r0", "instance_id": "case-1", "rollout_index": 0, "data_source": "swebench-hard"}
+        (run_dir / "rollouts.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+        with ensure_db(Path(command[command.index("--cache-db") + 1])) as conn:
+            upsert_rollout_record(
+                conn,
+                experiment_id=command[command.index("--experiment-id") + 1],
+                provider_source="openai_compatible",
+                model_api_name="dummy-model",
+                model_label=command[command.index("--model-label") + 1],
+                dataset=command[command.index("--dataset-name") + 1],
+                record=record,
+                artifact_rollouts=run_dir / "rollouts.jsonl",
+            )
+            conn.commit()
+        return 124, "timeout"
+
+    monkeypatch.setattr("p2a.third_party_batch.check_provider_available", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("p2a.third_party_batch.resolve_data_file", lambda *_args, **_kwargs: data)
+    monkeypatch.setattr("p2a.third_party_batch.resolve_bonus_map_dir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("p2a.third_party_batch._run_subprocess", fake_run_subprocess)
+
+    results = asyncio.run(run_batch(config, env={}))
+
+    assert results[0]["status"] == "error"
+    assert results[0]["n_persisted"] == 1
+    with ensure_db(config.db_path) as conn:
+        rows = conn.execute(
+            "SELECT rollout_index, status, error FROM run_cells ORDER BY rollout_index"
+        ).fetchall()
+    assert [(row["rollout_index"], row["status"]) for row in rows] == [(0, "done"), (1, "error")]
+    assert rows[0]["error"] is None
+    assert "third_party_eval exited 124" in rows[1]["error"]

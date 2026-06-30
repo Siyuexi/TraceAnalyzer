@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
+import shlex
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -91,6 +92,8 @@ class ArlDeploymentConfig:
     max_replicas: int | None = None
     resources: dict[str, Any] | None = field(default=None)
     require_interactive_shell: bool = False
+    startup_env_variables: dict[str, str] | None = field(default=None)
+    shell_post_setup_cmd: str | None = None
     # Accepted for compatibility with older generated configs. Direct ARL mode
     # does not use a SWE-ReX bootstrap command or endpoint template.
     command: str | None = None
@@ -225,7 +228,22 @@ class ArlDeployment(AbstractDeployment):
             raise RuntimeError(f"Failed to create ARL sandbox after {max_retries} retries: {last_error}") from last_error
 
         self._hooks.on_custom_step("Attaching ARL runtime adapter")
-        self._runtime = ArlRuntime(self._session, run_id=self.run_id, logger=self.logger)
+        startup_commands = []
+        if self._config.startup_env_variables:
+            startup_commands.append(
+                " && ".join(
+                    f"export {key}={shlex.quote(str(value))}"
+                    for key, value in self._config.startup_env_variables.items()
+                )
+            )
+        if self._config.shell_post_setup_cmd:
+            startup_commands.append(self._config.shell_post_setup_cmd)
+        self._runtime = ArlRuntime(
+            self._session,
+            run_id=self.run_id,
+            logger=self.logger,
+            startup_commands=startup_commands,
+        )
         self._hooks.on_custom_step("Waiting for ARL execute readiness")
         await self._wait_until_runtime_ready(self._config.startup_timeout)
         # Precompute can use one-shot execute calls only. Uni-Agent rollouts need
@@ -287,7 +305,12 @@ def make_env_config(
 
     class _Config:
         def __init__(self) -> None:
-            self.deployment = ArlDeploymentConfig.from_mapping(deployment)
+            deployment_with_startup = dict(deployment)
+            if env_variables:
+                deployment_with_startup["startup_env_variables"] = dict(env_variables)
+            if post_setup_cmd:
+                deployment_with_startup["shell_post_setup_cmd"] = post_setup_cmd
+            self.deployment = ArlDeploymentConfig.from_mapping(deployment_with_startup)
             self.env_variables = env_variables
             self.post_setup_cmd = post_setup_cmd
             self.tool_install_dir = Path(tool_install_dir)

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -5,7 +6,9 @@ import numpy as np
 
 from p2a.core import BonusMapStore
 from p2a.eval_fault_localization import score_record
+from p2a.eval_cache import ensure_db
 from p2a.third_party_eval import (
+    IncrementalRolloutSink,
     _prompt,
     _select_scoped_rows,
     _select_rows,
@@ -18,6 +21,7 @@ from p2a.third_party_eval import (
     load_config,
     parse_limit_arg,
     resolve_model_config,
+    run_batch,
 )
 
 
@@ -221,6 +225,37 @@ def test_build_step_traces_preserves_structured_tool_calls():
     ]
 
 
+def test_build_step_traces_preserves_internal_api_reasoning_metadata():
+    interaction = _interaction_result()
+    interaction["messages"][2]["content"] = ""
+    interaction["trajectory"][0].response = ""
+    interaction["rollout_cache"]["internal_api_assistant_metadata"] = {
+        "2": {
+            "reasoning_content": "inspect before reading",
+            "reasoning_blocks": [{"value": "inspect before reading", "signature": "sig"}],
+            "text_blocks": [{"type": "text", "value": "I will open the file."}],
+        }
+    }
+
+    traces = build_step_traces(interaction)
+    record = build_dump_record(
+        _row(),
+        run_id="run-reasoning",
+        model_name="demo-model",
+        base_url="https://example.test",
+        interaction_result=interaction,
+        reward_score=False,
+        reward_details={"resolved": False},
+    )
+
+    assert traces[0]["response_text"] == ""
+    assert traces[0]["reasoning"] == "inspect before reading"
+    assert traces[0]["reasoning_content"] == "inspect before reading"
+    assert traces[0]["reasoning_blocks"] == [{"value": "inspect before reading", "signature": "sig"}]
+    assert traces[0]["text_blocks"] == [{"type": "text", "value": "I will open the file."}]
+    assert record["assistant_metadata"]["2"]["reasoning_content"] == "inspect before reading"
+
+
 def test_classify_error_marks_arl_websocket_forbidden_as_system_error():
     assert classify_error("InvalidStatus: server rejected WebSocket connection: HTTP 403") == "arl_shell_forbidden"
 
@@ -373,3 +408,67 @@ def test_cache_rollouts_upserts_standard_third_party_artifacts(tmp_path):
     )
 
     assert n_cached == 1
+
+
+def test_incremental_rollout_sink_writes_jsonl_and_cache_db(tmp_path):
+    rollout_path = tmp_path / "rollouts.jsonl"
+    db_path = tmp_path / "traces.sqlite"
+    record = build_dump_record(
+        _row(),
+        run_id="run-stream",
+        model_name="demo-model",
+        base_url="https://example.test",
+        interaction_result=_interaction_result(),
+        reward_score=True,
+        reward_details={"resolved": True},
+    )
+    sink = IncrementalRolloutSink(
+        rollouts_path=rollout_path,
+        db_path=db_path,
+        experiment_id="stream",
+        provider_source_name="openai_compatible",
+        model_api_name="demo-model",
+        model_label="Demo Model",
+        dataset_name="swebench-hard",
+        config_snapshot={"model": "demo-model"},
+    )
+    sink.prepare()
+
+    asyncio.run(sink(record))
+
+    assert sink.count == 1
+    assert sink.n_cached == 1
+    assert json.loads(rollout_path.read_text(encoding="utf-8"))["run_id"] == "run-stream"
+    with ensure_db(db_path) as conn:
+        cell = conn.execute("SELECT status, run_id FROM run_cells WHERE instance_id = ?", ("demo__abc123",)).fetchone()
+        raw = conn.execute("SELECT rollout_json FROM raw_rollouts").fetchone()
+    assert cell["status"] == "done"
+    assert cell["run_id"] == "run-stream"
+    assert json.loads(raw["rollout_json"])["run_id"] == "run-stream"
+
+
+def test_eval_batch_emits_records_as_each_rollout_finishes(monkeypatch):
+    async def fake_run_one(row, *, rollout_index, **_kwargs):
+        if row["instance_id"] == "slow":
+            await asyncio.sleep(0.02)
+        return {"instance_id": row["instance_id"], "rollout_index": rollout_index}
+
+    emitted = []
+
+    async def sink(record):
+        emitted.append(record["instance_id"])
+
+    monkeypatch.setattr("p2a.third_party_eval.run_one", fake_run_one)
+
+    records = asyncio.run(
+        run_batch(
+            [{"instance_id": "slow"}, {"instance_id": "fast"}],
+            model_cfg={"model_name": "dummy"},
+            agent_cfg={},
+            n_parallel=2,
+            record_sink=sink,
+        )
+    )
+
+    assert emitted == ["fast", "slow"]
+    assert [record["instance_id"] for record in records] == ["slow", "fast"]

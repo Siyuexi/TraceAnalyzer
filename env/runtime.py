@@ -32,6 +32,7 @@ import shlex
 import tarfile
 import time
 import uuid
+import warnings
 from typing import Any
 
 from swerex.runtime.abstract import (
@@ -68,6 +69,14 @@ _DEFAULT_CMD_TIMEOUT = 60.0
 # set of network exceptions as transient rather than failing the instance.
 _RETRY_ATTEMPTS = 3
 _RETRY_BASE_DELAY = 1.5  # seconds; exponential backoff: 1.5, 3.0, ...
+_TERMINAL_CONTROL_RE = re.compile(
+    r"\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\r"
+)
+
+
+def _strip_terminal_controls(text: str) -> str:
+    """Remove PTY/readline control sequences before they reach the agent trace."""
+    return _TERMINAL_CONTROL_RE.sub("", text)
 
 
 def _is_transient_step_failure(output: Any) -> bool:
@@ -109,6 +118,12 @@ def _transient_exc_types() -> tuple[type[BaseException], ...]:
         import websockets.exceptions as _wse
 
         types += [_wse.ConnectionClosed, _wse.ConnectionClosedError, _wse.ConnectionClosedOK]
+        for name in ("InvalidStatus", "InvalidStatusCode", "InvalidHandshake"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                exc_type = getattr(_wse, name, None)
+            if isinstance(exc_type, type):
+                types.append(exc_type)
     except Exception:  # noqa: BLE001 - websockets optional at import time
         pass
     return tuple(dict.fromkeys(types))
@@ -140,12 +155,15 @@ class ArlRuntime(AbstractRuntime):
         run_id: str,
         logger: Any | None = None,
         gateway_url: str | None = None,
+        startup_commands: list[str] | None = None,
     ) -> None:
         self._session = session
         self.run_id = run_id
         self.logger = logger or logging.getLogger(f"arl-runtime.{run_id}")
         self._gateway_url = _extract_gateway_url(session, gateway_url)
         self._shells: dict[str, Any] = {}  # session name -> InteractiveShellClient
+        self._startup_commands = [command for command in (startup_commands or []) if command.strip()]
+        self._shell_startup_sources: dict[str, list[str]] = {}
         self._closed = False
 
     # ── async plumbing ────────────────────────────────────────────────────
@@ -215,13 +233,31 @@ class ArlRuntime(AbstractRuntime):
         from arl.interactive_shell_client import InteractiveShellClient
 
         shell = InteractiveShellClient(gateway_url=self._gateway_url)
-        shell.connect(self._arl_session_id)
-        # Suppress PTY echo + prompt so command output is clean; apply startup files.
-        shell.send_input("export PS1=''; stty -echo 2>/dev/null || true\n")
-        for src in startup_source or []:
-            shell.send_input(f"source {shlex.quote(src)} 2>/dev/null || true\n")
+        self._retry_sync("interactive shell connect", shell.connect, self._arl_session_id)
+        self._shell_startup_sources[name] = list(startup_source or [])
+        # Suppress PTY echo/prompt and disable readline bracketed-paste before any
+        # command output is captured from the interactive shell.
+        shell.send_input(
+            "export PS1=''; stty -echo 2>/dev/null || true; "
+            "bind 'set enable-bracketed-paste off' 2>/dev/null || true\n"
+        )
         self._shells[name] = shell
-        return self._drain_banner(shell)
+        output = self._drain_banner(shell)
+        for src in startup_source or []:
+            startup_output, exit_code, failure = self._run_in_shell_sync(
+                name,
+                f"source {shlex.quote(src)} 2>/dev/null || true",
+                _DEFAULT_CMD_TIMEOUT,
+            )
+            output += startup_output
+            if exit_code != 0 or failure:
+                raise RuntimeError(f"ARL shell startup source {src!r} failed ({exit_code=} {failure})")
+        for command in self._startup_commands:
+            startup_output, exit_code, failure = self._run_in_shell_sync(name, command, _DEFAULT_CMD_TIMEOUT)
+            output += startup_output
+            if exit_code != 0 or failure:
+                raise RuntimeError(f"ARL shell startup command failed ({exit_code=} {failure}): {command!r}")
+        return output
 
     @staticmethod
     def _drain_banner(shell: Any, settle: float = 0.5) -> str:
@@ -233,7 +269,7 @@ class ArlRuntime(AbstractRuntime):
             if msg is None:
                 break
             if msg.type == "output":
-                chunks.append(msg.data)
+                chunks.append(_strip_terminal_controls(msg.data))
                 deadline = time.monotonic() + settle  # keep draining while active
         return "".join(chunks)
 
@@ -261,7 +297,7 @@ class ArlRuntime(AbstractRuntime):
             if msg is None:
                 continue
             if msg.type == "output":
-                buf += msg.data
+                buf += _strip_terminal_controls(msg.data)
                 m = pattern.search(buf)
                 if m:
                     exit_code = int(m.group(1))
@@ -271,9 +307,9 @@ class ArlRuntime(AbstractRuntime):
                         output = output[:-1]
                     return output, exit_code, ""
             elif msg.type == "exit":
-                return buf, msg.exit_code, "shell_exited"
+                return _strip_terminal_controls(buf), msg.exit_code, "shell_exited"
             elif msg.type == "error":
-                return buf, -1, msg.data or "shell_error"
+                return _strip_terminal_controls(buf), -1, _strip_terminal_controls(msg.data or "shell_error")
 
     # ── one-shot execute helpers (stateless ManagedSession.execute) ────────
     def _exec_sync(self, shell_cmd: str, timeout: float | None = None) -> Any:
@@ -341,7 +377,7 @@ class ArlRuntime(AbstractRuntime):
                         old.close()
                     except Exception:  # noqa: BLE001 - best-effort close
                         pass
-                self._open_shell(name, None)
+                self._open_shell(name, self._shell_startup_sources.get(name))
                 return self._run_in_shell_sync(name, action.command, timeout)
 
         output, exit_code, failure = await self._blocking(_run_with_reconnect)

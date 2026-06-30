@@ -72,6 +72,8 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertEqual(env_config.deployment.experiment_id, "exp-1")
         self.assertEqual(env_config.deployment.startup_timeout, 12)
         self.assertEqual(env_config.deployment.max_replicas, 2)
+        self.assertEqual(env_config.deployment.startup_env_variables, {"PIP_CACHE_DIR": "~/.cache/pip"})
+        self.assertEqual(env_config.deployment.shell_post_setup_cmd, "git checkout abc123")
         self.assertEqual(env_config.env_variables, {"PIP_CACHE_DIR": "~/.cache/pip"})
         self.assertEqual(env_config.post_setup_cmd, "git checkout abc123")
         self.assertEqual(str(env_config.tool_install_dir), "/tools")
@@ -130,6 +132,44 @@ class ArlAdapterTests(unittest.TestCase):
 
         runtime = ArlRuntime(FakeSession(), run_id="run-1")
         self.assertEqual(runtime._arl_session_id, "arl-session-1")
+
+    def test_arl_runtime_strips_pty_control_sequences_from_shell_output(self) -> None:
+        from env.runtime import ArlRuntime, _strip_terminal_controls
+
+        class FakeClient:
+            base_url = "http://gateway"
+
+        class FakeSession:
+            _client = FakeClient()
+            _session_id = "arl-session-1"
+
+        class FakeShell:
+            def __init__(self):
+                self.inputs = []
+                self.sent = False
+
+            def send_input(self, data):
+                self.inputs.append(data)
+
+            def read_message(self, timeout):
+                if self.sent:
+                    return None
+                self.sent = True
+                marker = self.inputs[-1].split('"')[1].split(":")[0]
+                return SimpleNamespace(
+                    type="output",
+                    data=f"\x1b[?2004l\rknown output\r\n\x1b[?2004h{marker}:0\r\n",
+                )
+
+        runtime = ArlRuntime(FakeSession(), run_id="run-1")
+        runtime._shells["default"] = FakeShell()
+
+        output, exit_code, failure = runtime._run_in_shell_sync("default", "printf known", 1.0)
+
+        self.assertEqual(_strip_terminal_controls("\x1b[?2004hhello\r\n"), "hello\n")
+        self.assertEqual(output, "known output")
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(failure, "")
 
     def test_arl_runtime_retries_gateway_execute_refusal(self) -> None:
         from env.runtime import ArlRuntime

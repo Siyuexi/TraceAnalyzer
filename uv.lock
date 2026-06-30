@@ -149,16 +149,16 @@ wheels = [
 
 [[package]]
 name = "arl-env"
-version = "0.9.0"
+version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx", marker = "platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
     { name = "pydantic", marker = "platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
     { name = "rich", marker = "platform_machine == 'x86_64' and platform_python_implementation == 'CPython' and sys_platform == 'linux'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/77/fe/22c5ae0ea51080c0798f7aa3aba1f41278634f93a6457ad86820fc1b51c8/arl_env-0.9.0.tar.gz", hash = "sha256:bc5195b1033f23e2a3bbcc1b9acbae0674e6cde598bd318e12e0fb96e63f9b71", size = 19895, upload-time = "2026-06-25T06:24:05.779Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a0/10/b7d48fc184f7694b4945f1452ce2151e924014153aad2a74152c737550cb/arl_env-0.16.0.tar.gz", hash = "sha256:77cca2de7e93b64dae2e8c07e371a26d686415146a55b15abb6ba67d4149c06f", size = 31650, upload-time = "2026-06-30T11:24:20.601Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8f/d2/b54f997b285ab8695b6f0964f9b4cfcfb1c1a9e22823e0005584ec6b9873/arl_env-0.9.0-py3-none-any.whl", hash = "sha256:581916619b88c4c5dc569cfee96909dc8daa87f1eece336694db99542e5838f8", size = 22814, upload-time = "2026-06-25T06:24:04.511Z" },
+    { url = "https://files.pythonhosted.org/packages/12/78/cbd53d999524b78cedcee2e22c78727f9f5d76ccc6f95046e488bedbcb73/arl_env-0.16.0-py3-none-any.whl", hash = "sha256:5f27bebce292d2ad7a7793da3194942de96cbfc269ae64eb7b2c74b224bb4541", size = 27209, upload-time = "2026-06-30T11:24:19.508Z" },
 ]
 
 [[package]]
@@ -1417,8 +1417,7 @@ train = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp" },
-    { name = "arl-env", specifier = "==0.9.0" },
-    { name = "cupy-cuda13x", marker = "extra == 'gpu'", specifier = "==13.6.0" },
+    { name = "arl-env", specifier = "==0.16.0" },
     { name = "datasets" },
     { name = "httpx" },
     { name = "huggingface-hub" },
