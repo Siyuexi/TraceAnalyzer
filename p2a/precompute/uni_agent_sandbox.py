@@ -220,7 +220,7 @@ def _required_env(name: str) -> str:
 def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment: str | None = None) -> dict[str, Any]:
     """Build a Uni-Agent ``AgentEnvConfig`` dict from a dataset/sample row."""
     impl = (deployment or os.getenv("P2A_DEPLOYMENT") or os.getenv("DEPLOYMENT") or "vefaas").lower()
-    if impl == "arl":
+    if impl in ("arl", "nexus"):
         from env.images import select_image_for_sample
 
         image = select_image_for_sample(task, instance_id=instance_id)
@@ -271,8 +271,17 @@ def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment
         max_replicas = os.getenv("ARL_MAX_REPLICAS")
         if max_replicas:
             deployment_config["max_replicas"] = int(max_replicas)
+    elif impl == "nexus":
+        deployment_config = {
+            "type": "nexus",
+            "image": image,
+            "api_base_url": os.getenv("GONGFENG_API_BASE_URL", "http://hyrl-sandbox.prod.woa.com:8052"),
+            "runtime_image": os.getenv("GONGFENG_RUNTIME_IMAGE", "mirrors.tencent.com/hunyuan_yanguan/nexus-runtime:latest"),
+            "timeout": float(os.getenv("ARL_TIMEOUT", "1200")),
+            "startup_timeout": float(os.getenv("ARL_STARTUP_TIMEOUT", "600")),
+        }
     else:
-        raise ValueError(f"Unsupported P2A_DEPLOYMENT={impl!r}; expected vefaas/modal/local/arl")
+        raise ValueError(f"Unsupported P2A_DEPLOYMENT={impl!r}; expected vefaas/modal/local/arl/nexus")
 
     return {
         "deployment": deployment_config,
@@ -439,7 +448,7 @@ def create_uni_agent_sandbox(task: dict[str, Any], *, instance_id: str) -> UniAg
 
     config = build_agent_env_config(task, instance_id=instance_id)
     swebench_verified = _is_swebench_verified_task(task)
-    if config["deployment"].get("type") == "arl":
+    if config["deployment"].get("type") in ("arl", "nexus"):
         from env.deployment import make_env_config
 
         env_config = make_env_config(
