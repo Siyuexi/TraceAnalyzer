@@ -165,6 +165,7 @@ class ArlRuntime(AbstractRuntime):
         gateway_url: str | None = None,
         api_key: str | None = None,
         startup_commands: list[str] | None = None,
+        one_time_startup_commands: list[str] | None = None,
     ) -> None:
         self._session = session
         self.run_id = run_id
@@ -173,6 +174,10 @@ class ArlRuntime(AbstractRuntime):
         self._api_key = api_key
         self._shells: dict[str, Any] = {}  # session name -> InteractiveShellClient
         self._startup_commands = [command for command in (startup_commands or []) if command.strip()]
+        self._one_time_startup_commands = [
+            command for command in (one_time_startup_commands or []) if command.strip()
+        ]
+        self._completed_one_time_startup_shells: set[str] = set()
         self._shell_startup_sources: dict[str, list[str]] = {}
         self._closed = False
 
@@ -272,6 +277,13 @@ class ArlRuntime(AbstractRuntime):
             output += startup_output
             if exit_code != 0 or failure:
                 raise RuntimeError(f"ARL shell startup command failed ({exit_code=} {failure}): {command!r}")
+        if name not in self._completed_one_time_startup_shells:
+            for command in self._one_time_startup_commands:
+                startup_output, exit_code, failure = self._run_in_shell_sync(name, command, _DEFAULT_CMD_TIMEOUT)
+                output += startup_output
+                if exit_code != 0 or failure:
+                    raise RuntimeError(f"ARL one-time shell startup command failed ({exit_code=} {failure}): {command!r}")
+            self._completed_one_time_startup_shells.add(name)
         return output
 
     @staticmethod

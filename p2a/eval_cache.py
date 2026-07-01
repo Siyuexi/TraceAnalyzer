@@ -7,7 +7,7 @@ import sqlite3
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 
 from p2a.bonus_map_scope import LATENT_CASE, PATH_CASE_TYPES, canonical_detail_case_type
@@ -724,7 +724,7 @@ def _std(values: list[float | int | None]) -> float | None:
     return (sum((value - mean) ** 2 for value in real) / len(real)) ** 0.5
 
 
-def _detail_from_metric_row(row: sqlite3.Row) -> dict[str, Any]:
+def _detail_from_metric_row(row: Mapping[str, Any]) -> dict[str, Any]:
     metrics = json_loads(row["metrics_json"], {})
     detail = metrics.get("detail") if isinstance(metrics, dict) else None
     return _sync_path_aliases(detail) if isinstance(detail, dict) else {}
@@ -894,7 +894,7 @@ AVG_AT_METRIC_KEYS = (
 )
 
 
-def _rollout_metric_values(row: sqlite3.Row) -> dict[str, float | int | None]:
+def _rollout_metric_values(row: Mapping[str, Any]) -> dict[str, float | int | None]:
     detail = _detail_from_metric_row(row)
     path_metric = _is_path_metric_detail(detail) if detail else False
     order_metric = _is_order_metric_detail(detail) if detail else False
@@ -968,14 +968,14 @@ def _rollout_metric_values(row: sqlite3.Row) -> dict[str, float | int | None]:
     }
 
 
-def _rollout_n(group: list[sqlite3.Row]) -> int:
+def _rollout_n(group: list[Mapping[str, Any]]) -> int:
     if not group:
         return 1
     return max(1, max(int(row["rollout_index"] or 0) for row in group) + 1)
 
 
-def _rows_by_instance(rows: Iterable[sqlite3.Row]) -> dict[str, list[sqlite3.Row]]:
-    out: dict[str, list[sqlite3.Row]] = defaultdict(list)
+def _rows_by_instance(rows: Iterable[Mapping[str, Any]]) -> dict[str, list[Mapping[str, Any]]]:
+    out: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for row in rows:
         out[str(row["instance_id"])].append(row)
     for values in out.values():
@@ -983,11 +983,15 @@ def _rows_by_instance(rows: Iterable[sqlite3.Row]) -> dict[str, list[sqlite3.Row
     return out
 
 
-def _avg_at_payload(metric_rows: list[sqlite3.Row], *, n: int) -> tuple[dict[str, float | None], dict[str, float | None]]:
+def _first_k_rollout_rows(rows: Iterable[Mapping[str, Any]], *, k: int) -> list[Mapping[str, Any]]:
+    return [row for row in rows if int(row["rollout_index"] or 0) < k]
+
+
+def _avg_at_payload(metric_rows: list[Mapping[str, Any]], *, n: int) -> tuple[dict[str, float | None], dict[str, float | None]]:
     by_instance = _rows_by_instance(metric_rows)
     values_by_key: dict[str, list[float | None]] = {key: [] for key in AVG_AT_METRIC_KEYS}
     for rows in by_instance.values():
-        selected = rows[:n]
+        selected = _first_k_rollout_rows(rows, k=n)
         rollout_values = [_rollout_metric_values(row) for row in selected]
         for key in AVG_AT_METRIC_KEYS:
             values_by_key[key].append(_avg([values.get(key) for values in rollout_values]))
@@ -997,7 +1001,7 @@ def _avg_at_payload(metric_rows: list[sqlite3.Row], *, n: int) -> tuple[dict[str
 
 
 def _avg_at_payloads(
-    metric_rows: list[sqlite3.Row],
+    metric_rows: list[Mapping[str, Any]],
     *,
     rollout_n: int,
 ) -> tuple[dict[str, dict[str, float | None]], dict[str, dict[str, float | None]]]:
@@ -1010,17 +1014,26 @@ def _avg_at_payloads(
     return avg_at, avg_at_std
 
 
-def _pass_at_payload(metric_rows: list[sqlite3.Row], *, rollout_n: int) -> dict[str, float | None]:
+def _pass_at_payload(metric_rows: list[Mapping[str, Any]], *, rollout_n: int) -> dict[str, float | None]:
     by_instance = _rows_by_instance(metric_rows)
     out: dict[str, float | None] = {}
     for k in range(1, rollout_n + 1):
         values = []
         for rows in by_instance.values():
-            selected = rows[:k]
+            selected = _first_k_rollout_rows(rows, k=k)
             if selected:
                 values.append(1 if any(_bool_int(row["resolved"]) == 1 for row in selected) else 0)
         out[str(k)] = _rate(values)
     return out
+
+
+def _k_metric_row(row: sqlite3.Row) -> Mapping[str, Any]:
+    if row["status"] == DONE_STATUS:
+        return row
+    data = {key: row[key] for key in row.keys()}
+    data["reward"] = 0.0
+    data["resolved"] = 0
+    return data
 
 
 def _selected_scope_from_snapshot(value: str | None) -> dict[str, Any] | None:
@@ -1061,6 +1074,7 @@ def aggregate_model_metrics(
     where_sql = "WHERE " + " AND ".join(where) if where else ""
     cell_columns = _table_columns(conn, "run_cells")
     rollout_index_sql = "c.rollout_index" if "rollout_index" in cell_columns else "0 AS rollout_index"
+    rollout_index_order_sql = "c.rollout_index" if "rollout_index" in cell_columns else "rollout_index"
     rollout_id_sql = "c.rollout_id" if "rollout_id" in cell_columns else "NULL AS rollout_id"
 
     rows = conn.execute(
@@ -1101,7 +1115,7 @@ def aggregate_model_metrics(
          AND e.dataset = c.dataset
         LEFT JOIN quantitative_metrics q ON q.cell_id = c.id
         {where_sql}
-        ORDER BY c.model_label, c.instance_id, c.rollout_index
+        ORDER BY c.model_label, c.instance_id, {rollout_index_order_sql}
         """,
         params,
     ).fetchall()
@@ -1122,11 +1136,12 @@ def aggregate_model_metrics(
         done = [row for row in group if row["status"] == DONE_STATUS]
         errors = [row for row in group if row["status"] == ERROR_STATUS]
         metric_rows = [row for row in done if row["turns"] is not None]
+        k_metric_rows = [_k_metric_row(row) for row in group if row["status"] in {DONE_STATUS, ERROR_STATUS}]
         rollout_n = _rollout_n(group)
-        avg_at, avg_at_std = _avg_at_payloads(metric_rows, rollout_n=rollout_n)
+        avg_at, avg_at_std = _avg_at_payloads(k_metric_rows, rollout_n=rollout_n)
         avg_at_n = avg_at.get(str(rollout_n), {})
         avg_at_n_std = avg_at_std.get(str(rollout_n), {})
-        pass_at = _pass_at_payload(metric_rows, rollout_n=rollout_n)
+        pass_at = _pass_at_payload(k_metric_rows, rollout_n=rollout_n)
         distances = [row["min_distance"] for row in metric_rows if row["min_distance"] is not None]
         cache_hit = sum(float(row["cache_hit_tokens"] or 0) for row in metric_rows)
         cache_write = sum(float(row["cache_write_tokens"] or 0) for row in metric_rows)

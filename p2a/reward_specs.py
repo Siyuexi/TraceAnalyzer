@@ -8,16 +8,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
+from swerex.runtime.abstract import Command
 from uni_agent.async_logging import get_logger
 from uni_agent.interaction import AgentEnv
 from uni_agent.reward.base import AbstractRewardSpec
-from uni_agent.reward.registry import register_reward_spec
+from uni_agent.reward.registry import REWARD_SPEC_MODULES, REWARD_SPEC_REGISTRY, register_reward_spec
 from uni_agent.utils import auto_await
 
 from p2a.datasets import last_nonempty_line, parse_string_list, selector_files, swebench_pro_repo_path
@@ -73,6 +75,204 @@ def _reward_test_args(metadata: dict[str, Any]) -> list[str]:
     return [",".join(selected_files)] if selected_files else []
 
 
+async def _run_env_command(env: AgentEnv, command: str, *, timeout: int | float | None = None, check: str = "ignore") -> str:
+    runtime = getattr(getattr(env, "deployment", None), "runtime", None)
+    execute = getattr(runtime, "execute", None)
+    if callable(execute):
+        response = await execute(Command(command=["bash", "-lc", command], timeout=timeout))
+        output = (response.stdout or "") + (response.stderr or "")
+        if check == "raise" and int(response.exit_code or 0) != 0:
+            raise RuntimeError(f"command failed with exit code {response.exit_code}: {output}")
+        return output
+    return await env.communicate(command, timeout=timeout, check=check)
+
+
+def _make_swebench_eval_script_list(instance, specs, env_name, repo_directory, test_patch):
+    from swebench.harness.constants import END_TEST_OUTPUT, MAP_REPO_VERSION_TO_SPECS, START_TEST_OUTPUT
+    from swebench.harness.test_spec.python import get_test_directives
+    from swebench.harness.utils import get_modified_files
+
+    heredoc_delimiter = "EOF_114329324912"
+    base_commit = instance["base_commit"]
+    test_files = get_modified_files(test_patch)
+    reset_tests_command = f"git checkout {base_commit} {' '.join(test_files)}" if test_files else "echo 'skip reset'"
+    apply_test_patch_command = f"git apply -v - <<'{heredoc_delimiter}'\n{test_patch}\n{heredoc_delimiter}"
+    test_cmd = MAP_REPO_VERSION_TO_SPECS[instance["repo"]][instance["version"]]["test_cmd"]
+    test_command = " ".join([test_cmd, *get_test_directives(instance)])
+
+    eval_commands = [
+        "source /opt/miniconda3/bin/activate",
+        f"conda activate {env_name}",
+        f"cd {repo_directory}",
+    ]
+    if "eval_commands" in specs:
+        eval_commands += specs["eval_commands"]
+    eval_commands += [
+        f"git config --global --add safe.directory {repo_directory}",
+        f"cd {repo_directory}",
+        "git status",
+        "git show",
+        f"git -c core.fileMode=false diff {base_commit}",
+        "source /opt/miniconda3/bin/activate",
+        f"conda activate {env_name}",
+    ]
+    if "install" in specs:
+        eval_commands.append(specs["install"])
+    eval_commands += [
+        reset_tests_command,
+        apply_test_patch_command,
+        f": '{START_TEST_OUTPUT}'",
+        test_command,
+        f": '{END_TEST_OUTPUT}'",
+        reset_tests_command,
+    ]
+    return eval_commands
+
+
+class SWEBenchRewardSpec(AbstractRewardSpec):
+    """SWE-Bench verifier that evaluates through the runtime execute interface."""
+
+    def __init__(self, *, run_id: str, metadata: dict, env: AgentEnv, eval_timeout: int = 300):
+        self.run_id = run_id
+        self.metadata = metadata
+        self.env = env
+        self.logger = get_logger("reward_spec", run_id=run_id)
+        self.eval_timeout = eval_timeout
+
+    @auto_await
+    async def apply_gold_patch(self) -> None:
+        await self._apply_patch(str(self.metadata.get("patch") or ""))
+
+    @auto_await
+    async def compute_reward(self, **kwargs) -> tuple[bool, dict]:
+        result = {
+            "eval_completed": False,
+            "eval_execution_time": None,
+            "eval_report": None,
+            "resolved": False,
+        }
+        try:
+            eval_script = self._build_eval_script()
+            eval_script_container = Path(f"/tmp/eval_script_{uuid.uuid4()}.sh")
+            await self.env.write_file(eval_script_container, eval_script)
+
+            execution_t0 = time.perf_counter()
+            output = await _run_env_command(
+                self.env,
+                f"bash {shlex.quote(str(eval_script_container))} 2>&1",
+                timeout=self.eval_timeout,
+                check="ignore",
+            )
+            execution_time = time.perf_counter() - execution_t0
+            result["eval_completed"] = True
+            result["eval_execution_time"] = execution_time
+
+            output = re.sub(r"\x1b\[[0-9;]*m|\r", "", output)
+            eval_report = self._get_eval_report(output)
+            result["eval_report"] = eval_report
+            result["resolved"] = bool(eval_report["resolved"])
+            self.logger.info(f"Eval report: {eval_report}")
+        except Exception as exc:  # noqa: BLE001 - reward failures are captured per instance
+            result["error"] = f"{type(exc).__name__}: {exc}"
+            self.logger.error(f"Failed to evaluate SWE-Bench instance: {exc}")
+        return result["resolved"], result
+
+    def _build_eval_script(self) -> str:
+        from swebench.harness.constants import MAP_REPO_VERSION_TO_SPECS
+
+        instance = self.metadata
+        repo = instance["repo"]
+        version = instance.get("version")
+        specs = MAP_REPO_VERSION_TO_SPECS[repo][version]
+        env_name = "testbed"
+        repo_directory = f"/{env_name}"
+        eval_script_list = _make_swebench_eval_script_list(
+            instance=instance,
+            specs=specs,
+            env_name=env_name,
+            repo_directory=repo_directory,
+            test_patch=instance["test_patch"],
+        )
+        return "\n".join(["#!/bin/bash", "set -uxo pipefail"] + eval_script_list) + "\n"
+
+    @auto_await
+    async def _get_interaction_env_patch(self) -> str:
+        try:
+            env_patch_file = Path(f"/tmp/patch_{uuid.uuid4()}.diff")
+            await _run_env_command(
+                self.env,
+                f"cd /testbed && git add -A && git diff --no-color --cached > {shlex.quote(env_patch_file.as_posix())}",
+                check="ignore",
+            )
+            return await self.env.read_file(env_patch_file)
+        except Exception as exc:  # noqa: BLE001 - preserve upstream fallback semantics
+            self.logger.error(f"Failed to get interaction environment patch: {exc}")
+            return ""
+
+    @auto_await
+    async def _apply_patch(self, patch: str) -> None:
+        if not patch.strip():
+            self.logger.info("Empty patch, nothing to apply.")
+            return
+        patch_path = Path(f"/tmp/patch_{uuid.uuid4()}.diff")
+        await self.env.write_file(patch_path, patch)
+        commands = [
+            f"cd /testbed && git apply --whitespace=fix {shlex.quote(patch_path.as_posix())}",
+            f"cd /testbed && git apply --reject --whitespace=nowarn {shlex.quote(patch_path.as_posix())}",
+            f"cd /testbed && patch --batch --fuzz=5 -p1 -i {shlex.quote(patch_path.as_posix())}",
+        ]
+        last_error: Exception | None = None
+        for command in commands:
+            try:
+                await _run_env_command(self.env, command, check="raise")
+                self.logger.info("Applied patch successfully!")
+                return
+            except RuntimeError as exc:
+                last_error = exc
+        raise RuntimeError("Failed to apply patch with any command") from last_error
+
+    def _get_logs_eval(self, eval_output: str):
+        from swebench.harness.constants import END_TEST_OUTPUT, START_TEST_OUTPUT
+        from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
+
+        log_parser = MAP_REPO_TO_PARSER[self.metadata["repo"]]
+        if START_TEST_OUTPUT in eval_output and END_TEST_OUTPUT in eval_output:
+            test_content = eval_output.split(START_TEST_OUTPUT)[1].split(END_TEST_OUTPUT)[0]
+            return log_parser(test_content, None), True
+        return {}, False
+
+    def _get_eval_report(self, eval_output: str):
+        from swebench.harness.constants import FAIL_ONLY_REPOS, EvalType, ResolvedStatus
+        from swebench.harness.grading import get_eval_tests_report, get_resolution_status
+
+        eval_report = {
+            "resolved": False,
+            "found_eval_status": False,
+            "test_status": None,
+        }
+        status_map, found = self._get_logs_eval(eval_output)
+        eval_report["found_eval_status"] = found
+        if not found:
+            return eval_report
+
+        eval_ref = {
+            "instance_id": self.metadata["instance_id"],
+            "FAIL_TO_PASS": json.loads(self.metadata.get("FAIL_TO_PASS", "[]")),
+            "PASS_TO_PASS": json.loads(self.metadata.get("PASS_TO_PASS", "[]")),
+        }
+        repo = self.metadata["repo"]
+        eval_type = EvalType.FAIL_ONLY if repo in FAIL_ONLY_REPOS else EvalType.PASS_AND_FAIL
+        report = get_eval_tests_report(status_map, eval_ref, eval_type=eval_type)
+        eval_report["test_status"] = report
+        if get_resolution_status(report) == ResolvedStatus.FULL.value:
+            eval_report["resolved"] = True
+        return eval_report
+
+
+REWARD_SPEC_REGISTRY["swe_bench"] = SWEBenchRewardSpec
+REWARD_SPEC_MODULES["swe_bench"] = "p2a.reward_specs"
+
+
 @register_reward_spec("swe_bench_pro")
 class SWEBenchProRewardSpec(AbstractRewardSpec):
     """SWE-Bench-Pro verifier using the official per-instance run script/parser."""
@@ -108,7 +308,8 @@ class SWEBenchProRewardSpec(AbstractRewardSpec):
             await self.env.write_file(paths["eval_script"], eval_script)
 
             t0 = time.perf_counter()
-            await self.env.communicate(
+            await _run_env_command(
+                self.env,
                 f"bash {shlex.quote(str(paths['eval_script']))} 2>&1 | cat",
                 timeout=self.eval_timeout,
                 check="ignore",
@@ -239,7 +440,7 @@ class SWEBenchProRewardSpec(AbstractRewardSpec):
         last_error: Exception | None = None
         for command in commands:
             try:
-                await self.env.communicate(command, check="raise")
+                await _run_env_command(self.env, command, check="raise")
                 return
             except RuntimeError as exc:
                 last_error = exc

@@ -215,6 +215,29 @@ def test_cmd_swebench_pro_rejects_missing_instance_scripts(monkeypatch, tmp_path
     assert not out.exists()
 
 
+def test_cmd_swebench_pro_allows_missing_scripts_when_debug_flag_is_set(monkeypatch, tmp_path):
+    build_data = _load_build_data_module()
+    scripts_dir = tmp_path / "run_scripts"
+    scripts_dir.mkdir()
+    out = tmp_path / "out.parquet"
+
+    monkeypatch.setattr("p2a.hf_assets.load_shared_dataset", lambda *_args, **_kwargs: [_sample()])
+
+    rc = build_data.cmd_swebench_pro(
+        SimpleNamespace(
+            out=str(out),
+            language="python",
+            scripts_dir=str(scripts_dir),
+            allow_missing_scripts=True,
+        )
+    )
+
+    assert rc == 0
+    row = pd.read_parquet(out).to_dict(orient="records")[0]
+    assert pd.isna(row["run_tests"]) or row["run_tests"] == ""
+    assert pd.isna(row["swebench_pro_parser"]) or row["swebench_pro_parser"] == ""
+
+
 def test_validate_swebench_pro_parquet_rejects_empty_scripts(tmp_path):
     build_data = _load_build_data_module()
     path = tmp_path / "bad.parquet"
@@ -231,6 +254,42 @@ def test_validate_swebench_pro_parquet_rejects_empty_scripts(tmp_path):
 
     with pytest.raises(ValueError, match="empty run_tests, swebench_pro_parser"):
         build_data.validate_swebench_pro_parquet(path)
+
+
+def test_swebench_reward_runs_eval_through_execute_not_shared_communicate(monkeypatch):
+    from p2a.reward_specs import SWEBenchRewardSpec
+    from uni_agent.reward import load_reward_spec
+
+    calls = {"execute": [], "write_file": []}
+
+    class FakeRuntime:
+        async def execute(self, command):
+            calls["execute"].append(command)
+            return SimpleNamespace(stdout="clean eval output", stderr="", exit_code=0)
+
+    class FakeEnv:
+        deployment = SimpleNamespace(runtime=FakeRuntime())
+
+        async def write_file(self, path, content):
+            calls["write_file"].append((path, content))
+
+        async def communicate(self, *_args, **_kwargs):
+            raise AssertionError("reward eval must not use shared communicate")
+
+    spec = load_reward_spec({"name": "swe_bench", "run_id": "run-1", "metadata": {}, "env": FakeEnv()})
+    assert isinstance(spec, SWEBenchRewardSpec)
+    monkeypatch.setattr(spec, "_build_eval_script", lambda: "echo eval\n")
+    monkeypatch.setattr(spec, "_get_eval_report", lambda output: {"resolved": True, "captured": output})
+
+    reward, details = spec.compute_reward()
+
+    assert reward is True
+    assert details["resolved"] is True
+    assert details["eval_completed"] is True
+    assert calls["write_file"]
+    assert len(calls["execute"]) == 1
+    assert calls["execute"][0].command[:2] == ["bash", "-lc"]
+    assert "bash /tmp/eval_script_" in calls["execute"][0].command[2]
 
 
 def test_swebench_pro_reward_grades_f2p_and_p2p():

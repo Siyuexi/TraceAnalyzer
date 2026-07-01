@@ -245,6 +245,7 @@ class ArlDeployment(AbstractDeployment):
 
         self._hooks.on_custom_step("Attaching ARL runtime adapter")
         startup_commands = []
+        one_time_startup_commands = []
         if self._config.startup_env_variables:
             startup_commands.append(
                 " && ".join(
@@ -253,13 +254,14 @@ class ArlDeployment(AbstractDeployment):
                 )
             )
         if self._config.shell_post_setup_cmd:
-            startup_commands.append(self._config.shell_post_setup_cmd)
+            one_time_startup_commands.append(self._config.shell_post_setup_cmd)
         self._runtime = ArlRuntime(
             self._session,
             run_id=self.run_id,
             logger=self.logger,
             api_key=api_key,
             startup_commands=startup_commands,
+            one_time_startup_commands=one_time_startup_commands,
         )
         self._hooks.on_custom_step("Waiting for ARL execute readiness")
         await self._wait_until_runtime_ready(self._config.startup_timeout)

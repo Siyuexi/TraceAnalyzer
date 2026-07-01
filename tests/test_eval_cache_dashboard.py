@@ -620,6 +620,133 @@ def test_eval_cache_aggregates_pass_at_n_and_avg_at_n(tmp_path):
     assert details == [("case-1", 0), ("case-1", 1), ("case-2", 0), ("case-2", 1)]
 
 
+def test_multi_rollout_k_metrics_count_error_attempts(tmp_path):
+    db = tmp_path / "traces.sqlite"
+    with ensure_db(db) as conn:
+        upsert_experiment(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            dataset="swebench-hard",
+            config_snapshot={"ok": True},
+        )
+        upsert_planned_cells(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            instance_ids=["case-1"],
+            rollouts_per_instance=2,
+        )
+        error_record = _rollout("case-1", resolved=False)
+        error_record["run_id"] = "run-case-1-0"
+        error_record["rollout_index"] = 0
+        error_record["error"] = "RuntimeError: shell dropped"
+        upsert_rollout_record(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            record=error_record,
+        )
+        success_record = _rollout("case-1", resolved=True)
+        success_record["run_id"] = "run-case-1-1"
+        success_record["rollout_index"] = 1
+        upsert_rollout_record(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            record=success_record,
+        )
+        conn.commit()
+
+        row = aggregate_model_metrics(conn, experiment_id="exp")[0]
+
+    assert row["pass_at"] == {"1": 0.0, "2": 1.0}
+    assert row["avg_at"]["1"]["resolved_rate"] == 0.0
+    assert row["avg_at"]["2"]["resolved_rate"] == 0.5
+    assert row["resolved_rate"] == 0.5
+
+
+def test_aggregate_model_metrics_loads_read_only_v1_cache_without_rollout_index(tmp_path):
+    db = tmp_path / "v1.sqlite"
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE experiments(
+          experiment_id TEXT,
+          provider_source TEXT,
+          dataset TEXT,
+          config_snapshot TEXT
+        );
+        CREATE TABLE run_cells(
+          id INTEGER PRIMARY KEY,
+          experiment_id TEXT,
+          provider_source TEXT,
+          model_api_name TEXT,
+          model_label TEXT,
+          dataset TEXT,
+          instance_id TEXT,
+          status TEXT,
+          error TEXT
+        );
+        CREATE TABLE quantitative_metrics(
+          cell_id INTEGER PRIMARY KEY,
+          reward REAL,
+          resolved INTEGER,
+          p2a_read INTEGER,
+          call_graph_hit INTEGER,
+          ground_truth_hit INTEGER,
+          near_hit INTEGER,
+          min_distance REAL,
+          turns INTEGER,
+          tool_calls INTEGER,
+          wall_time REAL,
+          input_tokens REAL,
+          output_tokens REAL,
+          reasoning_tokens REAL,
+          cache_hit_tokens REAL,
+          cache_write_tokens REAL,
+          cost REAL,
+          metrics_json TEXT
+        );
+        """
+    )
+    conn.execute("INSERT INTO experiments VALUES (?, ?, ?, ?)", ("exp", "internal_api", "swebench-hard", "{}"))
+    conn.execute(
+        "INSERT INTO run_cells VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (1, "exp", "internal_api", "dummy-model", "dummy", "swebench-hard", "case-1", "done", None),
+    )
+    conn.execute(
+        """
+        INSERT INTO quantitative_metrics VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        """,
+        (1, 1.0, 1, None, None, None, None, None, 1, 1, 1.0, 10, 1, 0, 0, 0, 0.0, "{}"),
+    )
+    conn.commit()
+    conn.close()
+
+    ro = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    ro.row_factory = sqlite3.Row
+    try:
+        rows = aggregate_model_metrics(ro, experiment_id="exp")
+    finally:
+        ro.close()
+
+    assert rows[0]["rollouts_per_instance"] == 1
+    assert rows[0]["pass_at"] == {"1": 1.0}
+
+
 def test_swebench_pro_dashboard_mixes_p2a_and_resolution_only_cells(tmp_path):
     db = tmp_path / "traces.sqlite"
     bonus_dir = tmp_path / "bonus"

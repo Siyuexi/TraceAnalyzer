@@ -220,6 +220,64 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(failure, "")
 
+    def test_arl_runtime_does_not_replay_one_time_setup_on_reconnect(self) -> None:
+        from env.runtime import ArlRuntime
+
+        class FakeClient:
+            base_url = "http://gateway"
+
+        class FakeSession:
+            _client = FakeClient()
+            _session_id = "arl-session-1"
+
+        class FakeShell:
+            instances = []
+
+            def __init__(self, **_kwargs):
+                self.commands = []
+                self.messages = []
+                FakeShell.instances.append(self)
+
+            def connect(self, _session_id):
+                return None
+
+            def send_input(self, data):
+                if data.startswith("echo \"__ARL_END_"):
+                    marker = data.split('"')[1].split(":")[0]
+                    self.messages.append(SimpleNamespace(type="output", data=f"{marker}:0\n"))
+                elif not data.startswith("export PS1"):
+                    self.commands.append(data.strip())
+
+            def read_message(self, timeout):
+                return self.messages.pop(0) if self.messages else None
+
+            def close(self):
+                return None
+
+        fake_arl = ModuleType("arl")
+        fake_shell_module = ModuleType("arl.interactive_shell_client")
+        fake_shell_module.InteractiveShellClient = FakeShell
+
+        runtime = ArlRuntime(
+            FakeSession(),
+            run_id="run-1",
+            startup_commands=["export PAGER=cat"],
+            one_time_startup_commands=["mv /testbed/run_tests.sh /tmp/run_tests.sh"],
+        )
+        with patch.dict(
+            sys.modules,
+            {
+                "arl": fake_arl,
+                "arl.interactive_shell_client": fake_shell_module,
+            },
+        ):
+            runtime._open_shell("default", None)
+            runtime._shells.pop("default")
+            runtime._open_shell("default", None)
+
+        self.assertEqual(FakeShell.instances[0].commands, ["export PAGER=cat", "mv /testbed/run_tests.sh /tmp/run_tests.sh"])
+        self.assertEqual(FakeShell.instances[1].commands, ["export PAGER=cat"])
+
     def test_arl_runtime_retries_gateway_execute_refusal(self) -> None:
         from env.runtime import ArlRuntime
 
