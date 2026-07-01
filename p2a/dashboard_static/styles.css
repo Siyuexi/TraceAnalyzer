@@ -36,10 +36,42 @@ h1 { margin: 0 0 6px; font-size: 24px; letter-spacing: 0; }
 h2 { margin: 0 0 12px; font-size: 17px; letter-spacing: 0; }
 h3 { margin: 14px 0 8px; font-size: 14px; letter-spacing: 0; }
 .source-line { color: #cbd5e1; font-size: 12px; max-width: 980px; overflow-wrap: anywhere; }
+.operation-status {
+  margin-top: 4px;
+  color: #fde68a;
+  font-size: 12px;
+}
+.operation-status.ok {
+  color: #bbf7d0;
+}
+.operation-status.bad {
+  color: #fecaca;
+}
+.inline-status {
+  margin: 8px 0;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+}
+.inline-status.is-error {
+  color: #b91c1c;
+}
+.rebuild-inline-status {
+  max-width: 360px;
+  color: #fde68a;
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.rebuild-inline-status.ok {
+  color: #bbf7d0;
+}
+.rebuild-inline-status.bad {
+  color: #fecaca;
+}
 .top-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .admin-login,
 .permalink-jump,
-.admin-target-form,
 .admin-actions {
   display: flex;
   align-items: center;
@@ -48,7 +80,6 @@ h3 { margin: 14px 0 8px; font-size: 14px; letter-spacing: 0; }
 }
 .admin-login input,
 .permalink-jump input,
-.admin-target-form input,
 .admin-actions input {
   min-height: 32px;
   border: 1px solid var(--line);
@@ -57,6 +88,11 @@ h3 { margin: 14px 0 8px; font-size: 14px; letter-spacing: 0; }
   font: inherit;
 }
 .permalink-jump input { width: min(360px, 42vw); }
+.admin-status {
+  color: #cbd5e1;
+  font-size: 12px;
+  white-space: nowrap;
+}
 .case-filter {
   display: inline-flex;
   align-items: center;
@@ -123,7 +159,7 @@ button:hover { border-color: var(--accent); }
 }
 .admin-message {
   min-height: 20px;
-  color: var(--bad);
+  color: var(--muted);
 }
 .copy-link { white-space: nowrap; }
 .step-detail-head {
@@ -215,6 +251,9 @@ th {
   z-index: 1;
 }
 tr:last-child td { border-bottom: 0; }
+tr.has-cache-pending td {
+  background: #fffbeb;
+}
 tr.is-selected td {
   background: var(--accent-soft);
 }
@@ -522,9 +561,9 @@ tr.is-selected td {
 .kpi-table td {
   background-clip: padding-box;
 }
-.kpi-table th.metric-group-scope,
-.kpi-table td.metric-group-scope,
-.metric-group-filter label.metric-group-scope {
+.kpi-table th.metric-group-filter-totals,
+.kpi-table td.metric-group-filter-totals,
+.metric-group-filter label.metric-group-filter-totals {
   background: #f8fafc;
 }
 .kpi-table th.metric-group-graph,
@@ -756,6 +795,19 @@ pre.log {
 .trace-status-empty {
   color: var(--muted);
   font-size: 12px;
+}
+.trace-load-progress {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  min-height: 44px;
+}
+.trace-load-progress progress {
+  inline-size: min(320px, 60vw);
+}
+.trace-load-progress span {
+  color: var(--muted);
+  font-size: 13px;
 }
 .trace-title-card {
   display: flex;

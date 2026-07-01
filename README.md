@@ -450,9 +450,10 @@ underlying `run_cells`/metric update token is unchanged. To enable admin-only
 deletion, put the password in `.secrets/dashboard_admin.txt` or pass
 `--admin-secret .secrets/dashboard_admin.txt`; without that file the dashboard
 remains read-only and open for normal viewing. Admin deletion previews the DB
-blast radius, requires typing the generated confirmation phrase, backs up the
-SQLite file, and removes only DB rows (`run_cells` plus cascaded rollouts and
+blast radius and removes only DB rows (`run_cells` plus cascaded rollouts and
 metrics, and matching `experiments`). On-disk rollout artifacts are not deleted.
+After admin login, each eval-cell row also has a `Rebuild` action that invalidates
+that target's dashboard detail cache and starts a background re-warm.
 
 The Overview tab is the dataset and eval-cell registry. Dataset-level
 distributions count unique instances in a dataset/split, so five model runs over

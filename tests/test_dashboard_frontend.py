@@ -6,8 +6,14 @@ from pathlib import Path
 
 def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
     app_path = Path(__file__).resolve().parents[1] / "p2a" / "dashboard_static" / "app.js"
+    index_path = app_path.with_name("index.html")
     css_path = app_path.with_name("styles.css")
+    html = index_path.read_text(encoding="utf-8")
     css = css_path.read_text(encoding="utf-8")
+    assert 'id="admin-login" class="admin-login"' in html
+    assert 'id="admin-login-button" type="submit">Log in</button>' in html
+    assert 'id="rebuild-button" type="button" hidden>Rebuild</button>' in html
+    assert 'data-pattern-filter="error' not in html
     assert ".node-source-code" in css
     assert ".node-source-code {\n  flex: 1 1 auto;" in css
     assert "background: #101827;" in css[css.index(".node-source-code") : css.index(".node-source-code .code-view")]
@@ -67,6 +73,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
                 "model_label": "model-a",
                 "target": 2,
                 "done": 2,
+                "cache_pending": 1,
                 "trajectory_count": 2,
                 "resolved_rate": 0.0,
                 "root_hit_rate": 1.0,
@@ -544,8 +551,8 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             vm.createContext(context);
             vm.runInContext(fs.readFileSync(appPath, "utf8"), context);
             function run(expr) { return vm.runInContext(expr, context); }
-            if (run("state.caseFilters.direct") !== false || run("state.caseFilters.latent") !== true || run("state.caseFilters.exposed") !== false || run("state.caseFilters.others") !== false) {
-              throw new Error("default case filter should include only latent");
+            if (run("state.caseFilters.direct") !== true || run("state.caseFilters.latent") !== true || run("state.caseFilters.exposed") !== true || run("state.caseFilters.others") !== true) {
+              throw new Error("default case filter should include all buckets");
             }
             if (run('BONUS_MAP_METRIC_CASE_TYPES.has("standard")') !== false) {
               throw new Error("dashboard should not expose legacy standard as a current case type");
@@ -585,6 +592,26 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
             if (!expHtml.includes("Datasets") || !expHtml.includes("Eval cells") || !expHtml.includes("exp-a") || !expHtml.includes("exp-b")) {
               throw new Error("dataset/eval-cell registry did not render");
             }
+            if (!expHtml.includes("1 to rebuild") || !expHtml.includes("has-cache-pending")) {
+              throw new Error("eval-cell registry should expose dashboard cache rebuild state");
+            }
+            run("state.admin.authenticated = true; renderExperiments(state.snapshot);");
+            const adminExpHtml = elements.get("experiment-table").innerHTML;
+            if (!adminExpHtml.includes("admin-delete-target") || !adminExpHtml.includes("admin-rebuild-target") || !adminExpHtml.includes(">Rebuild</button>") || !adminExpHtml.includes("model_api_name")) {
+              throw new Error("authenticated admin should see per-eval-cell delete and rebuild controls");
+            }
+            run("renderAdminPanel(state.snapshot);");
+            const adminPanelHtml = elements.get("admin-panel").innerHTML;
+            if (!adminPanelHtml.includes("Delete selected DB rows") || adminPanelHtml.includes("Add target") || adminPanelHtml.includes("confirmation")) {
+              throw new Error("admin delete panel should not expose manual targets or typed confirmation");
+            }
+            run("state.adminBusy = 'delete'; state.adminMessage = 'Deleting selected DB rows.'; renderAdminPanel(state.snapshot);");
+            const busyAdminPanelHtml = elements.get("admin-panel").innerHTML;
+            if (!busyAdminPanelHtml.includes("Deleting...") || !busyAdminPanelHtml.includes("Deleting selected DB rows.")) {
+              throw new Error("admin delete panel should show immediate delete progress");
+            }
+            run("state.adminBusy = ''; state.adminMessage = '';");
+            run("state.admin.authenticated = false; renderExperiments(state.snapshot);");
             const firstCell = snapshot.eval_cells[0].eval_cell_key;
             run(`state.selectedEvalCellKey = ${JSON.stringify("PLACEHOLDER")};
                  state.selectedExperimentKey = ${JSON.stringify("PLACEHOLDER")};
@@ -929,7 +956,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
               if (legendHtml.includes(needle)) throw new Error(`trajectory legend should not include long prose: ${needle}`);
             }
             const modelHtml = elements.get("model-table").innerHTML;
-            for (const needle of ["KPI groups", "metric-group-checkbox", "metric-group-graph", "metric-group-path", "Metric definitions", "Graph", "Outcome", "Path", "Pattern", "Purpose Blocks", "Efficiency", "Graph P.", "Graph R.", "Graph F1", "Path P.", "Path R.", "Path F1", "Symptom hit", "Root cause hit", "Evaluator-resolved pass rate", "Completed cases over planned cases"]) {
+            for (const needle of ["KPI groups", "metric-group-checkbox", "metric-group-graph", "metric-group-path", "Metric definitions", "Filter totals", "Graph", "Outcome", "Path", "Pattern", "Purpose Blocks", "Efficiency", "Total instances", "Done traces", "Error traces", "ToDo traces", "Graph P.", "Graph R.", "Graph F1", "Path P.", "Path R.", "Path F1", "Symptom hit", "Root cause hit", "Evaluator-resolved pass rate", "Instances matching the current case filter"]) {
               if (!modelHtml.includes(needle)) throw new Error(`missing macro glossary fragment: ${needle}`);
             }
             for (const needle of ["Effect and Evidence", "Graph Hits", "Dependency Path", "Exploration Behavior", "Path-read hit ratio", "Trace P.", "Trace R.", "Trace F1", "Trace precision", "Trace recall", "Path node precision", "Path node recall", "Path read precision", "Path hit ratio", "Graph hit ratio", "Read recall", "Not defined: no canonical required-read set", "Scored read actions that hit useful"]) {
@@ -940,7 +967,7 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
               throw new Error("default KPI columns should include all metric groups");
             }
             const expectedOrder = [
-              "Done",
+              "Total instances", "Done traces", "Error traces", "ToDo traces",
               "Graph P.", "Graph R.", "Graph F1",
               "Pass@K", "Avg@K", "Symptom hit", "Root cause hit", "First symptom", "First root cause",
               "Path P.", "Path R.", "Path F1",
@@ -1160,6 +1187,21 @@ def test_dashboard_frontend_pattern_filters_and_permalinks(tmp_path):
             vm.createContext(context);
             vm.runInContext(fs.readFileSync(appPath, "utf8"), context);
             function run(expr) { return vm.runInContext(expr, context); }
+            const fallbackSnapshot = {
+              datasets: [{dataset: "ds"}],
+              eval_cells: [{eval_cell_key: "cell", experiment_key: "cell", dataset: "ds", model_label: "model", experiment_id: "exp", provider_source: "internal_api"}],
+              model_metrics: [],
+              details: [
+                {eval_cell_key: "cell", experiment_key: "cell", dataset: "ds", model_label: "model", experiment_id: "exp", provider_source: "internal_api", instance_id: "empty", record_index: 0, dashboard_cache_pending: true},
+                {eval_cell_key: "cell", experiment_key: "cell", dataset: "ds", model_label: "model", experiment_id: "exp", provider_source: "internal_api", instance_id: "raw", record_index: 1, raw_available: true, step_inspection: [{step_index: 0}]},
+              ],
+            };
+            run("state.caseFilters = {direct: true, latent: true, exposed: true, others: true}; state.selectedDataset = 'ds'; state.selectedEvalCellKey = 'cell'; state.selectedTraceKey = null;");
+            context.fallbackSnapshot = fallbackSnapshot;
+            run("ensureSelection(fallbackSnapshot);");
+            if (run("state.selectedTraceKey") !== run("rowKey(fallbackSnapshot.details[1])") || run("rowKey(selectedDetail(fallbackSnapshot))") !== run("rowKey(fallbackSnapshot.details[1])")) {
+              throw new Error("trace selection should prefer raw details over empty pending placeholders");
+            }
             run("state.caseFilters = {direct: true, latent: true, exposed: true, others: true}; state.selectedDataset = 'ds'; state.selectedEvalCellKey = 'cell';");
             run("state.tracePatternFilters.miracle = true; state.tracePatternFilters.reverse = true;");
             const grouped = run("groupedTraceDetails(state.snapshot).map((group) => [group.key, group.details.map(rowKey)]);");
