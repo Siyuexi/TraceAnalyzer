@@ -1763,7 +1763,7 @@ function applyLocator(snapshot, locator) {
     && (!locator.dataset || row.dataset === locator.dataset)
   ));
   if (!cell) {
-    state.permalinkNotice = "Link target was not found in the loaded experiments.";
+    state.permalinkNotice = "URL target was not found in the loaded experiments.";
     state.permalinkMissing = true;
     state.selectedDataset = null;
     state.selectedEvalCellKey = null;
@@ -1793,14 +1793,14 @@ function applyLocator(snapshot, locator) {
     if (canStillLoad) {
       state.pendingLocator = locator;
       state.permalinkMissing = false;
-      state.permalinkNotice = "Loading link target trajectory details...";
+      state.permalinkNotice = "Loading URL target trajectory details...";
       state.selectedTraceKey = null;
       state.selectedStepIndex = Number(locator.step_index || 0);
       state.selectedGraphNodeKey = locator.graph_node || null;
       setTab(locator.tab === "traces" || needsTrace ? "traces" : "overview");
       return true;
     }
-    state.permalinkNotice = "Link target was not found; it may have been deleted or not loaded in this snapshot.";
+    state.permalinkNotice = "URL target was not found; it may have been deleted or not loaded in this snapshot.";
     state.permalinkMissing = true;
     state.selectedTraceKey = null;
     return false;
@@ -1842,11 +1842,47 @@ function syncFilterControls() {
   if (traceSearch) traceSearch.value = state.traceQuery || "";
 }
 
-function copyDashboardLink(level) {
+async function writeClipboardText(text) {
+  if (!text) return false;
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_error) {
+      // Fall back for plain HTTP dashboard sessions.
+    }
+  }
+  if (typeof document === "undefined" || typeof document.createElement !== "function") return false;
+  const parent = document.body || document.documentElement;
+  if (!parent?.appendChild) return false;
+  const input = document.createElement("textarea");
+  input.value = text;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.left = "-10000px";
+  input.style.top = "-10000px";
+  parent.appendChild(input);
+  input.focus?.();
+  input.select?.();
+  input.setSelectionRange?.(0, text.length);
+  let copied = false;
+  try {
+    copied = typeof document.execCommand === "function" && document.execCommand("copy");
+  } catch (_error) {
+    copied = false;
+  }
+  input.remove?.();
+  if (input.parentNode?.removeChild) input.parentNode.removeChild(input);
+  return copied;
+}
+
+async function copyDashboardLink(level) {
   const url = currentDashboardUrl(level);
   if (!url) return;
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) navigator.clipboard.writeText(url).catch(() => {});
-  state.permalinkNotice = `Copied ${level} link.`;
+  state.permalinkNotice = `Copying ${level} URL...`;
+  renderSelectedExperiment(state.snapshot);
+  const copied = await writeClipboardText(url);
+  state.permalinkNotice = copied ? `Copied ${level} URL.` : `Copy failed; URL: ${url}`;
   renderSelectedExperiment(state.snapshot);
 }
 
@@ -2107,6 +2143,39 @@ async function loadAdminStatus() {
   }
 }
 
+async function loginAdmin() {
+  try {
+    const password = document.getElementById("admin-password")?.value || "";
+    await apiPost("/api/auth/login", { password });
+    state.admin.enabled = true;
+    state.admin.authenticated = true;
+    state.adminMessage = "";
+    syncAdminControls();
+    loadRebuildStatus();
+    render();
+  } catch (error) {
+    state.adminMessage = String(error.message || error);
+    syncAdminControls();
+    renderAdminPanel(state.snapshot);
+  }
+}
+
+async function logoutAdmin() {
+  try {
+    await apiPost("/api/auth/logout", {});
+  } catch (_error) {
+    // Local session state is still cleared if the server already forgot the token.
+  }
+  state.admin.authenticated = false;
+  state.adminDeleteKeys.clear();
+  state.adminPreview = null;
+  state.rebuildStatus = null;
+  state.adminMessage = "";
+  syncAdminControls();
+  renderOperationStatus();
+  render();
+}
+
 function syncAdminControls() {
   const form = document.getElementById("admin-login");
   const loginButton = document.getElementById("admin-login-button");
@@ -2129,11 +2198,11 @@ function syncAdminControls() {
     password.placeholder = "Admin password";
   }
   if (status) {
-    status.textContent = state.admin.authenticated
+    status.textContent = state.adminMessage || (state.admin.authenticated
       ? "Admin unlocked"
       : state.admin.enabled
         ? "Enter admin password"
-        : "Admin not configured by server";
+        : "Admin not configured by server");
   }
 }
 
@@ -3035,9 +3104,9 @@ function renderTraceTitleCard(detail, snapshot) {
         <div class="run-meta">${esc(detail.model_label || "-")} · ${esc(detail.run_id || "-")}</div>
       </div>
       <div class="trace-title-actions">
-        <button class="copy-link" type="button" data-copy-link="experiment">Experiment link</button>
-        <button class="copy-link" type="button" data-copy-link="instance">Instance link</button>
-        <button class="copy-link" type="button" data-copy-link="rollout">Rollout link</button>
+        <button class="copy-link" type="button" data-copy-link="experiment">Copy experiment URL</button>
+        <button class="copy-link" type="button" data-copy-link="instance">Copy instance URL</button>
+        <button class="copy-link" type="button" data-copy-link="rollout">Copy rollout URL</button>
         ${renderRolloutSelector(detail, snapshot)}
         ${traceStatusIcons(detail)}
       </div>
@@ -3485,7 +3554,7 @@ function renderStepDetail(detail) {
     return `<section class="step-detail"><h3>Trajectory detail</h3><div class="empty">Raw step content was not captured for this artifact.</div></section>`;
   }
   return `<section class="step-detail">
-    <div class="step-detail-head"><h3>Step ${esc(displayStepLabel(step, detail, Number(step.trace_index ?? step.step_index ?? 0)))}</h3><button class="copy-link" type="button" data-copy-link="step">Step link</button></div>
+    <div class="step-detail-head"><h3>Step ${esc(displayStepLabel(step, detail, Number(step.trace_index ?? step.step_index ?? 0)))}</h3><button class="copy-link" type="button" data-copy-link="step">Copy step URL</button></div>
     <div class="detail-badges">
       ${step.execution_error || step.status === "error" ? badge("execution error", true, "bad") : ""}
       ${step.parse_error ? badge("parse error", true, "bad") : ""}
@@ -3676,42 +3745,20 @@ function configureEvents() {
     event.preventDefault();
     const locator = parseLocator(document.getElementById("permalink-input")?.value || "");
     if (!locator) {
-      state.permalinkNotice = "Link format was not recognized.";
+      state.permalinkNotice = "URL format was not recognized.";
       renderSelectedExperiment(state.snapshot);
       return;
     }
     state.pendingLocator = locator;
     render();
   });
-  document.getElementById("admin-login")?.addEventListener("submit", async (event) => {
+  document.getElementById("admin-login")?.addEventListener("submit", (event) => {
     event.preventDefault();
-    try {
-      const password = document.getElementById("admin-password")?.value || "";
-      await apiPost("/api/auth/login", { password });
-      state.admin.enabled = true;
-      state.admin.authenticated = true;
-      state.adminMessage = "";
-      syncAdminControls();
-      loadRebuildStatus();
-      render();
-    } catch (error) {
-      state.adminMessage = String(error.message || error);
-      renderAdminPanel(state.snapshot);
-    }
+    loginAdmin();
   });
-  document.getElementById("admin-logout-button")?.addEventListener("click", async () => {
-    try {
-      await apiPost("/api/auth/logout", {});
-    } catch (_error) {
-      // Local session state is still cleared if the server already forgot the token.
-    }
-    state.admin.authenticated = false;
-    state.adminDeleteKeys.clear();
-    state.adminPreview = null;
-    state.rebuildStatus = null;
-    syncAdminControls();
-    renderOperationStatus();
-    render();
+  document.getElementById("admin-logout-button")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    logoutAdmin();
   });
   document.getElementById("trace-search").addEventListener("input", (event) => {
     state.traceQuery = event.target.value;
