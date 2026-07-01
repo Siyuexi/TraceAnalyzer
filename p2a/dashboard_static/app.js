@@ -25,10 +25,30 @@ const state = {
   showGraphContext: false,
   graphEdgeFilters: { path: true, graph: false, trace: true },
   passAtK: null,
+  tracePatternFilters: {
+    miracle: false,
+    reverse: false,
+    loop: false,
+    hit_symptom: false,
+    hit_root_cause: false,
+    edited_root_cause: false,
+    error_spiral: false,
+  },
+  permalinkNotice: "",
+  permalinkMissing: false,
+  pendingLocator: null,
+  suppressHashUpdate: false,
+  ignoreNextHashChange: false,
+  admin: { enabled: false, authenticated: false },
+  adminDeleteKeys: new Set(),
+  adminManualTarget: null,
+  adminPreview: null,
+  adminMessage: "",
 };
 
 const BONUS_MAP_METRIC_CASE_TYPES = new Set(["direct", "latent", "exposed"]);
 const CASE_FILTER_BUCKETS = ["direct", "latent", "exposed", "others"];
+const TRACE_PATTERN_FILTERS = ["miracle", "reverse", "loop", "hit_symptom", "hit_root_cause", "edited_root_cause", "error_spiral"];
 
 const MACRO_METRIC_GROUPS = [
   {
@@ -751,6 +771,16 @@ function ensureSelection(snapshot) {
     return;
   }
   if (!state.selectedDataset || !datasets.some((row) => row.dataset === state.selectedDataset)) {
+    if (state.permalinkMissing) {
+      state.selectedDataset = null;
+      state.selectedEvalCellKey = null;
+      state.selectedExperimentKey = null;
+      state.selectedTraceKey = null;
+      state.selectedStepIndex = 0;
+      state.selectedGraphNodeKey = null;
+      resetTracePanels();
+      return;
+    }
     state.selectedDataset = datasets.length === 1 ? datasets[0].dataset : null;
   }
   const cells = experimentRows(snapshot).filter((row) => !state.selectedDataset || row.dataset === state.selectedDataset);
@@ -789,7 +819,7 @@ function ensureSelection(snapshot) {
   }
 }
 
-async function loadSnapshot() {
+async function loadSnapshot(options = {}) {
   if (state.loadingSnapshot) return;
   state.loadingSnapshot = true;
   const scrollState = captureInspectorScroll();
@@ -802,7 +832,7 @@ async function loadSnapshot() {
     return;
   }
   try {
-    const response = await fetch("/api/snapshot", { cache: "no-store" });
+    const response = await fetch(options.force ? "/api/snapshot?force=1" : "/api/snapshot", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     state.snapshot = await response.json();
     shouldRender = true;
@@ -847,7 +877,14 @@ function renderSelectedExperiment(snapshot) {
   const filters = [];
   if (selected?.selected_scope) filters.push(`scope: ${scopeSummary(selected)}`);
   if (!allCaseFiltersEnabled()) filters.push(`case types: ${activeCaseFilterLabels()}`);
+  const patternTags = activeTracePatternFilters();
+  if (patternTags.length) filters.push(`patterns: ${patternTags.join("+")}`);
   document.getElementById("selected-experiment").textContent = label + (filters.length ? ` | Filter: ${filters.join("; ")}` : "");
+  const notice = document.getElementById("permalink-notice");
+  if (notice) {
+    notice.hidden = !state.permalinkNotice;
+    notice.textContent = state.permalinkNotice || "";
+  }
 }
 
 function renderSummary(snapshot) {
@@ -901,7 +938,13 @@ function renderExperiments(snapshot) {
   const rows = cellRows.map((row) => {
     const key = cellKey(row);
     const selected = key === state.selectedEvalCellKey;
+    const deleteTarget = { experiment_id: row.experiment_id, provider_source: row.provider_source, dataset: row.dataset };
+    const deleteKey = deleteTargetKey(deleteTarget);
+    const adminCell = state.admin.authenticated
+      ? `<td><input class="admin-delete-target" type="checkbox" data-delete-target="${esc(deleteKey)}" ${state.adminDeleteKeys.has(deleteKey) ? "checked" : ""}></td>`
+      : "";
     return `<tr class="clickable ${selected ? "is-selected" : ""}" data-eval-cell-key="${esc(key)}">
+      ${adminCell}
       <td><button class="select-cell" type="button" data-eval-cell-key="${esc(key)}">${selected ? "Selected" : "Inspect"}</button></td>
       <td>${esc(row.source_kind)}</td>
       <td>${esc(row.experiment_id)}</td>
@@ -915,11 +958,13 @@ function renderExperiments(snapshot) {
   });
   document.getElementById("experiment-table").innerHTML = `
     <section class="subsection"><h3>Datasets</h3>${table(["", "Dataset", "Instances", "Eval cells", "Trajectories", "Models", "Sources"], datasetRowsHtml)}</section>
-    <section class="subsection"><h3>Eval cells${state.selectedDataset ? ` in ${esc(state.selectedDataset)}` : ""}</h3>${table(["", "Kind", "Experiment", "Provider", "Dataset", "Model", "Scope", "Done", "Traj"], rows)}</section>`;
+    <section class="subsection"><h3>Eval cells${state.selectedDataset ? ` in ${esc(state.selectedDataset)}` : ""}</h3>${table([...(state.admin.authenticated ? ["Delete"] : []), "", "Kind", "Experiment", "Provider", "Dataset", "Model", "Scope", "Done", "Traj"], rows)}</section>`;
   document.querySelectorAll(".select-dataset, #experiment-table tr[data-dataset]").forEach((el) => {
     el.addEventListener("click", () => {
       const dataset = el.dataset.dataset;
       if (!dataset) return;
+      state.permalinkMissing = false;
+      state.permalinkNotice = "";
       state.selectedDataset = dataset;
       state.selectedEvalCellKey = null;
       state.selectedExperimentKey = null;
@@ -932,8 +977,11 @@ function renderExperiments(snapshot) {
   });
   document.querySelectorAll(".select-cell, #experiment-table tr[data-eval-cell-key]").forEach((el) => {
     el.addEventListener("click", () => {
+      if (el.classList.contains("admin-delete-target")) return;
       const key = el.dataset.evalCellKey;
       if (!key) return;
+      state.permalinkMissing = false;
+      state.permalinkNotice = "";
       state.selectedEvalCellKey = key;
       state.selectedExperimentKey = key;
       const cell = experimentRows(state.snapshot).find((row) => cellKey(row) === key);
@@ -944,6 +992,17 @@ function renderExperiments(snapshot) {
       resetTracePanels();
       setTab(el.classList.contains("select-cell") ? "traces" : state.activeTab);
       render();
+    });
+  });
+  document.querySelectorAll(".admin-delete-target").forEach((input) => {
+    input.addEventListener("click", (event) => event.stopPropagation());
+    input.addEventListener("change", (event) => {
+      const key = event.target.dataset.deleteTarget;
+      if (!key) return;
+      if (event.target.checked) state.adminDeleteKeys.add(key);
+      else state.adminDeleteKeys.delete(key);
+      state.adminPreview = null;
+      renderAdminPanel(snapshot);
     });
   });
 }
@@ -1097,6 +1156,8 @@ function renderModels(snapshot) {
     el.addEventListener("click", () => {
       const key = el.dataset.evalCellKey;
       if (!key) return;
+      state.permalinkMissing = false;
+      state.permalinkNotice = "";
       state.selectedEvalCellKey = key;
       state.selectedExperimentKey = key;
       const cell = experimentRows(state.snapshot).find((row) => cellKey(row) === key);
@@ -1155,17 +1216,325 @@ function traceBlob(detail) {
   }).toLowerCase();
 }
 
+function activeTracePatternFilters() {
+  return TRACE_PATTERN_FILTERS.filter((key) => state.tracePatternFilters?.[key] === true);
+}
+
+function pathNodeHasRoleHit(detail, roles) {
+  const roleSet = new Set(roles);
+  return [...pathNodes(detail), ...graphContextNodes(detail)].some((node) => {
+    if (!node || node.hit !== true) return false;
+    const role = canonicalNodeRole(node.node_role);
+    if (roleSet.has(role)) return true;
+    if (roles.includes("symptom") && node.selected_issue_anchor === true) return true;
+    if (roles.includes("root_cause") && (node.root_cause === true || node.patched_callable === true)) return true;
+    return false;
+  });
+}
+
+function tracePatternMatches(detail, tag) {
+  if (tag === "miracle") {
+    return combinedMiracleMarker(detail) === true || blockMiracleMarker(detail) === true;
+  }
+  if (tag === "reverse") {
+    return combinedReverseMarker(detail) === true || blockReverseMarker(detail) === true;
+  }
+  if (tag === "loop") return (detail.bad_patterns || {}).has_loop === true;
+  if (tag === "error_spiral") return (detail.bad_patterns || {}).error_spiral === true;
+  if (tag === "hit_symptom") return pathNodeHasRoleHit(detail, ["symptom"]);
+  if (tag === "hit_root_cause") return pathNodeHasRoleHit(detail, ["root_cause"]);
+  if (tag === "edited_root_cause") return detail.edited_root_cause === true;
+  return false;
+}
+
+function tracePatternFilterEnabled(detail) {
+  const active = activeTracePatternFilters();
+  return !active.length || active.every((tag) => tracePatternMatches(detail, tag));
+}
+
 function filteredDetails(snapshot) {
   const query = state.traceQuery.trim().toLowerCase();
   if (!state.selectedEvalCellKey) return [];
   return activeDetails(snapshot)
     .filter((detail) => detailCellKey(detail) === state.selectedEvalCellKey)
+    .filter(tracePatternFilterEnabled)
     .filter((detail) => !query || traceBlob(detail).includes(query));
 }
 
 function selectedDetail(snapshot) {
   const details = filteredDetails(snapshot);
   return details.find((detail) => rowKey(detail) === state.selectedTraceKey) || details[0] || null;
+}
+
+function locatorForDetail(detail, level = "step") {
+  if (!detail) return null;
+  const params = new URLSearchParams();
+  params.set("p2a", "1");
+  if (detail.experiment_id) params.set("experiment_id", detail.experiment_id);
+  if (detail.provider_source) params.set("provider_source", detail.provider_source);
+  if (detail.model_api_name) params.set("model_api_name", detail.model_api_name);
+  if (detail.dataset || detail.data_source) params.set("dataset", detail.dataset || detail.data_source);
+  if (level !== "experiment" && detail.instance_id) params.set("instance_id", detail.instance_id);
+  if (level !== "experiment" && level !== "instance") {
+    if (detail.rollout_id !== null && detail.rollout_id !== undefined && detail.rollout_id !== "") params.set("rollout_id", detail.rollout_id);
+    else params.set("rollout_index", String(rolloutIndex(detail)));
+  }
+  if (level === "step") params.set("step_index", String(state.selectedStepIndex || 0));
+  if (state.selectedGraphNodeKey) params.set("graph_node", state.selectedGraphNodeKey);
+  return `#${params.toString()}`;
+}
+
+function parseLocator(text) {
+  const raw = String(text || "").trim();
+  const hash = raw.includes("#") ? raw.slice(raw.indexOf("#") + 1) : raw.replace(/^#/, "");
+  if (!hash) return null;
+  const params = new URLSearchParams(hash);
+  if (params.get("p2a") !== "1" && !params.get("experiment_id") && !params.get("instance_id")) return null;
+  return Object.fromEntries(params.entries());
+}
+
+function clearReachabilityFilters() {
+  CASE_FILTER_BUCKETS.forEach((key) => { state.caseFilters[key] = true; });
+  TRACE_PATTERN_FILTERS.forEach((key) => { state.tracePatternFilters[key] = false; });
+  state.traceQuery = "";
+}
+
+function applyLocator(snapshot, locator) {
+  if (!locator) return false;
+  clearReachabilityFilters();
+  const cells = experimentRows(snapshot);
+  const cell = cells.find((row) => (
+    (!locator.experiment_id || row.experiment_id === locator.experiment_id)
+    && (!locator.provider_source || row.provider_source === locator.provider_source)
+    && (!locator.model_api_name || row.model_api_name === locator.model_api_name)
+    && (!locator.dataset || row.dataset === locator.dataset)
+  ));
+  if (!cell) {
+    state.permalinkNotice = "Link target was not found in the loaded experiments.";
+    state.permalinkMissing = true;
+    state.selectedDataset = null;
+    state.permalinkMissing = false;
+    state.permalinkNotice = "";
+    state.selectedEvalCellKey = null;
+    state.selectedExperimentKey = null;
+    state.selectedTraceKey = null;
+    return false;
+  }
+  state.permalinkMissing = false;
+  state.selectedDataset = cell.dataset || locator.dataset || null;
+  state.selectedEvalCellKey = cellKey(cell);
+  state.selectedExperimentKey = state.selectedEvalCellKey;
+  const needsTrace = Boolean(locator.instance_id || locator.rollout_id || locator.rollout_index !== undefined || locator.step_index !== undefined);
+  const allDetails = activeDetails(snapshot).filter((detail) => detailCellKey(detail) === state.selectedEvalCellKey);
+  const detail = needsTrace
+    ? allDetails.find((item) => {
+      if (locator.instance_id && String(item.instance_id) !== String(locator.instance_id)) return false;
+      if (locator.rollout_id) return String(item.rollout_id || "") === String(locator.rollout_id);
+      if (locator.rollout_index !== undefined) return rolloutIndex(item) === Number(locator.rollout_index);
+      return true;
+    })
+    : null;
+  if (!detail && locator.instance_id) {
+    state.permalinkNotice = "Link target was not found; it may have been deleted or not loaded in this snapshot.";
+    state.permalinkMissing = true;
+    state.selectedTraceKey = null;
+    return false;
+  }
+  if (detail) state.selectedTraceKey = rowKey(detail);
+  state.selectedStepIndex = Number(locator.step_index || 0);
+  state.selectedGraphNodeKey = locator.graph_node || null;
+  state.permalinkNotice = "";
+  setTab(detail ? "traces" : "overview");
+  return true;
+}
+
+function applyPendingLocator(snapshot) {
+  if (!state.pendingLocator) return;
+  const locator = state.pendingLocator;
+  state.pendingLocator = null;
+  state.suppressHashUpdate = true;
+  applyLocator(snapshot, locator);
+  syncFilterControls();
+}
+
+function currentDashboardUrl(level = "step") {
+  const detail = selectedDetail(state.snapshot);
+  const locator = locatorForDetail(detail, level);
+  if (!locator) return "";
+  if (typeof window === "undefined" || !window.location) return locator;
+  return `${window.location.origin || ""}${window.location.pathname || ""}${locator}`;
+}
+
+function syncFilterControls() {
+  document.querySelectorAll(".case-filter-checkbox").forEach((input) => {
+    const bucket = input.dataset.caseFilter;
+    if (bucket) input.checked = state.caseFilters[bucket] !== false;
+  });
+  document.querySelectorAll(".trace-pattern-checkbox").forEach((input) => {
+    const tag = input.dataset.patternFilter;
+    if (tag) input.checked = state.tracePatternFilters[tag] === true;
+  });
+  const traceSearch = document.getElementById("trace-search");
+  if (traceSearch) traceSearch.value = state.traceQuery || "";
+}
+
+function syncHashToSelection() {
+  if (state.suppressHashUpdate) {
+    state.suppressHashUpdate = false;
+    return;
+  }
+  if (typeof window === "undefined" || !window.location || !state.selectedEvalCellKey) return;
+  const locator = locatorForDetail(selectedDetail(state.snapshot), "step");
+  if (locator && window.location.hash !== locator) {
+    state.ignoreNextHashChange = true;
+    window.location.hash = locator;
+  }
+}
+
+function copyDashboardLink(level) {
+  const url = currentDashboardUrl(level);
+  if (!url) return;
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) navigator.clipboard.writeText(url).catch(() => {});
+  state.permalinkNotice = `Copied ${level} link.`;
+  renderSelectedExperiment(state.snapshot);
+}
+
+function deleteTargetKey(target) {
+  return JSON.stringify({
+    experiment_id: target.experiment_id || "",
+    provider_source: target.provider_source || "",
+    dataset: target.dataset || "",
+  });
+}
+
+function deleteTargetFromKey(key) {
+  try {
+    return JSON.parse(key);
+  } catch (_error) {
+    return {};
+  }
+}
+
+function selectedDeleteTargets() {
+  const targets = [...state.adminDeleteKeys].map(deleteTargetFromKey);
+  if (state.adminManualTarget) targets.push(state.adminManualTarget);
+  const seen = new Set();
+  return targets.filter((target) => {
+    const clean = {
+      experiment_id: String(target.experiment_id || "").trim(),
+      provider_source: String(target.provider_source || "").trim(),
+      dataset: String(target.dataset || "").trim(),
+    };
+    if (!clean.experiment_id && !clean.provider_source && !clean.dataset) return false;
+    const key = deleteTargetKey(clean);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return clean;
+  });
+}
+
+async function apiPost(path, payload) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify(payload || {}),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+  return body;
+}
+
+async function loadAdminStatus() {
+  try {
+    const response = await fetch("/api/auth/status", { cache: "no-store", credentials: "same-origin" });
+    if (!response.ok) return;
+    const payload = await response.json();
+    state.admin.enabled = payload.admin_enabled === true;
+    state.admin.authenticated = payload.admin === true;
+    syncAdminControls();
+    renderAdminPanel(state.snapshot);
+  } catch (_error) {
+    state.admin.enabled = false;
+    state.admin.authenticated = false;
+  }
+}
+
+function syncAdminControls() {
+  const form = document.getElementById("admin-login");
+  const loginButton = document.getElementById("admin-login-button");
+  const logoutButton = document.getElementById("admin-logout-button");
+  const password = document.getElementById("admin-password");
+  if (!form) return;
+  form.hidden = !state.admin.enabled && !state.admin.authenticated;
+  if (loginButton) loginButton.hidden = state.admin.authenticated;
+  if (logoutButton) logoutButton.hidden = !state.admin.authenticated;
+  if (password) password.hidden = state.admin.authenticated;
+}
+
+function renderAdminPanel(snapshot) {
+  const panel = document.getElementById("admin-panel");
+  if (!panel) return;
+  if (!state.admin.authenticated) {
+    panel.hidden = true;
+    panel.innerHTML = "";
+    return;
+  }
+  panel.hidden = false;
+  const targets = selectedDeleteTargets();
+  const preview = state.adminPreview;
+  const counts = preview?.counts || {};
+  panel.innerHTML = `
+    <h2>Admin deletion</h2>
+    <form id="admin-target-form" class="admin-target-form">
+      <input id="admin-target-experiment" type="text" placeholder="experiment_id">
+      <input id="admin-target-provider" type="text" placeholder="provider_source">
+      <input id="admin-target-dataset" type="text" placeholder="dataset">
+      <button type="submit">Add target</button>
+    </form>
+    <div class="admin-targets">${targets.map((target) => `<code>${esc(deleteTargetKey(target))}</code>`).join("") || '<span class="muted">No delete target selected.</span>'}</div>
+    <div class="admin-actions">
+      <button id="admin-preview-delete" type="button" ${targets.length ? "" : "disabled"}>Preview delete</button>
+      <input id="admin-confirmation" type="text" placeholder="${esc(preview?.confirmation_phrase || "confirmation phrase")}">
+      <button id="admin-confirm-delete" type="button" ${preview ? "" : "disabled"}>Delete</button>
+    </div>
+    <div class="admin-message">${esc(state.adminMessage || "")}</div>
+    ${preview ? `<div class="panel-note">Preview: ${esc(counts.run_cells || 0)} run cells, ${esc(counts.raw_rollouts || 0)} raw rollouts, ${esc(counts.quantitative_metrics || 0)} metrics, ${esc(counts.experiments || 0)} experiments. Phrase: <code>${esc(preview.confirmation_phrase)}</code></div>` : ""}
+  `;
+  document.getElementById("admin-target-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const target = {
+      experiment_id: document.getElementById("admin-target-experiment")?.value || "",
+      provider_source: document.getElementById("admin-target-provider")?.value || "",
+      dataset: document.getElementById("admin-target-dataset")?.value || "",
+    };
+    state.adminManualTarget = target;
+    state.adminPreview = null;
+    renderAdminPanel(snapshot);
+  });
+  document.getElementById("admin-preview-delete")?.addEventListener("click", async () => {
+    try {
+      state.adminPreview = await apiPost("/api/delete/preview", { targets: selectedDeleteTargets() });
+      state.adminMessage = "";
+    } catch (error) {
+      state.adminMessage = String(error.message || error);
+    }
+    renderAdminPanel(snapshot);
+  });
+  document.getElementById("admin-confirm-delete")?.addEventListener("click", async () => {
+    try {
+      const confirmation = document.getElementById("admin-confirmation")?.value || "";
+      const result = await apiPost("/api/delete", { targets: selectedDeleteTargets(), confirmation });
+      state.adminMessage = `Deleted ${result.counts?.run_cells || 0} run cells; backup ${result.backup_path || "-"}`;
+      state.adminDeleteKeys.clear();
+      state.adminManualTarget = null;
+      state.adminPreview = null;
+      await loadSnapshot({ force: true });
+    } catch (error) {
+      state.adminMessage = String(error.message || error);
+      renderAdminPanel(snapshot);
+    }
+  });
 }
 
 function canonicalNodeRole(role) {
@@ -2005,6 +2374,9 @@ function renderTraceTitleCard(detail, snapshot) {
         <div class="run-meta">${esc(detail.model_label || "-")} · ${esc(detail.run_id || "-")}</div>
       </div>
       <div class="trace-title-actions">
+        <button class="copy-link" type="button" data-copy-link="experiment">Experiment link</button>
+        <button class="copy-link" type="button" data-copy-link="instance">Instance link</button>
+        <button class="copy-link" type="button" data-copy-link="rollout">Rollout link</button>
         ${renderRolloutSelector(detail, snapshot)}
         ${traceStatusIcons(detail)}
       </div>
@@ -2452,7 +2824,7 @@ function renderStepDetail(detail) {
     return `<section class="step-detail"><h3>Trajectory detail</h3><div class="empty">Raw step content was not captured for this artifact.</div></section>`;
   }
   return `<section class="step-detail">
-    <h3>Step ${esc(displayStepLabel(step, detail, Number(step.trace_index ?? step.step_index ?? 0)))}</h3>
+    <div class="step-detail-head"><h3>Step ${esc(displayStepLabel(step, detail, Number(step.trace_index ?? step.step_index ?? 0)))}</h3><button class="copy-link" type="button" data-copy-link="step">Step link</button></div>
     <div class="detail-badges">
       ${step.execution_error || step.status === "error" ? badge("execution error", true, "bad") : ""}
       ${step.parse_error ? badge("parse error", true, "bad") : ""}
@@ -2524,6 +2896,9 @@ function renderTraceInspector(snapshot) {
       restoreInspectorScroll({ ...scrollState, right: 0 });
     });
   });
+  document.querySelectorAll(".copy-link").forEach((button) => {
+    button.addEventListener("click", () => copyDashboardLink(button.dataset.copyLink || "step"));
+  });
   const graphContextToggle = document.getElementById("graph-context-toggle");
   if (graphContextToggle) {
     graphContextToggle.addEventListener("change", (event) => {
@@ -2567,10 +2942,13 @@ function render(options = {}) {
     return;
   }
   const tableScrollState = options.tableScrollState || captureTableScroll();
+  applyPendingLocator(snapshot);
   ensureSelection(snapshot);
+  syncFilterControls();
   renderSources(snapshot);
   renderSelectedExperiment(snapshot);
   renderSummary(snapshot);
+  renderAdminPanel(snapshot);
   renderExperiments(snapshot);
   renderTrend(snapshot);
   renderDistributions(snapshot);
@@ -2580,6 +2958,7 @@ function render(options = {}) {
   renderTraceInspector(snapshot);
   restoreTableScroll(tableScrollState);
   restoreInspectorScroll(options.scrollState);
+  syncHashToSelection();
 }
 
 function setTab(tabName) {
@@ -2591,6 +2970,7 @@ function setTab(tabName) {
 function configureEvents() {
   document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => setTab(tab.dataset.tab)));
   document.getElementById("refresh-button").addEventListener("click", loadSnapshot);
+  document.getElementById("rebuild-button").addEventListener("click", () => loadSnapshot({ force: true }));
   document.querySelectorAll(".case-filter-checkbox").forEach((input) => {
     input.addEventListener("change", (event) => {
       const bucket = event.target.dataset.caseFilter;
@@ -2613,6 +2993,44 @@ function configureEvents() {
     resetTracePanels();
     render();
   });
+  document.getElementById("permalink-jump")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const locator = parseLocator(document.getElementById("permalink-input")?.value || "");
+    if (!locator) {
+      state.permalinkNotice = "Link format was not recognized.";
+      renderSelectedExperiment(state.snapshot);
+      return;
+    }
+    state.pendingLocator = locator;
+    render();
+  });
+  document.getElementById("admin-login")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const password = document.getElementById("admin-password")?.value || "";
+      await apiPost("/api/auth/login", { password });
+      state.admin.enabled = true;
+      state.admin.authenticated = true;
+      state.adminMessage = "";
+      syncAdminControls();
+      render();
+    } catch (error) {
+      state.adminMessage = String(error.message || error);
+      renderAdminPanel(state.snapshot);
+    }
+  });
+  document.getElementById("admin-logout-button")?.addEventListener("click", async () => {
+    try {
+      await apiPost("/api/auth/logout", {});
+    } catch (_error) {
+      // Local session state is still cleared if the server already forgot the token.
+    }
+    state.admin.authenticated = false;
+    state.adminDeleteKeys.clear();
+    state.adminPreview = null;
+    syncAdminControls();
+    render();
+  });
   document.getElementById("trace-search").addEventListener("input", (event) => {
     state.traceQuery = event.target.value;
     state.selectedTraceKey = null;
@@ -2621,10 +3039,32 @@ function configureEvents() {
     resetTracePanels();
     renderTraceInspector(state.snapshot);
   });
+  document.querySelectorAll(".trace-pattern-checkbox").forEach((input) => {
+    input.addEventListener("change", (event) => {
+      const tag = event.target.dataset.patternFilter;
+      if (!tag || !TRACE_PATTERN_FILTERS.includes(tag)) return;
+      state.tracePatternFilters[tag] = Boolean(event.target.checked);
+      state.selectedTraceKey = null;
+      state.selectedStepIndex = 0;
+      state.selectedGraphNodeKey = null;
+      resetTracePanels();
+      render();
+    });
+  });
   document.getElementById("auto-refresh").addEventListener("change", (event) => {
     if (event.target.checked) startAutoRefresh();
     else stopAutoRefresh();
   });
+  if (typeof window !== "undefined") {
+    window.addEventListener?.("hashchange", () => {
+      if (state.ignoreNextHashChange) {
+        state.ignoreNextHashChange = false;
+        return;
+      }
+      state.pendingLocator = parseLocator(window.location?.hash || "");
+      render();
+    });
+  }
 }
 
 function startAutoRefresh() {
@@ -2638,5 +3078,7 @@ function stopAutoRefresh() {
 }
 
 configureEvents();
+if (typeof window !== "undefined" && window.location) state.pendingLocator = parseLocator(window.location.hash || "");
+loadAdminStatus();
 loadSnapshot();
 if (document.getElementById("auto-refresh").checked) startAutoRefresh();

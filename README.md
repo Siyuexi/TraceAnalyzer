@@ -445,6 +445,15 @@ uv run python scripts/p2a_dashboard.py \
   --bonus-map-dir data/bonus_maps/swebench-hard
 ```
 
+Live DB dashboards keep a process-local snapshot cache and reuse it while the
+underlying `run_cells`/metric update token is unchanged. To enable admin-only
+deletion, put the password in `.secrets/dashboard_admin.txt` or pass
+`--admin-secret .secrets/dashboard_admin.txt`; without that file the dashboard
+remains read-only and open for normal viewing. Admin deletion previews the DB
+blast radius, requires typing the generated confirmation phrase, backs up the
+SQLite file, and removes only DB rows (`run_cells` plus cascaded rollouts and
+metrics, and matching `experiments`). On-disk rollout artifacts are not deleted.
+
 The Overview tab is the dataset and eval-cell registry. Dataset-level
 distributions count unique instances in a dataset/split, so five model runs over
 the 45-instance `swebench-hard` split still show a distribution population of 45,
@@ -473,7 +482,11 @@ matching bonus maps. If `--bonus-map-dir` is omitted, the dashboard tries
 contains matching instance maps. Persisted DB score fields are compatibility
 fallbacks, not the default semantic source of truth; new collection paths should
 not write localization score columns, `metrics_json.detail`, or trace pattern
-flags. If old DB rows do not carry issue descriptions or golden patches, the
+flags. The live dashboard may write `metrics_json.detail` plus a `fingerprint`
+back to `quantitative_metrics` after it computes a cell from raw rollout content.
+That cache is used only when the scorer version, scoring parameters, raw rollout
+hash, and bonus-map file hash still match; stale entries are recomputed and
+overwritten. If old DB rows do not carry issue descriptions or golden patches, the
 dashboard fills them from `--data-file` or the standard local dataset parquet for
 the selected dataset. Node Source is bonus-map data: the dashboard reads full
 callable source from the explicit or inferred P2A bonus-map directory, and DB
@@ -487,7 +500,11 @@ separate reasoning/chat text, collapsible raw action/observation payloads, and
 inline edit diffs when write actions provide old/new text. When an eval cell has
 repeated rollouts for the same instance, the left instance row is split into
 per-rollout success/failure color segments and the selected instance title
-offers a rollout selector. Step colors and trace
+offers a rollout selector. Pattern tag toggles filter the instance list and the
+rollout selector to rollouts matching all selected tags; undefined miracle,
+reverse, or Path-hit markers do not match their tag. Copy-link controls produce
+URL-hash permalinks for experiment, instance, rollout, and exact step locations,
+and pasted links clear conflicting filters before navigating. Step colors and trace
 markers come from P2A parser/scorer fields: reads, writes, execution errors,
 root-cause edits, symptom/root-cause hits, and Path hits are computed
 in `p2a/core.py`, `p2a/eval_fault_localization.py`, and
