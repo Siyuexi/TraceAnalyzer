@@ -470,6 +470,160 @@ def _text_blocks_for_content(
     return [{"value": content}]
 
 
+def _field(value: Any, name: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _dump_response_obj(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        try:
+            return value.model_dump()
+        except Exception:
+            pass
+    if isinstance(value, dict):
+        return value
+    return None
+
+
+def _response_text_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    values = value if isinstance(value, list) else [value]
+    parts: list[str] = []
+    for block in values:
+        text = (
+            block
+            if isinstance(block, str)
+            else _field(block, "text")
+            or _field(block, "value")
+            or _field(block, "content")
+        )
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    return parts
+
+
+def _usage_detail_number(usage: Any, *keys: str) -> float | int | None:
+    current = usage
+    for key in keys:
+        if current is None:
+            return None
+        current = _field(current, key)
+    if isinstance(current, int | float) and not isinstance(current, bool):
+        return current
+    return None
+
+
+def responses_api_response_to_payload(response: Any) -> dict[str, Any]:
+    """Convert a raw OpenAI Responses-style object into internal API JSON.
+
+    The private API shim converts Responses objects to a Chat Completions-shaped
+    payload before the tracked adapter sees them. Some providers, including
+    Doubao Seed, expose thinking text as top-level ``output`` reasoning items,
+    so the tracked adapter must parse the raw object when it is available.
+    """
+
+    dumped = _dump_response_obj(response)
+    output_items = _field(response, "output") or (dumped or {}).get("output") or []
+    answer: list[dict[str, Any]] = []
+    text_parts: list[str] = []
+    text_blocks: list[dict[str, str]] = []
+    reasoning_parts: list[str] = []
+    reasoning_blocks: list[dict[str, str]] = []
+    tool_calls: list[dict[str, Any]] = []
+
+    for item in output_items:
+        item_type = _field(item, "type")
+        if item_type == "reasoning":
+            values = _response_text_values(_field(item, "content"))
+            if not values:
+                values = _response_text_values(_field(item, "summary"))
+            for value in values:
+                reasoning_parts.append(value)
+                reasoning_blocks.append({"value": value})
+            continue
+
+        if item_type == "message":
+            values = _response_text_values(_field(item, "content"))
+            for value in values:
+                text_parts.append(value)
+                text_blocks.append({"value": value})
+            continue
+
+        if item_type == "function_call":
+            tool_calls.append(
+                {
+                    "id": str(_field(item, "call_id") or _field(item, "id") or ""),
+                    "type": "function",
+                    "function": {
+                        "name": str(_field(item, "name") or ""),
+                        "arguments": _json_arguments(_field(item, "arguments")),
+                    },
+                }
+            )
+
+    if reasoning_parts:
+        answer.append({"type": "reasoning", "value": "\n".join(reasoning_parts)})
+    if text_parts:
+        answer.append({"type": "text", "value": "".join(text_parts)})
+    if tool_calls:
+        answer.append({"type": "tool_calls", "tool_calls": tool_calls})
+
+    usage = _field(response, "usage") or (dumped or {}).get("usage") or {}
+    x_usage = _field(response, "_x_usage", {}) or {}
+    reasoning_tokens = (
+        _usage_detail_number(usage, "output_tokens_details", "reasoning_tokens")
+        or _usage_detail_number(usage, "completion_tokens_details", "reasoning_tokens")
+        or 0
+    )
+    input_tokens = x_usage.get("prompt_tokens") or _usage_detail_number(usage, "input_tokens") or 0
+    output_tokens = (
+        x_usage.get("completion_tokens")
+        or _usage_detail_number(usage, "output_tokens")
+        or _usage_detail_number(usage, "completion_tokens")
+        or 0
+    )
+    total_tokens = x_usage.get("total_tokens") or _usage_detail_number(usage, "total_tokens") or 0
+    cost_info = {
+        "prompt_tokens": input_tokens,
+        "completion_tokens": output_tokens,
+        "cache_hit_tokens": x_usage.get("cache_hit_tokens", 0),
+        "cache_write_tokens": x_usage.get("cache_write_tokens", 0),
+        "total_tokens": total_tokens,
+        "cost": x_usage.get("cost", 0),
+        "reasoning_tokens": reasoning_tokens,
+    }
+
+    account_id = _field(response, "_x_account_id")
+    raw_response = dumped if isinstance(dumped, dict) else {}
+    if account_id and "account_id" not in raw_response:
+        raw_response = dict(raw_response)
+        raw_response["account_id"] = account_id
+
+    payload = {
+        "code": 0,
+        "msg": "",
+        "answer": answer,
+        "cost_info": cost_info,
+        "request_detail": {"response": raw_response},
+    }
+    response_id = _field(response, "id") or (dumped or {}).get("id")
+    if response_id:
+        payload["request_id"] = response_id
+    model = _field(response, "model") or (dumped or {}).get("model")
+    if model:
+        payload["model"] = model
+    if account_id:
+        payload["account_id"] = account_id
+    if text_blocks:
+        payload["text_blocks"] = text_blocks
+    if reasoning_blocks:
+        payload["reasoning_blocks"] = reasoning_blocks
+    return payload
+
+
 def parse_internal_response(
     payload: dict[str, Any],
     headers: dict[str, Any] | None = None,

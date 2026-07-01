@@ -1,6 +1,10 @@
 import json
 
-from p2a.internal_api_native import parse_internal_response, to_prompt_history
+from p2a.internal_api_native import (
+    parse_internal_response,
+    responses_api_response_to_payload,
+    to_prompt_history,
+)
 
 
 class _FakeApi:
@@ -288,6 +292,46 @@ def test_internal_response_preserves_reasoning_metadata_and_tool_signature():
     assert info["reasoning_content"] == "chain"
     assert info["reasoning_blocks"] == [{"value": "chain", "signature": "reason-sig"}]
     assert info["text_blocks"] == [{"value": "inspect", "signature": "text-sig"}]
+
+
+def test_responses_api_raw_output_preserves_reasoning_summary():
+    payload = responses_api_response_to_payload(
+        {
+            "id": "resp_seed",
+            "model": "doubao-seed-2-0-lite",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "check arithmetic"}],
+                },
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "TRUE"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "execute_bash",
+                    "arguments": {"command": "pytest -q"},
+                },
+            ],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 12,
+                "total_tokens": 22,
+                "output_tokens_details": {"reasoning_tokens": 7},
+            },
+        }
+    )
+
+    content, tool_calls, info = parse_internal_response(payload)
+
+    assert payload["answer"][0] == {"type": "reasoning", "value": "check arithmetic"}
+    assert content == "TRUE"
+    assert tool_calls[0]["id"] == "call-1"
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"command": "pytest -q"}
+    assert info["reasoning_content"] == "check arithmetic"
+    assert info["reasoning_tokens"] == 7
 
 
 def test_minimax_native_content_recovers_structured_tool_call():
