@@ -98,6 +98,24 @@ is on `main`.
 - When public-facing semantics change, update the README and, where research
   claims are affected, keep the proposal/report documents synchronized.
 
+## Precompute ↔ rollout alignment (INVIOLABLE — root `FACTS.md` FACT-001)
+
+The bonus map / golden call graph is built by the **precompute** path; its process
+supervision is applied to the **rollout** path. Both MUST observe identical
+execution semantics — the *same* command-execution interface and the *same* sandbox
+environment (PATH / venv / cwd / shell init) — or the supervision no longer matches
+what the agent actually executed (P2A soundness breaks).
+
+- Current ARL rollout execution uses `ArlRuntime.run_in_session` over
+  `ManagedSession.execute`, seeds the configured repo cwd (`session_cwd`, `/testbed`
+  for R2E and `/app` for SWE-Bench-Pro), preserves `cd`/exported env through
+  runtime state files, and strips terminal control sequences from observations.
+- `InteractiveShellClient` is a human/debug readline PTY and must not be used for
+  model/tool command execution. ARL rollout command execution must stay on the same
+  `execute` interface that precompute uses.
+- Any change to one path's exec interface or environment MUST be mirrored to the
+  other. Do not introduce a precompute-only or rollout-only execution nuance.
+
 ## ARL is a sandbox, not a VRC remote
 
 ARL is the containerized compute backend. The `arl-env` SDK connects directly to the

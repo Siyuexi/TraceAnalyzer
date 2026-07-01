@@ -38,6 +38,19 @@ touching this tree. The research-level `CLAUDE.md` is at the repo root.
 6. **Training runtime = uv-managed `.venv` on native CUDA 13.0.** Launchers default
    to `/usr/local/cuda-13.0` and the locked cu130 stack; do not add a parallel
    pip-managed runtime path.
+7. **Precompute and rollout MUST share execution semantics (INVIOLABLE — see root
+   `FACTS.md` FACT-001).** The bonus map / golden call graph is built by the
+   precompute path; its supervision is applied to the rollout path. Both MUST use
+   the *same* command-execution interface and the *same* sandbox env (PATH / venv /
+   cwd / shell init), or the supervision no longer matches what the agent ran.
+   Current ARL rollout execution uses `ArlRuntime.run_in_session` over
+   `ManagedSession.execute`, seeds the configured repo cwd (`session_cwd`, `/testbed`
+   for R2E and `/app` for SWE-Bench-Pro), preserves `cd`/exported env through
+   runtime state files, and strips terminal control sequences from observations.
+   `InteractiveShellClient` is a human/debug readline PTY and must not be used for
+   model/tool command execution. Any change to one path's exec interface or env
+   MUST be mirrored to the other; do not add a precompute-only or rollout-only
+   execution nuance.
 
 ## Asset and artifact paths
 
