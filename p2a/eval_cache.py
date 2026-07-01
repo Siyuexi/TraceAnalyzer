@@ -622,6 +622,21 @@ def _tool_call_count(record: dict[str, Any]) -> int:
     return total
 
 
+def _raw_turn_count(*values: Any) -> int | None:
+    for value in values:
+        parsed = json_loads(value, value) if isinstance(value, str) else value
+        if isinstance(parsed, list):
+            return len(parsed)
+    return None
+
+
+def _raw_tool_call_count(value: Any) -> int | None:
+    traces = json_loads(value, value) if isinstance(value, str) else value
+    if not isinstance(traces, list):
+        return None
+    return _tool_call_count({"p2a_step_traces": traces})
+
+
 def _reward_number(record: dict[str, Any]) -> float | None:
     value = record.get("reward")
     if isinstance(value, bool):
@@ -708,7 +723,7 @@ def upsert_rollout_record(
     detail: dict[str, Any] | None = None,
     artifact_rollouts: Path | str | None = None,
     artifact_details: Path | str | None = None,
-) -> None:
+) -> int:
     instance_id = str(record.get("instance_id") or (detail or {}).get("instance_id") or "")
     if not instance_id:
         raise ValueError("rollout record has no instance_id; cannot key DB cell")
@@ -847,6 +862,7 @@ def upsert_rollout_record(
             now,
         ),
     )
+    return cell_id
 
 
 def write_dashboard_detail_cache(
@@ -855,23 +871,27 @@ def write_dashboard_detail_cache(
     cell_id: int,
     detail: Mapping[str, Any],
     fingerprint: str,
+    cache_metadata: Mapping[str, Any] | None = None,
 ) -> None:
     now = utc_now()
     row = conn.execute("SELECT metrics_json FROM quantitative_metrics WHERE cell_id = ?", (cell_id,)).fetchone()
+    if row is None:
+        return
     metrics = json_loads(row["metrics_json"] if row else None, {})
     if not isinstance(metrics, dict):
         metrics = {}
     metrics["detail"] = dict(detail)
+    if cache_metadata is not None:
+        metrics["dashboard_detail_cache"] = dict(cache_metadata)
     conn.execute(
         """
-        INSERT INTO quantitative_metrics(cell_id, fingerprint, metrics_json, updated_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(cell_id) DO UPDATE SET
-          fingerprint = excluded.fingerprint,
-          metrics_json = excluded.metrics_json,
-          updated_at = excluded.updated_at
+        UPDATE quantitative_metrics
+        SET fingerprint = ?,
+            metrics_json = ?,
+            updated_at = ?
+        WHERE cell_id = ?
         """,
-        (cell_id, fingerprint, json_dumps(metrics), now),
+        (fingerprint, json_dumps(metrics), now, cell_id),
     )
 
 
@@ -1233,6 +1253,32 @@ def _k_metric_row(row: sqlite3.Row) -> Mapping[str, Any]:
     return data
 
 
+def _hydrate_metric_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = {key: row[key] for key in row.keys()}
+    if data.get("reward") is None:
+        data["reward"] = _reward_number({"reward": json_loads(data.get("raw_reward_json"), None)})
+    if data.get("resolved") is None and data.get("raw_resolved") is not None:
+        data["resolved"] = _bool_int(data.get("raw_resolved"))
+    if data.get("turns") is None:
+        data["turns"] = _raw_turn_count(data.get("raw_p2a_step_traces_json"), data.get("raw_trajectory_json"))
+    if data.get("tool_calls") is None:
+        data["tool_calls"] = _raw_tool_call_count(data.get("raw_p2a_step_traces_json"))
+    token_usage = json_loads(data.get("raw_token_usage_json"), {})
+    if not isinstance(token_usage, dict):
+        token_usage = {}
+    for column, key in (
+        ("input_tokens", "input_tokens"),
+        ("output_tokens", "output_tokens"),
+        ("reasoning_tokens", "reasoning_tokens"),
+        ("cache_hit_tokens", "cache_hit_tokens"),
+        ("cache_write_tokens", "cache_write_tokens"),
+        ("cost", "cost"),
+    ):
+        if data.get(column) is None:
+            data[column] = _number(token_usage.get(key))
+    return data
+
+
 def _selected_scope_from_snapshot(value: str | None) -> dict[str, Any] | None:
     snapshot = json_loads(value, {})
     if not isinstance(snapshot, dict):
@@ -1256,6 +1302,10 @@ def aggregate_model_metrics(
     experiment_id: str | None = None,
     provider_source: str | None = None,
     dataset: str | None = None,
+    model_api_name: str | None = None,
+    model_label: str | None = None,
+    include_detail_metrics: bool = True,
+    include_raw_trace_fallback: bool = True,
 ) -> list[dict[str, Any]]:
     where = []
     params: list[Any] = []
@@ -1268,11 +1318,22 @@ def aggregate_model_metrics(
     if dataset:
         where.append("c.dataset = ?")
         params.append(dataset)
+    if model_api_name:
+        where.append("c.model_api_name = ?")
+        params.append(model_api_name)
+    if model_label:
+        where.append("c.model_label = ?")
+        params.append(model_label)
     where_sql = "WHERE " + " AND ".join(where) if where else ""
     cell_columns = _table_columns(conn, "run_cells")
+    metric_columns = _table_columns(conn, "quantitative_metrics")
     rollout_index_sql = "c.rollout_index" if "rollout_index" in cell_columns else "0 AS rollout_index"
     rollout_index_order_sql = "c.rollout_index" if "rollout_index" in cell_columns else "rollout_index"
     rollout_id_sql = "c.rollout_id" if "rollout_id" in cell_columns else "NULL AS rollout_id"
+    fingerprint_sql = "q.fingerprint" if "fingerprint" in metric_columns else "NULL"
+    metrics_json_sql = "q.metrics_json" if include_detail_metrics else "NULL AS metrics_json"
+    raw_step_traces_sql = "r.p2a_step_traces_json" if include_raw_trace_fallback else "NULL"
+    raw_trajectory_sql = "r.trajectory_json" if include_raw_trace_fallback else "NULL"
 
     rows = conn.execute(
         f"""
@@ -1304,18 +1365,26 @@ def aggregate_model_metrics(
           q.cache_hit_tokens,
           q.cache_write_tokens,
           q.cost,
-          q.metrics_json
+          {fingerprint_sql} AS fingerprint,
+          {metrics_json_sql},
+          r.reward_json AS raw_reward_json,
+          r.resolved AS raw_resolved,
+          {raw_step_traces_sql} AS raw_p2a_step_traces_json,
+          {raw_trajectory_sql} AS raw_trajectory_json,
+          r.token_usage_json AS raw_token_usage_json
         FROM run_cells c
         LEFT JOIN experiments e
           ON e.experiment_id = c.experiment_id
          AND e.provider_source = c.provider_source
          AND e.dataset = c.dataset
         LEFT JOIN quantitative_metrics q ON q.cell_id = c.id
+        LEFT JOIN raw_rollouts r ON r.cell_id = c.id
         {where_sql}
         ORDER BY c.model_label, c.instance_id, {rollout_index_order_sql}
         """,
         params,
     ).fetchall()
+    rows = [_hydrate_metric_row(row) for row in rows]
 
     groups: dict[tuple[str, str, str, str, str], list[sqlite3.Row]] = defaultdict(list)
     for row in rows:
@@ -1332,8 +1401,11 @@ def aggregate_model_metrics(
     for (exp_id, source, ds, api_name, label), group in sorted(groups.items(), key=lambda item: item[0][-1]):
         done = [row for row in group if row["status"] == DONE_STATUS]
         errors = [row for row in group if row["status"] == ERROR_STATUS]
-        metric_rows = [row for row in done if row["turns"] is not None]
+        metric_rows = done
         k_metric_rows = [_k_metric_row(row) for row in group if row["status"] in {DONE_STATUS, ERROR_STATUS}]
+        cache_scope_rows = [row for row in group if row["status"] in {DONE_STATUS, ERROR_STATUS}]
+        detail_cache_ready = sum(1 for row in cache_scope_rows if row.get("fingerprint"))
+        detail_cache_pending = max(0, len(cache_scope_rows) - detail_cache_ready)
         rollout_n = _rollout_n(group)
         avg_at, avg_at_std = _avg_at_payloads(k_metric_rows, rollout_n=rollout_n)
         avg_at_n = avg_at.get(str(rollout_n), {})
@@ -1367,6 +1439,8 @@ def aggregate_model_metrics(
                 "done_rollouts": len(done),
                 "errors": len(errors),
                 "pending": sum(1 for row in group if row["status"] in {PENDING_STATUS, RUNNING_STATUS}),
+                "detail_cache_ready_rollouts": detail_cache_ready,
+                "detail_cache_pending_rollouts": detail_cache_pending,
                 "rollouts_per_instance": rollout_n,
                 "selected_scope": _selected_scope_from_snapshot(group[0]["config_snapshot"]),
                 "pass_at_n": pass_at.get(str(rollout_n)),

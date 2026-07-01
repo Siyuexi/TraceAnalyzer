@@ -2,13 +2,20 @@ import json
 import io
 import pickle
 import sqlite3
-import threading
+import time
 from http import HTTPStatus
-from pathlib import Path
 
 import pytest
 
-from p2a.dashboard_adapter import DashboardRequest, _case_filter_model_metrics, _normalize_detail, build_dashboard_snapshot, read_dashboard_log
+from p2a.dashboard_adapter import (
+    DashboardRequest,
+    _case_filter_model_metrics,
+    _looks_like_error,
+    _normalize_detail,
+    build_dashboard_snapshot,
+    read_dashboard_log,
+    write_dashboard_detail_cache_for_record,
+)
 from p2a import dashboard_adapter, dashboard_server
 from p2a.dashboard_server import write_static_dashboard
 from p2a.eval_cache import (
@@ -17,9 +24,11 @@ from p2a.eval_cache import (
     delete_run_data,
     ensure_db,
     aggregate_model_metrics,
+    mark_cells_running,
     upsert_experiment,
     upsert_planned_cells,
     upsert_rollout_record,
+    write_dashboard_detail_cache,
 )
 
 
@@ -71,6 +80,13 @@ def _set_dataset(record: dict, dataset: str) -> dict:
     if isinstance(record.get("extra_info"), dict):
         record["extra_info"]["data_source"] = dataset
     return record
+
+
+def test_dashboard_marks_api_resource_failures_as_errors():
+    assert _looks_like_error("RuntimeError: insufficient balance, please recharge")
+    assert _looks_like_error("HTTP 429 Too Many Requests")
+    assert _looks_like_error("余额不足，请充值")
+    assert not _looks_like_error("The code mentions a quota argument in documentation.")
 
 
 def _detail(instance_id: str, *, case_type: str | None = None):
@@ -527,7 +543,9 @@ def test_unified_dashboard_snapshot_includes_db_model_metrics(tmp_path):
     with ensure_db(db) as conn:
         row = conn.execute("SELECT fingerprint, metrics_json FROM quantitative_metrics").fetchone()
         assert row["fingerprint"]
-        assert "detail" in json.loads(row["metrics_json"])
+        metrics = json.loads(row["metrics_json"])
+        assert "detail" in metrics
+        assert metrics["dashboard_detail_cache"]["fingerprint"] == row["fingerprint"]
 
 
 def test_dashboard_fingerprint_cache_hit_and_bonus_map_miss(monkeypatch, tmp_path):
@@ -572,6 +590,92 @@ def test_dashboard_fingerprint_cache_hit_and_bonus_map_miss(monkeypatch, tmp_pat
     stale = build_dashboard_snapshot(DashboardRequest(db_path=db, experiment_id="exp", bonus_map_dir=bonus_dir))
     assert stale["details"][0]["instance_id"] == "case-1"
     assert calls["n"] == 1
+
+
+def test_write_time_dashboard_detail_cache_feeds_light_snapshot(tmp_path):
+    db = tmp_path / "traces.sqlite"
+    bonus_dir = tmp_path / "bonus"
+    bonus_dir.mkdir()
+    (bonus_dir / "case-1.json").write_text(json.dumps(_bonus_map("case-1")), encoding="utf-8")
+    record = _rollout("case-1")
+
+    with ensure_db(db) as conn:
+        upsert_experiment(conn, experiment_id="exp", provider_source="internal_api", dataset="swebench-hard", config_snapshot={})
+        cell_id = upsert_rollout_record(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            record=record,
+        )
+        result = write_dashboard_detail_cache_for_record(conn, cell_id=cell_id, record=record, bonus_map_dir=bonus_dir)
+        conn.commit()
+
+    assert result["ok"] is True
+    with ensure_db(db) as conn:
+        row = conn.execute("SELECT fingerprint, metrics_json FROM quantitative_metrics WHERE cell_id = ?", (cell_id,)).fetchone()
+        metrics = json.loads(row["metrics_json"])
+        assert row["fingerprint"]
+        assert "detail" in metrics
+        assert metrics["dashboard_detail_cache"]["fingerprint"] == row["fingerprint"]
+        model_row = aggregate_model_metrics(conn, experiment_id="exp")[0]
+    assert model_row["root_hit_rate"] == 1.0
+
+    snapshot = build_dashboard_snapshot(
+        DashboardRequest(
+            db_path=db,
+            experiment_id="exp",
+            bonus_map_dir=bonus_dir,
+            defer_db_scoring=True,
+            include_db_raw_details=False,
+        )
+    )
+    assert snapshot["details"][0]["instance_id"] == "case-1"
+    assert snapshot["details"][0].get("dashboard_cache_pending") is not True
+    assert snapshot["details"][0]["root_hit"] is True
+    assert snapshot["details"][0]["raw_available"] is False
+
+
+def test_dashboard_deferred_db_snapshot_uses_only_validated_detail_cache(monkeypatch, tmp_path):
+    db = tmp_path / "traces.sqlite"
+    bonus_dir = tmp_path / "bonus"
+    bonus_dir.mkdir()
+    bonus_path = bonus_dir / "case-1.json"
+    bonus_path.write_text(json.dumps(_bonus_map("case-1")), encoding="utf-8")
+    with ensure_db(db) as conn:
+        upsert_experiment(conn, experiment_id="exp", provider_source="internal_api", dataset="swebench-hard", config_snapshot={})
+        upsert_rollout_record(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            record=_rollout("case-1"),
+        )
+        conn.commit()
+
+    build_dashboard_snapshot(DashboardRequest(db_path=db, experiment_id="exp", bonus_map_dir=bonus_dir))
+
+    def fail_score(*_args, **_kwargs):
+        raise AssertionError("deferred snapshot should never score DB rows")
+
+    monkeypatch.setattr("p2a.dashboard_adapter.score_record", fail_score)
+    cached = build_dashboard_snapshot(
+        DashboardRequest(db_path=db, experiment_id="exp", bonus_map_dir=bonus_dir, defer_db_scoring=True)
+    )
+    assert cached["details"][0]["instance_id"] == "case-1"
+    assert cached["details"][0].get("dashboard_cache_pending") is not True
+
+    bonus = _bonus_map("case-1")
+    bonus["call_graph_nodes"]["a.py::root"]["source"] = "def root():\n    return 2"
+    bonus_path.write_text(json.dumps(bonus), encoding="utf-8")
+    stale = build_dashboard_snapshot(
+        DashboardRequest(db_path=db, experiment_id="exp", bonus_map_dir=bonus_dir, defer_db_scoring=True)
+    )
+    assert stale["details"][0]["dashboard_cache_pending"] is True
 
 
 def test_dashboard_detail_cache_write_failure_does_not_block_snapshot(monkeypatch, tmp_path):
@@ -630,6 +734,103 @@ def test_dashboard_deferred_db_snapshot_skips_uncached_scoring(monkeypatch, tmp_
     assert snapshot["details"][0]["instance_id"] == "case-1"
     assert snapshot["details"][0]["dashboard_cache_pending"] is True
     assert snapshot["details"][0]["not_path_evaluable_reason"] == "dashboard_cache_pending"
+    assert snapshot["details"][0]["raw_available"] is True
+    assert snapshot["details"][0]["messages"]
+    assert snapshot["details"][0]["step_inspection"]
+    assert snapshot["details"][0]["resolved"] is True
+    assert snapshot["eval_cells"][0]["cache_pending"] == 1
+    assert snapshot["eval_cells"][0]["trajectory_count"] == 1
+
+
+def test_dashboard_deferred_db_snapshot_can_skip_raw_trace_payload(monkeypatch, tmp_path):
+    db = tmp_path / "traces.sqlite"
+    bonus_dir = tmp_path / "bonus"
+    bonus_dir.mkdir()
+    (bonus_dir / "case-1.json").write_text(json.dumps(_bonus_map("case-1")), encoding="utf-8")
+    with ensure_db(db) as conn:
+        upsert_experiment(conn, experiment_id="exp", provider_source="internal_api", dataset="swebench-hard", config_snapshot={})
+        upsert_rollout_record(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            record=_rollout("case-1"),
+        )
+        conn.commit()
+
+    def fail_score(*_args, **_kwargs):
+        raise AssertionError("deferred snapshot should not score uncached DB rows")
+
+    monkeypatch.setattr("p2a.dashboard_adapter.score_record", fail_score)
+    snapshot = build_dashboard_snapshot(
+        DashboardRequest(
+            db_path=db,
+            experiment_id="exp",
+            bonus_map_dir=bonus_dir,
+            defer_db_scoring=True,
+            include_db_raw_details=False,
+        )
+    )
+
+    assert snapshot["details"] == []
+    assert snapshot["model_metrics"][0]["resolved_rate"] == 1.0
+    assert snapshot["model_metrics"][0]["pass_at_n"] == 1.0
+    assert snapshot["eval_cells"][0]["cache_ready"] == 0
+    assert snapshot["eval_cells"][0]["cache_pending"] == 1
+    assert snapshot["eval_cells"][0]["target_rollouts"] == 1
+    assert snapshot["eval_cells"][0]["done_rollouts"] == 1
+
+
+def test_dashboard_deferred_db_snapshot_keeps_run_status_counts(tmp_path):
+    db = tmp_path / "traces.sqlite"
+    with ensure_db(db) as conn:
+        upsert_experiment(conn, experiment_id="exp", provider_source="internal_api", dataset="swebench-hard", config_snapshot={})
+        upsert_planned_cells(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            instance_ids=["case-1", "case-2", "case-3"],
+        )
+        upsert_rollout_record(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            record=_rollout("case-1"),
+        )
+        mark_cells_running(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            dataset="swebench-hard",
+            instance_ids=["case-2", "case-3"],
+        )
+        conn.commit()
+
+    snapshot = build_dashboard_snapshot(
+        DashboardRequest(
+            db_path=db,
+            experiment_id="exp",
+            provider_source="internal_api",
+            dataset="swebench-hard",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            defer_db_scoring=True,
+        )
+    )
+
+    row = snapshot["eval_cells"][0]
+    assert row["target_rollouts"] == 3
+    assert row["done_rollouts"] == 1
+    assert row["pending"] == 2
 
 
 def test_eval_cache_delete_counts_and_cascades(tmp_path):
@@ -719,26 +920,104 @@ def test_dashboard_admin_auth_and_delete_endpoint(tmp_path):
         handler, sent = _invoke_handler(handler_type, "/api/delete/preview", {"targets": [{"experiment_id": "smoke"}]}, cookie=cookie)
         handler.do_POST()
         assert sent["payload"]["counts"]["run_cells"] == 1
-        phrase = sent["payload"]["confirmation_phrase"]
+        assert "confirmation_phrase" not in sent["payload"]
 
-        handler, sent = _invoke_handler(handler_type, "/api/delete", {"targets": [{"experiment_id": "smoke"}], "confirmation": "wrong"}, cookie=cookie)
-        handler.do_POST()
-        assert sent["status"] == HTTPStatus.BAD_REQUEST
-        assert sent["payload"]["error"] == "confirmation_required"
-
-        handler, sent = _invoke_handler(handler_type, "/api/delete", {"targets": [{"experiment_id": "smoke"}], "confirmation": phrase}, cookie=cookie)
+        handler, sent = _invoke_handler(handler_type, "/api/delete", {"targets": [{"experiment_id": "smoke"}]}, cookie=cookie)
         handler.do_POST()
         assert sent["payload"]["ok"] is True
-        backup_path = Path(sent["payload"]["backup_path"])
-        assert backup_path.exists()
-        assert backup_path.name.startswith("traces.sqlite.backup-")
-        with sqlite3.connect(backup_path) as backup:
-            row = backup.execute("SELECT COUNT(*) FROM run_cells WHERE experiment_id = ?", ("smoke",)).fetchone()
-            assert row[0] == 1
+        assert "backup_path" not in sent["payload"]
     finally:
         writer.close()
     with ensure_db(db) as conn:
         assert count_run_data_targets(conn, [{"experiment_id": "smoke"}])["run_cells"] == 0
+
+
+def test_dashboard_admin_rebuild_endpoint_clears_target_detail_cache(monkeypatch, tmp_path):
+    db = tmp_path / "traces.sqlite"
+    bonus_dir = tmp_path / "bonus"
+    bonus_dir.mkdir()
+    (bonus_dir / "case-1.json").write_text(json.dumps(_bonus_map("case-1")), encoding="utf-8")
+    (bonus_dir / "case-2.json").write_text(json.dumps(_bonus_map("case-2")), encoding="utf-8")
+    with ensure_db(db) as conn:
+        upsert_experiment(conn, experiment_id="smoke", provider_source="internal_api", dataset="swebench-hard", config_snapshot={})
+        upsert_rollout_record(
+            conn,
+            experiment_id="smoke",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            record=_rollout("case-1"),
+        )
+        upsert_rollout_record(
+            conn,
+            experiment_id="smoke",
+            provider_source="internal_api",
+            model_api_name="other-model",
+            model_label="other",
+            dataset="swebench-hard",
+            record=_rollout("case-2"),
+        )
+        conn.commit()
+
+    build_dashboard_snapshot(DashboardRequest(db_path=db, experiment_id="smoke", bonus_map_dir=bonus_dir))
+    with ensure_db(db) as conn:
+        rows = conn.execute("SELECT fingerprint, metrics_json FROM quantitative_metrics ORDER BY cell_id").fetchall()
+        assert len(rows) == 2
+        assert all(row["fingerprint"] for row in rows)
+        assert all("detail" in json.loads(row["metrics_json"]) for row in rows)
+
+    monkeypatch.setattr(
+        dashboard_server,
+        "build_dashboard_snapshot",
+        lambda _request: {"schema_version": "p2a_unified_dashboard_v1", "details": []},
+    )
+    handler_type = dashboard_server.make_handler(DashboardRequest(db_path=db, bonus_map_dir=bonus_dir), admin_password="pw")
+    handler, sent = _invoke_handler(handler_type, "/api/auth/login", {"password": "pw"})
+    handler.do_POST()
+    cookie = sent["headers"]["Set-Cookie"].split(";", 1)[0]
+
+    handler, sent = _invoke_handler(
+        handler_type,
+        "/api/rebuild",
+        {"targets": [{"experiment_id": "smoke", "model_api_name": "dummy-model", "model_label": "dummy"}]},
+        cookie=cookie,
+    )
+    handler.do_POST()
+
+    assert sent["payload"]["ok"] is True
+    assert sent["payload"]["queued"] is True
+    deadline = time.monotonic() + 2.0
+    rebuilt = untouched = None
+    while time.monotonic() < deadline:
+        with ensure_db(db) as conn:
+            rebuilt = conn.execute(
+                """
+                SELECT q.fingerprint, q.metrics_json
+                FROM quantitative_metrics q
+                JOIN run_cells c ON c.id = q.cell_id
+                WHERE c.model_api_name = 'dummy-model'
+                """
+            ).fetchone()
+            untouched = conn.execute(
+                """
+                SELECT q.fingerprint, q.metrics_json
+                FROM quantitative_metrics q
+                JOIN run_cells c ON c.id = q.cell_id
+                WHERE c.model_api_name = 'other-model'
+                """
+            ).fetchone()
+        if rebuilt["fingerprint"] is None:
+            break
+        time.sleep(0.01)
+    assert rebuilt is not None
+    assert untouched is not None
+    assert rebuilt["fingerprint"] is None
+    metrics = json.loads(rebuilt["metrics_json"])
+    assert "detail" not in metrics
+    assert "dashboard_detail_cache" not in metrics
+    assert untouched["fingerprint"]
+    assert "detail" in json.loads(untouched["metrics_json"])
 
 
 def test_model_metrics_read_direct_run_scope_from_experiment_snapshot(tmp_path):
@@ -844,8 +1123,97 @@ def test_eval_cache_aggregates_pass_at_n_and_avg_at_n(tmp_path):
     assert metric["avg_at"]["1"]["resolved_rate"] == 0.0
     assert metric["resolved_rate"] == 0.25
     assert metric["rollouts_per_instance"] == 2
+    assert snapshot["eval_cells"][0]["rollouts_per_instance"] == 2
     details = sorted((detail["instance_id"], detail["rollout_index"]) for detail in snapshot["details"])
     assert details == [("case-1", 0), ("case-1", 1), ("case-2", 0), ("case-2", 1)]
+
+    deferred = build_dashboard_snapshot(
+        DashboardRequest(db_path=db, experiment_id="exp", defer_db_scoring=True, include_db_raw_details=False)
+    )
+    assert deferred["model_metrics"][0]["resolved_rate"] == 0.25
+    assert deferred["model_metrics"][0]["pass_at_n"] == 0.5
+    assert deferred["eval_cells"][0]["rollouts_per_instance"] == 2
+
+
+def test_eval_cache_aggregates_from_raw_rollout_when_metric_row_is_hollow(tmp_path):
+    db = tmp_path / "traces.sqlite"
+    with ensure_db(db) as conn:
+        upsert_experiment(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            dataset="swebench-hard",
+            config_snapshot={"ok": True},
+        )
+        upsert_planned_cells(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            instance_ids=["case-1", "case-2"],
+        )
+        upsert_rollout_record(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            record=_rollout("case-1", resolved=True),
+        )
+        upsert_rollout_record(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            record=_rollout("case-2", resolved=False),
+        )
+        conn.execute("UPDATE quantitative_metrics SET resolved = NULL, turns = NULL, tool_calls = NULL")
+        conn.commit()
+
+        row = aggregate_model_metrics(conn, experiment_id="exp")[0]
+
+    assert row["resolved_rate"] == 0.5
+    assert row["pass_at"] == {"1": 0.5}
+    assert row["avg_tool_calls"] == 1.0
+
+
+def test_dashboard_detail_cache_does_not_create_hollow_metric_row(tmp_path):
+    db = tmp_path / "traces.sqlite"
+    with ensure_db(db) as conn:
+        upsert_experiment(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            dataset="swebench-hard",
+            config_snapshot={"ok": True},
+        )
+        upsert_planned_cells(
+            conn,
+            experiment_id="exp",
+            provider_source="internal_api",
+            model_api_name="dummy-model",
+            model_label="dummy",
+            dataset="swebench-hard",
+            instance_ids=["case-1"],
+        )
+        cell_id = conn.execute("SELECT id FROM run_cells").fetchone()["id"]
+        write_dashboard_detail_cache(
+            conn,
+            cell_id=cell_id,
+            detail={"instance_id": "case-1"},
+            fingerprint="fp",
+            cache_metadata={"fingerprint": "fp"},
+        )
+        conn.commit()
+
+        row = conn.execute("SELECT * FROM quantitative_metrics WHERE cell_id = ?", (cell_id,)).fetchone()
+
+    assert row is None
 
 
 def test_multi_rollout_k_metrics_count_error_attempts(tmp_path):
@@ -1995,18 +2363,15 @@ def test_live_dashboard_root_does_not_embed_initial_snapshot(monkeypatch):
     assert 'src="app.js?' in html
 
 
-def test_live_dashboard_cold_db_snapshot_defers_background_build(monkeypatch, tmp_path):
+def test_live_dashboard_cold_db_snapshot_is_read_only_deferred(monkeypatch, tmp_path):
     db = tmp_path / "traces.sqlite"
     with ensure_db(db) as conn:
         upsert_experiment(conn, experiment_id="exp", provider_source="internal_api", dataset="swebench-hard", config_snapshot={})
         conn.commit()
     calls = []
-    background_done = threading.Event()
 
     def fake_build(request):
         calls.append(request.defer_db_scoring)
-        if not request.defer_db_scoring:
-            background_done.set()
         return {"schema_version": "p2a_unified_dashboard_v1", "details": [], "deferred": request.defer_db_scoring}
 
     monkeypatch.setattr(dashboard_server, "build_dashboard_snapshot", fake_build)
@@ -2016,9 +2381,7 @@ def test_live_dashboard_cold_db_snapshot_defers_background_build(monkeypatch, tm
     payload = handler._build_or_cached_snapshot()
 
     assert payload["deferred"] is True
-    assert background_done.wait(1)
-    assert True in calls
-    assert False in calls
+    assert calls == [True]
 
 
 def test_dashboard_log_reader_rejects_paths_outside_run_dir(tmp_path):

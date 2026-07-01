@@ -21,7 +21,17 @@ from p2a.bonus_map_scope import (
     canonical_detail_case_type,
 )
 from p2a.core import BonusMapStore, _bonus_map_candidate_ids, normalize_action, reads_from_step_trace, writes_from_step_trace
-from p2a.eval_cache import aggregate_model_metrics, connect, connect_readonly, init_db, json_dumps, json_loads, write_dashboard_detail_cache
+from p2a.eval_cache import (
+    DONE_STATUS,
+    ERROR_STATUS,
+    aggregate_model_metrics,
+    connect,
+    connect_readonly,
+    init_db,
+    json_dumps,
+    json_loads,
+    write_dashboard_detail_cache,
+)
 from p2a.eval_fault_localization import (
     _json_default,
     _kendall_order,
@@ -37,6 +47,7 @@ from p2a.hf_assets import shared_p2a_data_dir
 
 DASHBOARD_SCHEMA_VERSION = "p2a_unified_dashboard_v1"
 DASHBOARD_DETAIL_CACHE_VERSION = "dashboard_detail_cache_v1"
+DASHBOARD_DETAIL_CACHE_METADATA_KEY = "dashboard_detail_cache"
 THIRD_PARTY_PROVIDER_SOURCES = {
     "internal_api",
     "openai_compatible",
@@ -44,6 +55,18 @@ THIRD_PARTY_PROVIDER_SOURCES = {
     "third_party",
     "api",
 }
+API_RUNTIME_ERROR_RE = re.compile(
+    r"("
+    r"insufficient\s+(?:balance|quota|credit|credits|funds)|"
+    r"(?:balance|credit|credits|funds)\s+(?:insufficient|exhausted|depleted)|"
+    r"quota\s+(?:exceeded|exhausted|depleted|reached)|"
+    r"(?:billing|payment)\s+(?:hard\s+)?(?:limit|required|failed)|"
+    r"\bHTTP\s*429\b|\b429\s+Too\s+Many\s+Requests\b|"
+    r"rate\s+limit(?:ed|ing)?|too\s+many\s+requests|toomanyrequests|"
+    r"余额不足|额度不足|配额不足|余额已用尽|额度已用尽|配额已用尽|账户欠费|欠费|请充值"
+    r")",
+    re.IGNORECASE,
+)
 # Legacy DB/detail JSON uses `chain_*` keys for Path concepts. Dashboard code
 # should use Path helpers and only touch legacy keys through compatibility
 # accessors.
@@ -110,6 +133,10 @@ class DashboardRequest:
     experiment_id: str | None = None
     provider_source: str | None = None
     dataset: str | None = None
+    model_api_name: str | None = None
+    model_label: str | None = None
+    include_db_raw_details: bool = True
+    detail_offset: int = 0
     tracking_mode: str = "view_and_bash"
     near_threshold: float = 0.5
     m_max: float = 3.0
@@ -163,7 +190,15 @@ def _tool_args(tool_call: Any) -> Any:
     call = _as_mapping(tool_call)
     function = _as_mapping(call.get("function"))
     args = function.get("arguments") if function else call.get("arguments", call.get("args", {}))
-    return _safe_json_loads(args, args) if isinstance(args, str) else args
+    args = _safe_json_loads(args, args) if isinstance(args, str) else args
+    if isinstance(args, dict):
+        normalized = dict(args)
+        for key in ("command", "path", "file", "old_str", "new_str"):
+            value = normalized.get(key)
+            if isinstance(value, dict) and isinstance(value.get("$text"), str):
+                normalized[key] = value["$text"]
+        return normalized
+    return args
 
 
 def _text_value(value: Any) -> str:
@@ -679,6 +714,8 @@ def _tool_observation(tool_results: list[Any]) -> str:
 
 def _looks_like_error(text: str) -> bool:
     sample = str(text or "")[:6000]
+    if API_RUNTIME_ERROR_RE.search(sample):
+        return True
     if re.search(r"\b(exit status|exit code|returned non-zero|command not found|segmentation fault)\b", sample, re.IGNORECASE):
         return True
     return any(
@@ -1041,7 +1078,7 @@ def _bonus_map_file_for_instance(bonus_map_dir: Path | None, instance_id: str) -
     return None
 
 
-def _dashboard_detail_fingerprint(record: dict[str, Any], *, request: DashboardRequest) -> str | None:
+def _dashboard_detail_fingerprint_payload(record: dict[str, Any], *, request: DashboardRequest) -> dict[str, Any] | None:
     if request.bonus_map_dir is None:
         return None
     cache = _record_dashboard_cache(record)
@@ -1059,7 +1096,17 @@ def _dashboard_detail_fingerprint(record: dict[str, Any], *, request: DashboardR
         "bonus_map_path": str(bonus_map_file) if bonus_map_file else None,
         "bonus_map_sha256": _sha256_file(bonus_map_file) if bonus_map_file else None,
     }
+    return payload
+
+
+def _dashboard_detail_fingerprint_from_payload(payload: dict[str, Any] | None) -> str | None:
+    if not payload:
+        return None
     return _sha256_text(json_dumps(payload))
+
+
+def _dashboard_detail_fingerprint(record: dict[str, Any], *, request: DashboardRequest) -> str | None:
+    return _dashboard_detail_fingerprint_from_payload(_dashboard_detail_fingerprint_payload(record, request=request))
 
 
 def _cached_dashboard_detail(record: dict[str, Any], fingerprint: str | None) -> dict[str, Any] | None:
@@ -1080,7 +1127,7 @@ def _scoreable_record(record: dict[str, Any]) -> dict[str, Any]:
 
 def _write_pending_dashboard_detail_cache(
     request: DashboardRequest,
-    pending_writes: list[tuple[int, str, dict[str, Any]]],
+    pending_writes: list[tuple[int, str, dict[str, Any], dict[str, Any]]],
 ) -> None:
     if not request.db_path or not pending_writes:
         return
@@ -1088,8 +1135,14 @@ def _write_pending_dashboard_detail_cache(
     try:
         conn = connect(request.db_path, timeout=0.5)
         init_db(conn)
-        for cell_id, fingerprint, detail in pending_writes:
-            write_dashboard_detail_cache(conn, cell_id=cell_id, fingerprint=fingerprint, detail=detail)
+        for cell_id, fingerprint, detail, cache_metadata in pending_writes:
+            write_dashboard_detail_cache(
+                conn,
+                cell_id=cell_id,
+                fingerprint=fingerprint,
+                detail=detail,
+                cache_metadata=cache_metadata,
+            )
         conn.commit()
     except (OSError, sqlite3.Error):
         if conn is not None:
@@ -1124,9 +1177,10 @@ def _score_records(
         return []
     bonus_maps = BonusMapStore(str(request.bonus_map_dir))
     scored = []
-    pending_writes: list[tuple[int, str, dict[str, Any]]] = []
+    pending_writes: list[tuple[int, str, dict[str, Any], dict[str, Any]]] = []
     for index, record in enumerate(records):
-        fingerprint = _dashboard_detail_fingerprint(record, request=request)
+        cache_metadata = _dashboard_detail_fingerprint_payload(record, request=request)
+        fingerprint = _dashboard_detail_fingerprint_from_payload(cache_metadata)
         cached = _cached_dashboard_detail(record, fingerprint)
         if cached is not None:
             detail = cached
@@ -1143,10 +1197,60 @@ def _score_records(
             )
             cache = _record_dashboard_cache(record)
             if fingerprint and cache.get("cell_id"):
-                pending_writes.append((int(cache["cell_id"]), fingerprint, detail))
+                pending_writes.append(
+                    (int(cache["cell_id"]), fingerprint, detail, {**(cache_metadata or {}), "fingerprint": fingerprint})
+                )
         scored.append(_enrich_detail_from_record(detail, record, request))
     _write_pending_dashboard_detail_cache(request, pending_writes)
     return scored
+
+
+def write_dashboard_detail_cache_for_record(
+    conn: sqlite3.Connection,
+    *,
+    cell_id: int,
+    record: dict[str, Any],
+    bonus_map_dir: Path,
+    tracking_mode: str = "view_and_bash",
+    near_threshold: float = 0.5,
+    m_max: float = 3.0,
+    index: int = 0,
+) -> dict[str, Any]:
+    request = DashboardRequest(
+        bonus_map_dir=bonus_map_dir,
+        tracking_mode=tracking_mode,
+        near_threshold=near_threshold,
+        m_max=m_max,
+    )
+    raw_hash = _sha256_text(json_dumps(_scoreable_record(record)))
+    cache_record = {
+        **record,
+        "_dashboard_cache": {
+            "cell_id": int(cell_id),
+            "raw_rollout_sha256": raw_hash,
+        },
+    }
+    cache_metadata = _dashboard_detail_fingerprint_payload(cache_record, request=request)
+    fingerprint = _dashboard_detail_fingerprint_from_payload(cache_metadata)
+    if not fingerprint:
+        return {"ok": False, "reason": "fingerprint_unavailable"}
+    bonus_maps = BonusMapStore(str(bonus_map_dir))
+    detail = score_record(
+        _scoreable_record(cache_record),
+        index=index,
+        bonus_maps=bonus_maps,
+        tracking_mode=tracking_mode,
+        near_threshold=near_threshold,
+        m_max=m_max,
+    )
+    write_dashboard_detail_cache(
+        conn,
+        cell_id=int(cell_id),
+        fingerprint=fingerprint,
+        detail=detail,
+        cache_metadata={**(cache_metadata or {}), "fingerprint": fingerprint},
+    )
+    return {"ok": True, "fingerprint": fingerprint, "detail": detail}
 
 
 def _raw_record_details(
@@ -1254,6 +1358,8 @@ def _db_where(
     experiment_id: str | None,
     provider_source: str | None,
     dataset: str | None,
+    model_api_name: str | None = None,
+    model_label: str | None = None,
 ) -> tuple[str, list[Any]]:
     where = []
     params: list[Any] = []
@@ -1266,6 +1372,12 @@ def _db_where(
     if dataset:
         where.append("c.dataset = ?")
         params.append(dataset)
+    if model_api_name:
+        where.append("c.model_api_name = ?")
+        params.append(model_api_name)
+    if model_label:
+        where.append("c.model_label = ?")
+        params.append(model_label)
     return ("WHERE " + " AND ".join(where) if where else ""), params
 
 
@@ -1274,6 +1386,8 @@ def _load_db_records(conn: sqlite3.Connection, request: DashboardRequest) -> tup
         experiment_id=request.experiment_id,
         provider_source=request.provider_source,
         dataset=request.dataset,
+        model_api_name=request.model_api_name,
+        model_label=request.model_label,
     )
     raw_columns = _sqlite_columns(conn, "raw_rollouts")
     cell_columns = _sqlite_columns(conn, "run_cells")
@@ -1371,6 +1485,222 @@ def _load_db_records(conn: sqlite3.Connection, request: DashboardRequest) -> tup
     return records, stored_details
 
 
+def _db_bonus_map_file_for_instance(
+    request: DashboardRequest,
+    *,
+    dataset: str | None,
+    instance_id: str,
+    cache: dict[tuple[str, str], Path | None],
+) -> Path | None:
+    key = (dataset or "", instance_id)
+    if key in cache:
+        return cache[key]
+    if request.bonus_map_dir is not None:
+        path = _bonus_map_file_for_instance(request.bonus_map_dir, instance_id)
+        cache[key] = path
+        return path
+    path = None
+    for root in _artifact_root_candidates(request):
+        candidate = root / "bonus_maps" / str(dataset or "")
+        if not candidate.is_dir():
+            continue
+        path = _bonus_map_file_for_instance(candidate, instance_id)
+        if path is not None:
+            break
+    cache[key] = path
+    return path
+
+
+def _validated_db_cached_detail(
+    row: sqlite3.Row,
+    record: dict[str, Any],
+    metrics: dict[str, Any],
+    request: DashboardRequest,
+    *,
+    bonus_file_cache: dict[tuple[str, str], Path | None],
+    bonus_hash_cache: dict[Path, str | None],
+) -> dict[str, Any] | None:
+    detail = metrics.get("detail")
+    metadata = metrics.get(DASHBOARD_DETAIL_CACHE_METADATA_KEY)
+    if not isinstance(detail, dict) or not detail or not isinstance(metadata, dict):
+        return None
+    if metadata.get("version") != DASHBOARD_DETAIL_CACHE_VERSION:
+        return None
+    raw_hash = metadata.get("raw_rollout_sha256")
+    if not raw_hash:
+        return None
+    bonus_map_file = _db_bonus_map_file_for_instance(
+        request,
+        dataset=str(record.get("dataset") or record.get("data_source") or "") or None,
+        instance_id=str(record.get("instance_id") or ""),
+        cache=bonus_file_cache,
+    )
+    if bonus_map_file is not None and bonus_map_file not in bonus_hash_cache:
+        bonus_hash_cache[bonus_map_file] = _sha256_file(bonus_map_file)
+    payload = {
+        "version": DASHBOARD_DETAIL_CACHE_VERSION,
+        "tracking_mode": request.tracking_mode,
+        "near_threshold": request.near_threshold,
+        "m_max": request.m_max,
+        "raw_rollout_sha256": raw_hash,
+        "bonus_map_path": str(bonus_map_file) if bonus_map_file else None,
+        "bonus_map_sha256": bonus_hash_cache.get(bonus_map_file) if bonus_map_file else None,
+    }
+    fingerprint = _dashboard_detail_fingerprint_from_payload(payload)
+    if not fingerprint or row["fingerprint"] != fingerprint:
+        return None
+    if metadata.get("fingerprint") and metadata.get("fingerprint") != fingerprint:
+        return None
+    return dict(detail)
+
+
+def _load_db_cached_details(conn: sqlite3.Connection, request: DashboardRequest) -> list[dict[str, Any]]:
+    where_sql, params = _db_where(
+        experiment_id=request.experiment_id,
+        provider_source=request.provider_source,
+        dataset=request.dataset,
+        model_api_name=request.model_api_name,
+        model_label=request.model_label,
+    )
+    cell_columns = _sqlite_columns(conn, "run_cells")
+    rollout_index_sql = "c.rollout_index" if "rollout_index" in cell_columns else "0 AS rollout_index"
+    rollout_index_order_sql = "c.rollout_index" if "rollout_index" in cell_columns else "rollout_index"
+    rollout_id_sql = "c.rollout_id" if "rollout_id" in cell_columns else "NULL AS rollout_id"
+    metric_columns = _sqlite_columns(conn, "quantitative_metrics")
+    fingerprint_sql = "q.fingerprint" if "fingerprint" in metric_columns else "NULL AS fingerprint"
+    include_raw = request.include_db_raw_details
+    raw_columns = _sqlite_columns(conn, "raw_rollouts") if include_raw else set()
+    raw_join_sql = "LEFT JOIN raw_rollouts r ON r.cell_id = c.id" if include_raw else ""
+    issue_sql = "r.issue_description" if include_raw and "issue_description" in raw_columns else "NULL AS issue_description"
+    patch_sql = "r.golden_patch" if include_raw and "golden_patch" in raw_columns else "NULL AS golden_patch"
+    raw_select_sql = (
+        """
+          r.messages_json,
+          r.trajectory_json,
+          r.p2a_step_traces_json,
+          r.final_response,
+          r.reward_json,
+          r.resolved,
+          r.token_usage_json,
+          r.cache_metrics_json,
+          NULL AS rollout_json,
+        """
+        if include_raw
+        else """
+          NULL AS messages_json,
+          NULL AS trajectory_json,
+          NULL AS p2a_step_traces_json,
+          NULL AS final_response,
+          NULL AS reward_json,
+          NULL AS resolved,
+          NULL AS token_usage_json,
+          NULL AS cache_metrics_json,
+          NULL AS rollout_json,
+        """
+    )
+    limit_sql = ""
+    query_params = list(params)
+    detail_where_sql = where_sql
+    if include_raw:
+        detail_where_sql = f"{detail_where_sql} AND" if detail_where_sql else "WHERE"
+        detail_where_sql = f"{detail_where_sql} c.status IN (?, ?)"
+        query_params.extend([DONE_STATUS, ERROR_STATUS])
+    if include_raw and request.detail_limit > 0:
+        limit_sql = "LIMIT ? OFFSET ?"
+        query_params.extend([int(request.detail_limit), max(0, int(request.detail_offset or 0))])
+    order_sql = "c.id" if include_raw else f"c.model_label, c.instance_id, {rollout_index_order_sql}"
+    rows = conn.execute(
+        f"""
+        SELECT
+          c.id AS cell_id,
+          c.experiment_id,
+          c.provider_source,
+          c.dataset,
+          c.model_api_name,
+          c.model_label,
+          c.instance_id,
+          {rollout_index_sql},
+          {rollout_id_sql},
+          c.status,
+          c.error,
+          c.artifact_rollouts,
+          c.artifact_details,
+          c.run_id,
+          {issue_sql},
+          {patch_sql},
+          {raw_select_sql}
+          {fingerprint_sql},
+          CASE
+            WHEN q.metrics_json LIKE '%"dashboard_detail_cache"%'
+            THEN q.metrics_json
+            ELSE NULL
+          END AS metrics_json
+        FROM run_cells c
+        {raw_join_sql}
+        LEFT JOIN quantitative_metrics q ON q.cell_id = c.id
+        {detail_where_sql}
+        ORDER BY {order_sql}
+        {limit_sql}
+        """,
+        query_params,
+    ).fetchall()
+
+    details: list[dict[str, Any]] = []
+    bonus_file_cache: dict[tuple[str, str], Path | None] = {}
+    bonus_hash_cache: dict[Path, str | None] = {}
+    for index, row in enumerate(rows):
+        record = _safe_json_loads(row["rollout_json"], {})
+        if not isinstance(record, dict):
+            record = {}
+        record = {
+            **record,
+            "cell_id": row["cell_id"],
+            "experiment_id": row["experiment_id"],
+            "provider_source": row["provider_source"],
+            "dataset": row["dataset"],
+            "data_source": row["dataset"],
+            "model": row["model_label"],
+            "model_label": row["model_label"],
+            "model_api_name": row["model_api_name"],
+            "instance_id": row["instance_id"],
+            "run_id": row["run_id"],
+            "rollout_index": row["rollout_index"],
+            "rollout_id": row["rollout_id"],
+            "artifact_rollouts": row["artifact_rollouts"],
+            "artifact_details": row["artifact_details"],
+            "status": row["status"],
+            "error": row["error"],
+            "issue_description": row["issue_description"],
+            "golden_patch": row["golden_patch"],
+        }
+        record.setdefault("messages", _safe_json_loads(row["messages_json"], []))
+        record.setdefault("trajectory", _safe_json_loads(row["trajectory_json"], []))
+        record.setdefault("p2a_step_traces", _safe_json_loads(row["p2a_step_traces_json"], []))
+        record.setdefault("response_text", row["final_response"] or "")
+        record.setdefault("reward", _safe_json_loads(row["reward_json"], None))
+        record.setdefault("resolved", bool(row["resolved"]) if row["resolved"] is not None else None)
+        record.setdefault("token_usage", _safe_json_loads(row["token_usage_json"], {}))
+        record.setdefault("metrics", _safe_json_loads(row["cache_metrics_json"], {}))
+        metrics = _safe_json_loads(row["metrics_json"], {})
+        detail = (
+            _validated_db_cached_detail(
+                row,
+                record,
+                metrics,
+                request,
+                bonus_file_cache=bonus_file_cache,
+                bonus_hash_cache=bonus_hash_cache,
+            )
+            if isinstance(metrics, dict)
+            else None
+        )
+        if detail is not None:
+            details.append(_enrich_detail_from_record(detail, record, request))
+        else:
+            details.append(_enrich_detail_from_record(_deferred_dashboard_detail(record, index=index), record, request))
+    return details
+
+
 def _tail(path: Path, max_chars: int = 60_000) -> str:
     try:
         size = path.stat().st_size
@@ -1433,6 +1763,8 @@ def _scan_db_artifact_runs(conn: sqlite3.Connection, request: DashboardRequest) 
         experiment_id=request.experiment_id,
         provider_source=request.provider_source,
         dataset=request.dataset,
+        model_api_name=request.model_api_name,
+        model_label=request.model_label,
     )
     rows = conn.execute(
         f"""
@@ -2132,6 +2464,18 @@ def _items_by_instance(items: Iterable[dict[str, Any]]) -> dict[str, list[dict[s
     return out
 
 
+def _apply_rollout_count_fields(row: dict[str, Any], items: list[dict[str, Any]]) -> None:
+    if not items:
+        return
+    by_instance = _items_by_instance(items)
+    success_by_instance = _items_by_instance([item for item in items if not (item.get("error") or item.get("system_error"))])
+    row["rollouts_per_instance"] = max(1, max(_rollout_index(item) for item in items) + 1)
+    row["target"] = len(by_instance)
+    row["target_rollouts"] = len(items)
+    row["done"] = len(success_by_instance)
+    row["done_rollouts"] = sum(len(values) for values in success_by_instance.values())
+
+
 def _apply_avg_at_metrics(row: dict[str, Any], items: list[dict[str, Any]]) -> None:
     if not items:
         return
@@ -2141,8 +2485,6 @@ def _apply_avg_at_metrics(row: dict[str, Any], items: list[dict[str, Any]]) -> N
     for k in range(1, rollout_n + 1):
         pass_at[str(k)] = _rate(any(item.get("resolved") for item in values[:k]) for values in by_instance.values() if values[:k])
     row["rollouts_per_instance"] = rollout_n
-    row["target_rollouts"] = len(items)
-    row["done_rollouts"] = len(items)
     row["pass_at"] = pass_at
     row["pass_at_n"] = pass_at.get(str(rollout_n))
     row["avg_at"] = {}
@@ -2167,7 +2509,7 @@ def _apply_avg_at_metrics(row: dict[str, Any], items: list[dict[str, Any]]) -> N
             row[f"{key}_std"] = std
 
 
-def _detail_model_metrics(details: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _detail_model_metrics(details: list[dict[str, Any]], *, include_avg_at: bool = True) -> list[dict[str, Any]]:
     for detail in details:
         _sync_path_aliases(detail)
     groups: dict[tuple[str, str, str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -2184,6 +2526,8 @@ def _detail_model_metrics(details: list[dict[str, Any]]) -> list[dict[str, Any]]
 
     rows = []
     for (experiment_key, source_kind, experiment_id, provider_source, dataset, model_label), items in sorted(groups.items()):
+        error_count = sum(1 for item in items if item.get("error") or item.get("system_error"))
+        success_items = [item for item in items if not (item.get("error") or item.get("system_error"))]
         path_metric_items = [item for item in items if _is_path_metric_detail(item)]
         order_metric_items = [item for item in items if _is_order_metric_detail(item)]
         order_items = [item for item in order_metric_items if item.get("order_defined") is True]
@@ -2206,8 +2550,10 @@ def _detail_model_metrics(details: list[dict[str, Any]]) -> list[dict[str, Any]]
             "model_label": model_label,
             "run_step": items[0].get("run_step"),
             "target": len(items),
-            "done": len(items),
-            "errors": sum(1 for item in items if item.get("error") or item.get("system_error")),
+            "target_rollouts": len(items),
+            "done": len(success_items),
+            "done_rollouts": len(success_items),
+            "errors": error_count,
             "pending": 0,
             "resolved_rate": _rate(item.get("resolved") for item in items),
             "reward_rate": _avg(item.get("reward") for item in items),
@@ -2291,18 +2637,20 @@ def _detail_model_metrics(details: list[dict[str, Any]]) -> list[dict[str, Any]]
             "path_pattern_flags": _path_pattern_distribution(items, PATH_PATTERN_KEYS),
             "chain_bad_patterns": _path_pattern_distribution(items, CHAIN_BAD_PATTERN_KEYS),
         }
-        _apply_avg_at_metrics(row, items)
+        _apply_rollout_count_fields(row, items)
+        if include_avg_at:
+            _apply_avg_at_metrics(row, items)
         rows.append(row)
     return rows
 
 
-def _case_filter_model_metrics(details: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def _case_filter_model_metrics(details: list[dict[str, Any]], *, include_avg_at: bool = True) -> dict[str, list[dict[str, Any]]]:
     out: dict[str, list[dict[str, Any]]] = {}
     for mask in range(1, 1 << len(CASE_FILTER_BUCKETS)):
         buckets = tuple(bucket for index, bucket in enumerate(CASE_FILTER_BUCKETS) if mask & (1 << index))
         key = ",".join(buckets)
         filtered = [detail for detail in details if _case_filter_bucket(detail) in buckets]
-        out[key] = _detail_model_metrics(filtered) if filtered else []
+        out[key] = _detail_model_metrics(filtered, include_avg_at=include_avg_at) if filtered else []
     return out
 
 
@@ -2335,7 +2683,13 @@ def _merge_model_metrics(base_rows: list[dict[str, Any]], detail_rows: list[dict
     for row in detail_rows:
         current = merged.get(row["eval_cell_key"], {})
         merged_row = dict(row)
-        for key in ("target", "done", "errors", "pending", "selected_scope"):
+        for key, value in current.items():
+            if merged_row.get(key) is None:
+                merged_row[key] = value
+        for key in ("target", "target_rollouts", "done", "done_rollouts", "errors", "pending", "selected_scope", "rollouts_per_instance"):
+            if current.get(key) is not None:
+                merged_row[key] = current[key]
+        for key in ("detail_cache_ready_rollouts", "detail_cache_pending_rollouts"):
             if current.get(key) is not None:
                 merged_row[key] = current[key]
         merged[row["eval_cell_key"]] = _normalize_model_row(merged_row)
@@ -2345,15 +2699,34 @@ def _merge_model_metrics(base_rows: list[dict[str, Any]], detail_rows: list[dict
 def _eval_cell_registry(model_metrics: list[dict[str, Any]], details: list[dict[str, Any]]) -> list[dict[str, Any]]:
     detail_counts: dict[str, int] = defaultdict(int)
     trace_counts: dict[str, int] = defaultdict(int)
+    detail_error_counts: dict[str, int] = defaultdict(int)
+    cache_pending_counts: dict[str, int] = defaultdict(int)
     for detail in details:
         key = _eval_cell_key(detail)
         detail_counts[key] += 1
+        if detail.get("error") or detail.get("system_error"):
+            detail_error_counts[key] += 1
+        if detail.get("dashboard_cache_pending"):
+            cache_pending_counts[key] += 1
         if detail.get("raw_available") or detail.get("step_details"):
             trace_counts[key] += 1
 
     eval_cells = []
     for row in model_metrics:
         key = _eval_cell_key(row)
+        detail_count = detail_counts.get(key, 0)
+        errors = int(row.get("errors") or detail_error_counts.get(key, 0) or 0)
+        target_rollouts = row.get("target_rollouts") if row.get("target_rollouts") is not None else detail_count
+        target_instances = row.get("target")
+        rollouts_per_instance = row.get("rollouts_per_instance")
+        if rollouts_per_instance is None and target_instances:
+            rollouts_per_instance = max(1, int(round(float(target_rollouts or 0) / float(target_instances))))
+        done_rollouts = row.get("done_rollouts")
+        if done_rollouts is None:
+            done_rollouts = max(0, detail_count - errors - int(row.get("pending") or 0))
+        cache_pending = row.get("detail_cache_pending_rollouts")
+        if cache_pending is None:
+            cache_pending = cache_pending_counts.get(key, 0)
         eval_cells.append(
             {
                 "eval_cell_key": key,
@@ -2366,11 +2739,16 @@ def _eval_cell_registry(model_metrics: list[dict[str, Any]], details: list[dict[
                 "model_label": row.get("model_label"),
                 "run_step": row.get("run_step"),
                 "target": row.get("target"),
+                "target_rollouts": target_rollouts,
+                "rollouts_per_instance": rollouts_per_instance,
                 "done": row.get("done"),
-                "errors": row.get("errors"),
+                "done_rollouts": done_rollouts,
+                "errors": errors,
                 "pending": row.get("pending"),
+                "cache_ready": row.get("detail_cache_ready_rollouts"),
+                "cache_pending": cache_pending,
                 "selected_scope": row.get("selected_scope"),
-                "detail_count": detail_counts.get(key, 0),
+                "detail_count": detail_count,
                 "trajectory_count": trace_counts.get(key, 0),
                 "resolved_rate": row.get("resolved_rate"),
                 "root_hit_rate": row.get("root_hit_rate") or row.get("ground_truth_hit_rate"),
@@ -2391,6 +2769,8 @@ def _dataset_registry(
     cells: dict[str, set[str]] = defaultdict(set)
     models: dict[str, set[str]] = defaultdict(set)
     source_kinds: dict[str, set[str]] = defaultdict(set)
+    target_instances: dict[str, int] = defaultdict(int)
+    target_rollouts: dict[str, int] = defaultdict(int)
     for detail in details:
         dataset = _dataset_name(detail)
         trajectories[dataset] += 1
@@ -2406,11 +2786,53 @@ def _dataset_registry(
             models[dataset].add(str(cell.get("model_label")))
         if cell.get("source_kind"):
             source_kinds[dataset].add(str(cell.get("source_kind")))
+        target = _number(cell.get("target"))
+        if target is not None:
+            target_instances[dataset] = max(target_instances[dataset], int(target))
+        rollout_total = _number(cell.get("target_rollouts"))
+        if rollout_total is not None:
+            target_rollouts[dataset] += int(rollout_total)
     dataset_names = sorted(set(distributions_by_dataset) | set(cells) | set(trajectories))
     return [
         {
             "dataset": dataset,
-            "n_instances": (distributions_by_dataset.get(dataset) or {}).get("n_instances", 0),
+            "n_instances": (distributions_by_dataset.get(dataset) or {}).get("n_instances", 0) or target_instances.get(dataset, 0),
+            "n_eval_cells": len(cells.get(dataset, set())),
+            "n_trajectories": trajectories.get(dataset, 0) or target_rollouts.get(dataset, 0),
+            "models": sorted(models.get(dataset, set())),
+            "source_kinds": sorted(source_kinds.get(dataset, set())),
+        }
+        for dataset in dataset_names
+    ]
+
+
+def _dataset_stats_from_details(details: list[dict[str, Any]], model_metrics: list[dict[str, Any]]) -> dict[str, Any]:
+    trajectories: dict[str, int] = defaultdict(int)
+    instances: dict[str, set[str]] = defaultdict(set)
+    cells: dict[str, set[str]] = defaultdict(set)
+    models: dict[str, set[str]] = defaultdict(set)
+    source_kinds: dict[str, set[str]] = defaultdict(set)
+    for detail in details:
+        dataset = _dataset_name(detail)
+        trajectories[dataset] += 1
+        instances[dataset].add(_instance_key(detail))
+        cells[dataset].add(_eval_cell_key(detail))
+        if detail.get("model_label"):
+            models[dataset].add(str(detail.get("model_label")))
+        if detail.get("source_kind"):
+            source_kinds[dataset].add(str(detail.get("source_kind")))
+    for row in model_metrics:
+        dataset = _dataset_name(row)
+        cells[dataset].add(_eval_cell_key(row))
+        if row.get("model_label"):
+            models[dataset].add(str(row.get("model_label")))
+        if row.get("source_kind"):
+            source_kinds[dataset].add(str(row.get("source_kind")))
+    dataset_names = sorted(set(trajectories) | set(instances) | set(cells))
+    rows = [
+        {
+            "dataset": dataset,
+            "n_instances": len(instances.get(dataset, set())),
             "n_eval_cells": len(cells.get(dataset, set())),
             "n_trajectories": trajectories.get(dataset, 0),
             "models": sorted(models.get(dataset, set())),
@@ -2418,6 +2840,28 @@ def _dataset_registry(
         }
         for dataset in dataset_names
     ]
+    return {
+        "datasets": rows,
+        "totals": {
+            "n_datasets": len(rows),
+            "n_instances": sum(row["n_instances"] for row in rows),
+            "n_eval_cells": sum(row["n_eval_cells"] for row in rows),
+            "n_trajectories": sum(row["n_trajectories"] for row in rows),
+        },
+    }
+
+
+def _case_filter_dataset_stats(
+    details: list[dict[str, Any]],
+    case_filter_model_metrics: dict[str, list[dict[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for mask in range(1, 1 << len(CASE_FILTER_BUCKETS)):
+        buckets = tuple(bucket for index, bucket in enumerate(CASE_FILTER_BUCKETS) if mask & (1 << index))
+        key = ",".join(buckets)
+        filtered = [detail for detail in details if _case_filter_bucket(detail) in buckets]
+        out[key] = _dataset_stats_from_details(filtered, case_filter_model_metrics.get(key, []))
+    return out
 
 
 def build_dashboard_snapshot(request: DashboardRequest) -> dict[str, Any]:
@@ -2437,15 +2881,26 @@ def build_dashboard_snapshot(request: DashboardRequest) -> dict[str, Any]:
                     experiment_id=request.experiment_id,
                     provider_source=request.provider_source,
                     dataset=request.dataset,
+                    model_api_name=request.model_api_name,
+                    model_label=request.model_label,
+                    include_detail_metrics=not (request.defer_db_scoring and not request.include_db_raw_details),
+                    include_raw_trace_fallback=not (request.defer_db_scoring and not request.include_db_raw_details),
                 )
-                db_records, db_details = _load_db_records(conn, request)
-                raw_records.extend(db_records)
-                stored_db_details.extend(db_details)
+                if request.defer_db_scoring:
+                    if request.include_db_raw_details:
+                        stored_db_details.extend(_load_db_cached_details(conn, request))
+                else:
+                    db_records, db_details = _load_db_records(conn, request)
+                    raw_records.extend(db_records)
+                    stored_db_details.extend(db_details)
                 runs.extend(_scan_db_artifact_runs(conn, request))
             finally:
                 conn.close()
 
-    bonus_map_dirs = _effective_bonus_map_dirs(request, raw_records, [*details, *stored_db_details])
+    if request.defer_db_scoring and request.db_path:
+        bonus_map_dirs = {}
+    else:
+        bonus_map_dirs = _effective_bonus_map_dirs(request, raw_records, [*details, *stored_db_details])
     scored_datasets: set[str] = set()
     if raw_records:
         scored_details, scored_datasets = _score_records_by_bonus_map_dir(
@@ -2466,8 +2921,9 @@ def build_dashboard_snapshot(request: DashboardRequest) -> dict[str, Any]:
 
     if details:
         details = _normalize_details(details)
-        _enrich_details_from_dataset_parquet(details, request)
-        _enrich_details_from_bonus_map_dirs(details, bonus_map_dirs)
+        if not request.defer_db_scoring:
+            _enrich_details_from_dataset_parquet(details, request)
+            _enrich_details_from_bonus_map_dirs(details, bonus_map_dirs)
         summary = _finalize_summary(summarize(
             details,
             source=_summary_source(request),
@@ -2486,11 +2942,13 @@ def build_dashboard_snapshot(request: DashboardRequest) -> dict[str, Any]:
         summary = _empty_summary(request)
         summary["trends"] = []
 
-    detail_model_metrics = _detail_model_metrics(details)
+    include_avg_at = not (request.defer_db_scoring and request.db_path)
+    detail_model_metrics = _detail_model_metrics(details, include_avg_at=include_avg_at)
     model_metrics = _merge_model_metrics(base_model_metrics, detail_model_metrics)
     path_metric_details = [detail for detail in details if _is_path_metric_detail(detail)]
-    path_metric_model_metrics = _detail_model_metrics(path_metric_details)
-    case_filter_model_metrics = _case_filter_model_metrics(details)
+    path_metric_model_metrics = _detail_model_metrics(path_metric_details, include_avg_at=include_avg_at)
+    case_filter_model_metrics = _case_filter_model_metrics(details, include_avg_at=include_avg_at)
+    case_filter_dataset_stats = _case_filter_dataset_stats(details, case_filter_model_metrics)
     eval_cells = _eval_cell_registry(model_metrics, details)
     distributions_by_dataset = _dataset_distributions(details)
     datasets = _dataset_registry(details, eval_cells, distributions_by_dataset)
@@ -2511,6 +2969,8 @@ def build_dashboard_snapshot(request: DashboardRequest) -> dict[str, Any]:
             "experiment_id": request.experiment_id,
             "provider_source": request.provider_source,
             "dataset": request.dataset,
+            "model_api_name": request.model_api_name,
+            "model_label": request.model_label,
         },
         "sources": _source_list_with_bonus(request, bonus_map_dirs),
         "datasets": datasets,
@@ -2521,6 +2981,7 @@ def build_dashboard_snapshot(request: DashboardRequest) -> dict[str, Any]:
         "path_metric_model_metrics": path_metric_model_metrics,
         "dynamic_traceable_model_metrics": path_metric_model_metrics,
         "case_filter_model_metrics": case_filter_model_metrics,
+        "case_filter_dataset_stats": case_filter_dataset_stats,
         "runs": sorted(deduped_runs.values(), key=lambda run: (str(run.get("status")), str(run.get("run_id")))),
         "details": details[: request.detail_limit],
         "detail_count": len(details),

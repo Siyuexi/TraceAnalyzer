@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hmac
 import json
 import mimetypes
@@ -13,11 +14,12 @@ import socket
 import sqlite3
 import threading
 import time
+from collections import deque
 from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from p2a.dashboard_adapter import (
@@ -28,17 +30,23 @@ from p2a.dashboard_adapter import (
     snapshot_to_json,
 )
 from p2a.eval_cache import (
-    backup_path_for_delete,
+    aggregate_model_metrics,
     connect,
     connect_readonly,
     count_run_data_targets,
-    delete_confirmation_phrase,
     delete_run_data_targets,
     init_db,
+    json_dumps,
+    json_loads,
+    utc_now,
 )
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "dashboard_static"
+SRC_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_EVAL_DB = SRC_ROOT / "data" / "evals" / "traces.sqlite"
+DETAIL_RESPONSE_DROP_KEYS = {"messages", "trajectory"}
+DETAIL_STEP_DROP_KEYS = {"think", "tool_results", "tool_calls", "tool_args"}
 
 
 def _read_static(name: str) -> bytes:
@@ -183,25 +191,114 @@ def _snapshot_change_token(request: DashboardRequest) -> tuple[Any, ...]:
                     request.experiment_id,
                     request.provider_source,
                     request.dataset,
+                    request.model_api_name,
+                    request.model_label,
                 ))
             finally:
                 conn.close()
         except (FileNotFoundError, sqlite3.Error):
-            parts.append(("db", str(request.db_path), "unavailable", request.experiment_id, request.provider_source, request.dataset))
+            parts.append((
+                "db",
+                str(request.db_path),
+                "unavailable",
+                request.experiment_id,
+                request.provider_source,
+                request.dataset,
+                request.model_api_name,
+                request.model_label,
+            ))
     parts.append(("bonus_maps", _bonus_map_change_token(request)))
-    parts.append(("params", request.tracking_mode, request.near_threshold, request.m_max, request.detail_limit))
+    parts.append((
+        "params",
+        request.tracking_mode,
+        request.near_threshold,
+        request.m_max,
+        request.detail_limit,
+        request.detail_offset,
+        request.include_db_raw_details,
+    ))
     return tuple(parts)
 
 
-def _backup_sqlite_database(db_path: Path, backup_path: Path) -> None:
-    backup_path.parent.mkdir(parents=True, exist_ok=True)
-    source = connect_readonly(db_path, timeout=30.0)
-    destination = sqlite3.connect(backup_path)
-    try:
-        source.backup(destination)
-    finally:
-        destination.close()
-        source.close()
+def _clean_admin_target(target: dict[str, Any], *, allow_empty: bool = False) -> dict[str, str]:
+    cleaned = {
+        "experiment_id": str(target.get("experiment_id") or "").strip(),
+        "provider_source": str(target.get("provider_source") or "").strip(),
+        "dataset": str(target.get("dataset") or "").strip(),
+        "model_api_name": str(target.get("model_api_name") or "").strip(),
+        "model_label": str(target.get("model_label") or "").strip(),
+    }
+    if not allow_empty and not any(cleaned.values()):
+        raise ValueError("target must include experiment_id, provider_source, dataset, model_api_name, or model_label")
+    return cleaned
+
+
+def _request_rebuild_scope(request: DashboardRequest) -> dict[str, str]:
+    return {
+        "experiment_id": request.experiment_id or "",
+        "provider_source": request.provider_source or "",
+        "dataset": request.dataset or "",
+        "model_api_name": request.model_api_name or "",
+        "model_label": request.model_label or "",
+    }
+
+
+def _target_where(cleaned: dict[str, str]) -> tuple[str, list[Any]]:
+    where = []
+    params: list[Any] = []
+    for field, value in cleaned.items():
+        if value:
+            where.append(f"c.{field} = ?")
+            params.append(value)
+    return ("WHERE " + " AND ".join(where) if where else ""), params
+
+
+def _clear_dashboard_detail_cache_targets(
+    conn: sqlite3.Connection,
+    targets: list[dict[str, Any]],
+    *,
+    request_scope: dict[str, str] | None = None,
+) -> dict[str, int]:
+    cell_ids: set[int] = set()
+    cache_entry_ids: set[int] = set()
+    scoped_targets = targets or [request_scope or {}]
+    for target in scoped_targets:
+        cleaned = _clean_admin_target(target, allow_empty=not targets)
+        where_sql, params = _target_where(cleaned)
+        for row in conn.execute(
+            f"""
+            SELECT c.id AS cell_id
+            FROM run_cells c
+            {where_sql}
+            """,
+            params,
+        ).fetchall():
+            cell_ids.add(int(row["cell_id"]))
+    now = utc_now()
+    for cell_id in sorted(cell_ids):
+        row = conn.execute("SELECT metrics_json FROM quantitative_metrics WHERE cell_id = ?", (cell_id,)).fetchone()
+        if row is None:
+            continue
+        metrics = json_loads(row["metrics_json"], {})
+        if not isinstance(metrics, dict):
+            metrics = {}
+        had_detail = "detail" in metrics
+        metrics.pop("detail", None)
+        metrics.pop("dashboard_detail_cache", None)
+        conn.execute(
+            """
+            UPDATE quantitative_metrics
+            SET fingerprint = NULL,
+                metrics_json = ?,
+                updated_at = ?
+            WHERE cell_id = ?
+            """,
+            (json_dumps(metrics), now, cell_id),
+        )
+        if had_detail:
+            cache_entry_ids.add(cell_id)
+    conn.commit()
+    return {"run_cells": len(cell_ids), "detail_cache_entries": len(cache_entry_ids)}
 
 
 def _load_admin_password(path: Path | None) -> str | None:
@@ -220,6 +317,7 @@ def _load_admin_password(path: Path | None) -> str | None:
     if env_file:
         candidates.append(Path(env_file))
     candidates.append(Path.cwd() / ".secrets" / "dashboard_admin.txt")
+    candidates.append(Path(__file__).resolve().parents[1] / ".secrets" / "dashboard_admin.txt")
     for candidate in candidates:
         try:
             value = candidate.expanduser().read_text(encoding="utf-8").strip()
@@ -230,10 +328,35 @@ def _load_admin_password(path: Path | None) -> str | None:
     return None
 
 
-def make_handler(request: DashboardRequest, *, admin_password: str | None = None) -> type[BaseHTTPRequestHandler]:
+def make_handler(
+    request: DashboardRequest,
+    *,
+    admin_password: str | Callable[[], str | None] | None = None,
+) -> type[BaseHTTPRequestHandler]:
     snapshot_cache: dict[str, Any] = {"payload": None, "change_token": None}
     snapshot_lock = threading.Lock()
     admin_tokens: set[str] = set()
+    rebuild_status_lock = threading.Lock()
+    rebuild_status: dict[str, Any] = {
+        "queued": 0,
+        "running": 0,
+        "phase": "idle",
+        "last_queued_at": None,
+        "last_started_at": None,
+        "last_finished_at": None,
+        "last_error": None,
+        "last_counts": None,
+        "last_scope": None,
+        "current_job_id": None,
+    }
+    rebuild_queue_lock = threading.Lock()
+    rebuild_queue: deque[dict[str, Any]] = deque()
+    rebuild_worker_state: dict[str, Any] = {"running": False, "next_job_id": 0}
+
+    def current_admin_password() -> str | None:
+        value = admin_password() if callable(admin_password) else admin_password
+        value = value.strip() if isinstance(value, str) else ""
+        return value or None
 
     class P2ADashboardHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -247,11 +370,20 @@ def make_handler(request: DashboardRequest, *, admin_password: str | None = None
                 self._send_json({"ok": True, "schema_version": "p2a_unified_dashboard_v1"})
                 return
             if parsed.path == "/api/auth/status":
-                self._send_json({"ok": True, "admin_enabled": bool(admin_password), "admin": self._is_admin()})
+                self._send_json({"ok": True, "admin_enabled": bool(current_admin_password()), "admin": self._is_admin()})
+                return
+            if parsed.path == "/api/rebuild/status":
+                self._handle_rebuild_status()
                 return
             if parsed.path == "/api/snapshot":
                 params = parse_qs(parsed.query)
                 self._send_snapshot(force=params.get("force", [""])[0].lower() in {"1", "true", "yes"})
+                return
+            if parsed.path == "/api/details":
+                self._send_details(parse_qs(parsed.query))
+                return
+            if parsed.path == "/api/metrics":
+                self._send_metrics(parse_qs(parsed.query))
                 return
             if parsed.path == "/api/log":
                 params = parse_qs(parsed.query)
@@ -287,6 +419,9 @@ def make_handler(request: DashboardRequest, *, admin_password: str | None = None
             if parsed.path == "/api/delete":
                 self._handle_delete()
                 return
+            if parsed.path == "/api/rebuild":
+                self._handle_rebuild()
+                return
             self.send_error(HTTPStatus.NOT_FOUND)
 
         def log_message(self, format: str, *args: Any) -> None:
@@ -313,22 +448,132 @@ def make_handler(request: DashboardRequest, *, admin_password: str | None = None
                 return
             self._send_json(payload)
 
+        def _send_details(self, params: dict[str, list[str]]) -> None:
+            def get(name: str, current: str | None) -> str | None:
+                value = params.get(name, [""])[0].strip()
+                return value or current
+
+            def get_int(name: str, current: int) -> int:
+                try:
+                    return max(0, int(params.get(name, [str(current)])[0]))
+                except (TypeError, ValueError):
+                    return current
+
+            try:
+                limit = min(get_int("limit", min(max(request.detail_limit, 1), 5)), 5)
+                offset = get_int("offset", 0)
+                detail_request = replace(
+                    request,
+                    experiment_id=get("experiment_id", request.experiment_id),
+                    provider_source=get("provider_source", request.provider_source),
+                    dataset=get("dataset", request.dataset),
+                    model_api_name=get("model_api_name", request.model_api_name),
+                    model_label=get("model_label", request.model_label),
+                    defer_db_scoring=True,
+                    include_db_raw_details=True,
+                    detail_limit=limit,
+                    detail_offset=offset,
+                )
+                payload = build_dashboard_snapshot(detail_request)
+            except sqlite3.OperationalError as exc:
+                status = HTTPStatus.SERVICE_UNAVAILABLE if "locked" in str(exc).lower() else HTTPStatus.INTERNAL_SERVER_ERROR
+                self._send_json(
+                    {"ok": False, "error": "database_locked" if status == HTTPStatus.SERVICE_UNAVAILABLE else "sqlite_error", "detail": str(exc)},
+                    status=status,
+                )
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "details": self._compact_details(payload.get("details", [])),
+                    "detail_count": payload.get("detail_count", 0),
+                    "offset": offset,
+                    "limit": limit,
+                    "eval_cells": payload.get("eval_cells", []),
+                    "model_metrics": payload.get("model_metrics", []),
+                }
+            )
+
+        def _send_metrics(self, params: dict[str, list[str]]) -> None:
+            def get(name: str, current: str | None) -> str | None:
+                value = params.get(name, [""])[0].strip()
+                return value or current
+
+            if request.db_path is None:
+                self._send_json({"ok": False, "error": "db_required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            conn = None
+            try:
+                conn = connect_readonly(request.db_path)
+                rows = aggregate_model_metrics(
+                    conn,
+                    experiment_id=get("experiment_id", request.experiment_id),
+                    provider_source=get("provider_source", request.provider_source),
+                    dataset=get("dataset", request.dataset),
+                    model_api_name=get("model_api_name", request.model_api_name),
+                    model_label=get("model_label", request.model_label),
+                    include_detail_metrics=True,
+                    include_raw_trace_fallback=False,
+                )
+            except sqlite3.OperationalError as exc:
+                status = HTTPStatus.SERVICE_UNAVAILABLE if "locked" in str(exc).lower() else HTTPStatus.INTERNAL_SERVER_ERROR
+                self._send_json(
+                    {"ok": False, "error": "database_locked" if status == HTTPStatus.SERVICE_UNAVAILABLE else "sqlite_error", "detail": str(exc)},
+                    status=status,
+                )
+                return
+            finally:
+                if conn is not None:
+                    conn.close()
+            self._send_json({"ok": True, "model_metrics": rows})
+
+        def _compact_details(self, details: Any) -> list[dict[str, Any]]:
+            if not isinstance(details, list):
+                return []
+            compacted: list[dict[str, Any]] = []
+            for detail_value in details:
+                if not isinstance(detail_value, dict):
+                    continue
+                detail = {key: value for key, value in detail_value.items() if key not in DETAIL_RESPONSE_DROP_KEYS}
+                steps = detail.get("step_inspection")
+                if isinstance(steps, list):
+                    compact_steps = []
+                    for step_value in steps:
+                        if isinstance(step_value, dict):
+                            compact_steps.append(
+                                {key: value for key, value in step_value.items() if key not in DETAIL_STEP_DROP_KEYS}
+                            )
+                    detail["step_inspection"] = compact_steps
+                compacted.append(detail)
+            return compacted
+
         def _build_or_cached_snapshot(self, *, force: bool = False) -> dict[str, Any]:
             change_token = _snapshot_change_token(request)
             cached = snapshot_cache.get("payload")
             if cached is not None and not force and snapshot_cache.get("change_token") == change_token:
                 return cached
             if request.db_path is not None and not force:
-                started = self._start_background_snapshot_build()
-                if cached is not None:
-                    reason = "snapshot_refresh_started" if started else "snapshot_build_in_progress"
-                    return {**cached, "snapshot_status": {"stale": True, "reason": reason}}
-                deferred = build_dashboard_snapshot(replace(request, defer_db_scoring=True))
-                deferred["snapshot_status"] = {
-                    "stale": False,
-                    "reason": "snapshot_warming" if started else "snapshot_build_in_progress",
-                }
-                return deferred
+                acquired = snapshot_lock.acquire(blocking=cached is None)
+                if not acquired:
+                    return {**cached, "snapshot_status": {"stale": True, "reason": "snapshot_build_in_progress"}}
+                try:
+                    current = snapshot_cache.get("payload")
+                    if current is not None and snapshot_cache.get("change_token") == _snapshot_change_token(request):
+                        return current
+                    deferred = build_dashboard_snapshot(replace(request, defer_db_scoring=True, include_db_raw_details=False))
+                    deferred["snapshot_status"] = {
+                        "stale": False,
+                        "reason": "snapshot_deferred",
+                    }
+                    snapshot_cache["payload"] = deferred
+                    snapshot_cache["change_token"] = _snapshot_change_token(request)
+                    return deferred
+                except sqlite3.OperationalError as exc:
+                    if "locked" in str(exc).lower() and cached is not None:
+                        return {**cached, "snapshot_status": {"stale": True, "reason": "database_locked", "detail": str(exc)}}
+                    raise
+                finally:
+                    snapshot_lock.release()
             acquired = snapshot_lock.acquire(blocking=cached is None)
             if not acquired:
                 return {**cached, "snapshot_status": {"stale": True, "reason": "snapshot_build_in_progress"}}
@@ -348,22 +593,114 @@ def make_handler(request: DashboardRequest, *, admin_password: str | None = None
             finally:
                 snapshot_lock.release()
 
-        def _start_background_snapshot_build(self) -> bool:
-            if not snapshot_lock.acquire(blocking=False):
-                return False
+        def _rebuild_status_payload(self) -> dict[str, Any]:
+            with rebuild_status_lock:
+                payload = dict(rebuild_status)
+            payload["active"] = int(payload.get("queued") or 0) + int(payload.get("running") or 0) > 0
+            return payload
 
-            def worker() -> None:
+        def _handle_rebuild_status(self) -> None:
+            if not self._require_admin():
+                return
+            self._send_json({"ok": True, "status": self._rebuild_status_payload()})
+
+        def _enqueue_rebuild(
+            self,
+            warm_request: DashboardRequest,
+            targets: list[dict[str, Any]],
+            *,
+            request_scope: dict[str, str],
+            store_payload: bool = False,
+        ) -> dict[str, Any]:
+            job = {
+                "warm_request": warm_request,
+                "targets": [dict(target) for target in targets],
+                "request_scope": dict(request_scope),
+                "scope": _request_rebuild_scope(warm_request),
+                "store_payload": store_payload,
+                "queued_at": utc_now(),
+            }
+            should_start = False
+            with rebuild_queue_lock:
+                rebuild_worker_state["next_job_id"] = int(rebuild_worker_state.get("next_job_id") or 0) + 1
+                job["id"] = rebuild_worker_state["next_job_id"]
+                rebuild_queue.append(job)
+                queued = len(rebuild_queue)
+                if not rebuild_worker_state.get("running"):
+                    rebuild_worker_state["running"] = True
+                    should_start = True
+            with rebuild_status_lock:
+                rebuild_status["queued"] = queued
+                rebuild_status["phase"] = "queued"
+                rebuild_status["last_queued_at"] = job["queued_at"]
+                rebuild_status["last_scope"] = dict(job["scope"])
+                if int(rebuild_status.get("running") or 0) == 0:
+                    rebuild_status["last_counts"] = None
+            if should_start:
+                threading.Thread(target=self._run_rebuild_queue, daemon=True).start()
+            return self._rebuild_status_payload()
+
+        def _run_rebuild_queue(self) -> None:
+            while True:
+                with rebuild_queue_lock:
+                    if not rebuild_queue:
+                        rebuild_worker_state["running"] = False
+                        with rebuild_status_lock:
+                            rebuild_status["queued"] = 0
+                            rebuild_status["running"] = 0
+                            rebuild_status["current_job_id"] = None
+                            if rebuild_status.get("phase") != "failed":
+                                rebuild_status["phase"] = "idle"
+                        return
+                    job = rebuild_queue.popleft()
+                    queued = len(rebuild_queue)
+                with rebuild_status_lock:
+                    rebuild_status["queued"] = queued
+                    rebuild_status["running"] = 1
+                    rebuild_status["phase"] = "waiting"
+                    rebuild_status["last_started_at"] = utc_now()
+                    rebuild_status["last_scope"] = dict(job["scope"])
+                    rebuild_status["current_job_id"] = job["id"]
+                    rebuild_status["last_error"] = None
+                error: str | None = None
+                counts: dict[str, int] | None = None
+                snapshot_lock.acquire()
                 try:
-                    payload = build_dashboard_snapshot(request)
-                    snapshot_cache["payload"] = payload
-                    snapshot_cache["change_token"] = _snapshot_change_token(request)
-                except sqlite3.OperationalError:
-                    pass
+                    with rebuild_status_lock:
+                        rebuild_status["phase"] = "clearing"
+                    snapshot_cache["payload"] = None
+                    snapshot_cache["change_token"] = None
+                    writer = connect(request.db_path, timeout=30.0)
+                    try:
+                        init_db(writer)
+                        counts = _clear_dashboard_detail_cache_targets(
+                            writer,
+                            job["targets"],
+                            request_scope=job["request_scope"],
+                        )
+                    finally:
+                        writer.close()
+                    with rebuild_status_lock:
+                        rebuild_status["last_counts"] = dict(counts)
+                        rebuild_status["phase"] = "warming"
+                    payload = build_dashboard_snapshot(job["warm_request"])
+                    if job["store_payload"]:
+                        snapshot_cache["payload"] = payload
+                        snapshot_cache["change_token"] = _snapshot_change_token(request)
+                except Exception as exc:
+                    error = str(exc)
+                    with rebuild_status_lock:
+                        rebuild_status["last_error"] = error
                 finally:
                     snapshot_lock.release()
-
-            threading.Thread(target=worker, daemon=True).start()
-            return True
+                    with rebuild_queue_lock:
+                        queued = len(rebuild_queue)
+                    with rebuild_status_lock:
+                        rebuild_status["running"] = 0
+                        rebuild_status["queued"] = queued
+                        rebuild_status["last_finished_at"] = utc_now()
+                        rebuild_status["current_job_id"] = None
+                        rebuild_status["phase"] = "queued" if queued else ("failed" if error else "idle")
 
         def _read_json_body(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length") or 0)
@@ -385,7 +722,7 @@ def make_handler(request: DashboardRequest, *, admin_password: str | None = None
 
         def _is_admin(self) -> bool:
             token = self._cookie_token()
-            return bool(token and token in admin_tokens)
+            return bool(current_admin_password() and token and token in admin_tokens)
 
         def _require_admin(self) -> bool:
             if self._is_admin():
@@ -394,7 +731,8 @@ def make_handler(request: DashboardRequest, *, admin_password: str | None = None
             return False
 
         def _handle_login(self) -> None:
-            if not admin_password:
+            configured_password = current_admin_password()
+            if not configured_password:
                 self._send_json({"ok": False, "error": "admin_not_configured"}, status=HTTPStatus.FORBIDDEN)
                 return
             try:
@@ -403,7 +741,7 @@ def make_handler(request: DashboardRequest, *, admin_password: str | None = None
                 self._send_json({"ok": False, "error": "bad_request", "detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
             password = str(body.get("password") or "")
-            if not hmac.compare_digest(password, admin_password):
+            if not hmac.compare_digest(password, configured_password):
                 self._send_json({"ok": False, "error": "invalid_password"}, status=HTTPStatus.FORBIDDEN)
                 return
             token = secrets.token_urlsafe(32)
@@ -418,7 +756,7 @@ def make_handler(request: DashboardRequest, *, admin_password: str | None = None
             if token:
                 admin_tokens.discard(token)
             self._send_json(
-                {"ok": True, "admin_enabled": bool(admin_password), "admin": False},
+                {"ok": True, "admin_enabled": bool(current_admin_password()), "admin": False},
                 headers={"Set-Cookie": "p2a_admin=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"},
             )
 
@@ -428,6 +766,15 @@ def make_handler(request: DashboardRequest, *, admin_password: str | None = None
                 return [item for item in targets if isinstance(item, dict)]
             target = body.get("target") if isinstance(body.get("target"), dict) else body
             return [target]
+
+        def _rebuild_targets_from_body(self, body: dict[str, Any]) -> list[dict[str, Any]]:
+            targets = body.get("targets")
+            if isinstance(targets, list):
+                return [item for item in targets if isinstance(item, dict)]
+            target = body.get("target")
+            if isinstance(target, dict):
+                return [target]
+            return []
 
         def _handle_delete_preview(self) -> None:
             if not self._require_admin():
@@ -446,7 +793,7 @@ def make_handler(request: DashboardRequest, *, admin_password: str | None = None
             except (ValueError, FileNotFoundError, sqlite3.Error) as exc:
                 self._send_json({"ok": False, "error": "bad_request", "detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                 return
-            self._send_json({"ok": True, "counts": counts, "confirmation_phrase": delete_confirmation_phrase(counts)})
+            self._send_json({"ok": True, "counts": counts})
 
         def _handle_delete(self) -> None:
             if not self._require_admin():
@@ -457,17 +804,6 @@ def make_handler(request: DashboardRequest, *, admin_password: str | None = None
             try:
                 body = self._read_json_body()
                 targets = self._delete_targets_from_body(body)
-                conn = connect_readonly(request.db_path)
-                try:
-                    counts = count_run_data_targets(conn, targets)
-                finally:
-                    conn.close()
-                expected = delete_confirmation_phrase(counts)
-                if str(body.get("confirmation") or "") != expected:
-                    self._send_json({"ok": False, "error": "confirmation_required", "confirmation_phrase": expected, "counts": counts}, status=HTTPStatus.BAD_REQUEST)
-                    return
-                backup_path = backup_path_for_delete(request.db_path)
-                _backup_sqlite_database(request.db_path, backup_path)
                 writer = connect(request.db_path)
                 try:
                     init_db(writer)
@@ -479,7 +815,41 @@ def make_handler(request: DashboardRequest, *, admin_password: str | None = None
                 return
             snapshot_cache["payload"] = None
             snapshot_cache["change_token"] = None
-            self._send_json({"ok": True, "counts": deleted, "backup_path": str(backup_path)})
+            self._send_json({"ok": True, "counts": deleted})
+
+        def _handle_rebuild(self) -> None:
+            if not self._require_admin():
+                return
+            if request.db_path is None:
+                self._send_json({"ok": False, "error": "db_required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                body = self._read_json_body()
+                raw_targets = self._rebuild_targets_from_body(body)
+                targets = [_clean_admin_target(target) for target in raw_targets]
+            except ValueError as exc:
+                self._send_json({"ok": False, "error": "rebuild_failed", "detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            snapshot_cache["payload"] = None
+            snapshot_cache["change_token"] = None
+            warm_request = request
+            if len(targets) == 1:
+                cleaned = targets[0]
+                warm_request = replace(
+                    request,
+                    experiment_id=cleaned["experiment_id"] or request.experiment_id,
+                    provider_source=cleaned["provider_source"] or request.provider_source,
+                    dataset=cleaned["dataset"] or request.dataset,
+                    model_api_name=cleaned["model_api_name"] or request.model_api_name,
+                    model_label=cleaned["model_label"] or request.model_label,
+                )
+            status = self._enqueue_rebuild(
+                warm_request,
+                targets,
+                request_scope=_request_rebuild_scope(request),
+                store_payload=False,
+            )
+            self._send_json({"ok": True, "queued": True, "warming": True, "rebuild_status": status})
 
         def _send_json(
             self,
@@ -488,7 +858,14 @@ def make_handler(request: DashboardRequest, *, admin_password: str | None = None
             status: HTTPStatus = HTTPStatus.OK,
             headers: dict[str, str] | None = None,
         ) -> None:
-            self._send_bytes(snapshot_to_json(payload).encode("utf-8"), "application/json; charset=utf-8", status=status, headers=headers)
+            body = snapshot_to_json(payload).encode("utf-8")
+            response_headers = dict(headers or {})
+            accept_encoding = self.headers.get("Accept-Encoding", "")
+            if "gzip" in accept_encoding.lower() and len(body) > 1024:
+                body = gzip.compress(body)
+                response_headers["Content-Encoding"] = "gzip"
+                response_headers["Vary"] = "Accept-Encoding"
+            self._send_bytes(body, "application/json; charset=utf-8", status=status, headers=response_headers)
 
         def _send_bytes(
             self,
@@ -552,7 +929,7 @@ def _dashboard_urls(host: str, port: int) -> list[tuple[str, str]]:
 
 
 def serve_dashboard(request: DashboardRequest, *, host: str, port: int, admin_secret: Path | None = None) -> None:
-    server = ThreadingHTTPServer((host, port), make_handler(request, admin_password=_load_admin_password(admin_secret)))
+    server = ThreadingHTTPServer((host, port), make_handler(request, admin_password=lambda: _load_admin_password(admin_secret)))
     print("Serving unified P2A dashboard")
     print(f"  Bind: http://{host}:{port}")
     urls = _dashboard_urls(host, port)
@@ -591,10 +968,13 @@ def add_dashboard_args(parser: argparse.ArgumentParser) -> None:
 
 
 def request_from_args(args: argparse.Namespace) -> DashboardRequest:
+    db_path = args.db
+    if db_path is None and not args.rollouts and not args.details and args.log_dir is None and DEFAULT_EVAL_DB.exists():
+        db_path = DEFAULT_EVAL_DB
     return DashboardRequest(
         rollouts=tuple(args.rollouts or ()),
         details=tuple(args.details or ()),
-        db_path=args.db,
+        db_path=db_path,
         log_dir=args.log_dir,
         bonus_map_dir=args.bonus_map_dir,
         data_file=args.data_file,
