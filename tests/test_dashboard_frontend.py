@@ -1022,3 +1022,177 @@ def test_dashboard_frontend_state_and_inspector_rendering(tmp_path):
     )
 
     subprocess.run(["node", str(harness), str(app_path), str(snapshot_path)], check=True)
+
+
+def test_dashboard_frontend_pattern_filters_and_permalinks(tmp_path):
+    app_path = Path(__file__).resolve().parents[1] / "p2a" / "dashboard_static" / "app.js"
+    snapshot = {
+        "schema_version": "p2a_unified_dashboard_v1",
+        "sources": [],
+        "summary": {"counts": {"n_records": 3}, "trends": [], "distributions_by_dataset": {}},
+        "datasets": [{"dataset": "ds", "n_instances": 2, "n_eval_cells": 1, "n_trajectories": 3}],
+        "eval_cells": [
+            {
+                "eval_cell_key": "cell",
+                "experiment_key": "cell",
+                "source_kind": "third_party_api",
+                "experiment_id": "exp",
+                "provider_source": "internal_api",
+                "dataset": "ds",
+                "model_api_name": "model-api",
+                "model_label": "model",
+                "target": 2,
+                "done": 2,
+            }
+        ],
+        "model_metrics": [],
+        "case_filter_model_metrics": {},
+        "runs": [],
+        "details": [
+            {
+                "eval_cell_key": "cell",
+                "experiment_key": "cell",
+                "experiment_id": "exp",
+                "provider_source": "internal_api",
+                "dataset": "ds",
+                "model_api_name": "model-api",
+                "model_label": "model",
+                "instance_id": "case-a",
+                "rollout_index": 0,
+                "rollout_id": "stable-rollout",
+                "record_index": 0,
+                "bonus_case_type": "latent",
+                "path_evaluable": True,
+                "path_projection": {
+                    "anchors": ["a.py::symptom"],
+                    "roots": ["a.py::root"],
+                    "path_edges": [{"caller": "a.py::symptom", "callee": "a.py::root"}],
+                    "path_nodes": [
+                        {"key": "a.py::symptom", "node_role": "symptom", "hit": True},
+                        {"key": "a.py::root", "node_role": "root_cause", "hit": True},
+                    ],
+                    "context_nodes": [],
+                },
+                "order_score": -1,
+                "order_defined": True,
+                "miracle_step": True,
+                "block_order_score": None,
+                "block_miracle_step": None,
+                "bad_patterns": {"has_loop": True, "error_spiral": False},
+                "edited_root_cause": True,
+                "step_inspection": [{"trace_index": 0, "step_index": 1, "tool_name": "read"}],
+            },
+            {
+                "eval_cell_key": "cell",
+                "experiment_key": "cell",
+                "experiment_id": "exp",
+                "provider_source": "internal_api",
+                "dataset": "ds",
+                "model_api_name": "model-api",
+                "model_label": "model",
+                "instance_id": "case-a",
+                "rollout_index": 1,
+                "record_index": 1,
+                "bonus_case_type": "latent",
+                "path_evaluable": True,
+                "path_projection": {"anchors": [], "roots": [], "path_edges": [], "path_nodes": [], "context_nodes": []},
+                "order_score": None,
+                "order_defined": False,
+                "miracle_step": None,
+                "bad_patterns": {"has_loop": False, "error_spiral": False},
+                "step_inspection": [],
+            },
+            {
+                "eval_cell_key": "cell",
+                "experiment_key": "cell",
+                "experiment_id": "exp",
+                "provider_source": "internal_api",
+                "dataset": "ds",
+                "model_api_name": "model-api",
+                "model_label": "model",
+                "instance_id": "case-b",
+                "rollout_index": 0,
+                "record_index": 2,
+                "bonus_case_type": "latent",
+                "path_evaluable": True,
+                "path_projection": {"anchors": [], "roots": [], "path_edges": [], "path_nodes": [], "context_nodes": []},
+                "order_score": -1,
+                "order_defined": True,
+                "miracle_step": None,
+                "bad_patterns": {"has_loop": False, "error_spiral": False},
+                "step_inspection": [],
+            },
+        ],
+    }
+    snapshot_path = tmp_path / "snapshot.json"
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
+    harness = tmp_path / "frontend_pattern_permalink.js"
+    harness.write_text(
+        textwrap.dedent(
+            """
+            const fs = require("fs");
+            const vm = require("vm");
+            const appPath = process.argv[2];
+            const snapshot = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+            class Element {
+              constructor(id) { this.id = id; this.innerHTML = ""; this.textContent = ""; this.value = ""; this.checked = false; this.hidden = false; this.dataset = {}; this.classList = {toggle(){}, contains(){ return false; }}; }
+              addEventListener() {}
+            }
+            const elements = new Map();
+            const document = {
+              getElementById(id) { if (!elements.has(id)) elements.set(id, new Element(id)); return elements.get(id); },
+              querySelectorAll() { return []; },
+              querySelector() { return null; },
+            };
+            const context = {
+              window: {
+                __P2A_DASHBOARD_SNAPSHOT__: snapshot,
+                location: {origin: "http://dash", pathname: "/index.html", hash: ""},
+                addEventListener() {},
+              },
+              document,
+              console,
+              URLSearchParams,
+              fetch: async () => ({ok: false, json: async () => ({})}),
+              setInterval: () => 1,
+              clearInterval: () => {},
+            };
+            vm.createContext(context);
+            vm.runInContext(fs.readFileSync(appPath, "utf8"), context);
+            function run(expr) { return vm.runInContext(expr, context); }
+            run("state.caseFilters = {direct: true, latent: true, exposed: true, others: true}; state.selectedDataset = 'ds'; state.selectedEvalCellKey = 'cell';");
+            run("state.tracePatternFilters.miracle = true; state.tracePatternFilters.reverse = true;");
+            const grouped = run("groupedTraceDetails(state.snapshot).map((group) => [group.key, group.details.map(rowKey)]);");
+            if (grouped.length !== 1 || grouped[0][0] !== "cell::case-a" || grouped[0][1].length !== 1 || !grouped[0][1][0].endsWith("id-stable-rollout")) {
+              throw new Error(`pattern filters should keep only rollout with all selected tags: ${JSON.stringify(grouped)}`);
+            }
+            if (run("tracePatternMatches(state.snapshot.details[1], 'miracle')") !== false) {
+              throw new Error("undefined miracle marker should not match");
+            }
+            const stepHash = run("state.selectedTraceKey = rowKey(state.snapshot.details[0]); state.selectedStepIndex = 4; locatorForDetail(state.snapshot.details[0], 'step');");
+            if (!stepHash.includes("rollout_id=stable-rollout") || stepHash.includes("record_index") || !stepHash.includes("step_index=4")) {
+              throw new Error(`step locator should use stable rollout id and step index: ${stepHash}`);
+            }
+            const instanceHash = run("locatorForDetail(state.snapshot.details[0], 'instance');");
+            if (instanceHash.includes("rollout_id") || instanceHash.includes("rollout_index") || !instanceHash.includes("instance_id=case-a")) {
+              throw new Error(`instance locator should stop at instance: ${instanceHash}`);
+            }
+            const experimentHash = run("locatorForDetail(state.snapshot.details[0], 'experiment');");
+            if (experimentHash.includes("instance_id") || experimentHash.includes("rollout_id") || !experimentHash.includes("experiment_id=exp")) {
+              throw new Error(`experiment locator should stop at experiment: ${experimentHash}`);
+            }
+            run("state.caseFilters = {direct: false, latent: true, exposed: false, others: false}; state.tracePatternFilters.loop = true;");
+            const applied = run(`applyLocator(state.snapshot, parseLocator("http://dash/index.html${stepHash}"))`);
+            if (applied !== true) throw new Error("valid locator did not apply");
+            if (run("state.selectedEvalCellKey") !== "cell" || run("state.selectedTraceKey") !== "cell::case-a::id-stable-rollout" || run("state.selectedStepIndex") !== 4) {
+              throw new Error("locator did not restore selected cell/trace/step");
+            }
+            if (run("Object.values(state.caseFilters).every(Boolean)") !== true || run("activeTracePatternFilters().length") !== 0 || run("state.traceQuery") !== "") {
+              throw new Error("deep link should clear conflicting filters");
+            }
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(["node", str(harness), str(app_path), str(snapshot_path)], check=True)

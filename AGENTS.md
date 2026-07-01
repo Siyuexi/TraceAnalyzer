@@ -84,8 +84,10 @@ is on `main`.
   score fields. New collection paths should store basic facts such as resolved
   state, token usage, runtime, artifacts, and raw rollout content, but should
   not populate localization score columns, `metrics_json.detail`, or pattern
-  flags. If dashboard-computed scores are persisted later, the write path is
-  one-way dashboard -> DB and the default read path still recomputes.
+  flags. The live dashboard may persist `metrics_json.detail` only through the
+  one-way dashboard -> DB cache writer, and the read path must validate the
+  fingerprint against scorer version, scoring params, raw rollout hash, and
+  bonus-map hash before using it.
 - Treat node source code as bonus-map data. Dashboard Node Source must read full
   callable source from the inferred or explicit P2A bonus-map directory; DB
   `source_preview` fields are only compatibility fallbacks for old artifacts.

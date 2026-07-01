@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -14,7 +15,7 @@ from p2a.bonus_map_scope import LATENT_CASE, PATH_CASE_TYPES, canonical_detail_c
 from p2a.eval_fault_localization import _json_default, _sync_path_aliases, iter_records
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DONE_STATUS = "done"
 ERROR_STATUS = "error"
 PENDING_STATUS = "pending"
@@ -84,13 +85,17 @@ def _golden_patch(record: dict[str, Any]) -> str | None:
     return _first_text_field(record, ("golden_patch", "patch", "base_patch", "fix_patch"))
 
 
-def connect(db_path: Path | str) -> sqlite3.Connection:
+def connect(db_path: Path | str, *, timeout: float = 30.0) -> sqlite3.Connection:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=30.0)
+    conn = sqlite3.connect(path, timeout=timeout)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute(f"PRAGMA busy_timeout = {int(timeout * 1000)}")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.DatabaseError:
+        pass
     return conn
 
 
@@ -195,6 +200,7 @@ def _create_eval_tables(conn: sqlite3.Connection) -> None:
           cache_hit_tokens REAL,
           cache_write_tokens REAL,
           cost REAL,
+          fingerprint TEXT,
           metrics_json TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -260,6 +266,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     _create_eval_tables(conn)
     _ensure_column(conn, "raw_rollouts", "issue_description", "TEXT")
     _ensure_column(conn, "raw_rollouts", "golden_patch", "TEXT")
+    _ensure_column(conn, "quantitative_metrics", "fingerprint", "TEXT")
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
         (SCHEMA_VERSION, utc_now()),
@@ -271,6 +278,168 @@ def ensure_db(db_path: Path | str) -> sqlite3.Connection:
     conn = connect(db_path)
     init_db(conn)
     return conn
+
+
+def _clean_delete_target(
+    *,
+    experiment_id: str | None = None,
+    provider_source: str | None = None,
+    dataset: str | None = None,
+) -> dict[str, str]:
+    target = {
+        "experiment_id": str(experiment_id).strip() if experiment_id else "",
+        "provider_source": str(provider_source).strip() if provider_source else "",
+        "dataset": str(dataset).strip() if dataset else "",
+    }
+    return {key: value for key, value in target.items() if value}
+
+
+def _normalize_delete_targets(targets: Iterable[Mapping[str, Any]], *, allow_all: bool = False) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[tuple[str, str], ...]] = set()
+    for item in targets:
+        target = _clean_delete_target(
+            experiment_id=item.get("experiment_id"),
+            provider_source=item.get("provider_source"),
+            dataset=item.get("dataset"),
+        )
+        if not target and not allow_all:
+            raise ValueError("delete target must include experiment_id, provider_source, or dataset")
+        key = tuple(sorted(target.items()))
+        if key not in seen:
+            normalized.append(target)
+            seen.add(key)
+    if not normalized and not allow_all:
+        raise ValueError("at least one delete target is required")
+    return normalized
+
+
+def _target_where(alias: str, targets: Iterable[Mapping[str, Any]], *, allow_all: bool = False) -> tuple[str, list[Any]]:
+    normalized = _normalize_delete_targets(targets, allow_all=allow_all)
+    if not normalized and allow_all:
+        return "1 = 1", []
+    clauses = []
+    params: list[Any] = []
+    for target in normalized:
+        if not target:
+            clauses.append("1 = 1")
+            continue
+        parts = []
+        for key in ("experiment_id", "provider_source", "dataset"):
+            value = target.get(key)
+            if value:
+                parts.append(f"{alias}.{key} = ?")
+                params.append(value)
+        clauses.append("(" + " AND ".join(parts) + ")")
+    return " OR ".join(clauses), params
+
+
+def _single_target(
+    *,
+    experiment_id: str | None = None,
+    provider_source: str | None = None,
+    dataset: str | None = None,
+) -> list[dict[str, str]]:
+    return [_clean_delete_target(experiment_id=experiment_id, provider_source=provider_source, dataset=dataset)]
+
+
+def count_run_data_targets(
+    conn: sqlite3.Connection,
+    targets: Iterable[Mapping[str, Any]],
+    *,
+    allow_all: bool = False,
+) -> dict[str, int]:
+    where_cells, cell_params = _target_where("c", targets, allow_all=allow_all)
+    where_exp, exp_params = _target_where("e", targets, allow_all=allow_all)
+    run_cells = int(conn.execute(f"SELECT COUNT(*) FROM run_cells c WHERE {where_cells}", cell_params).fetchone()[0])
+    raw_rollouts = int(
+        conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM raw_rollouts r
+            JOIN run_cells c ON c.id = r.cell_id
+            WHERE {where_cells}
+            """,
+            cell_params,
+        ).fetchone()[0]
+    )
+    quantitative_metrics = int(
+        conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM quantitative_metrics q
+            JOIN run_cells c ON c.id = q.cell_id
+            WHERE {where_cells}
+            """,
+            cell_params,
+        ).fetchone()[0]
+    )
+    experiments = int(conn.execute(f"SELECT COUNT(*) FROM experiments e WHERE {where_exp}", exp_params).fetchone()[0])
+    return {
+        "experiments": experiments,
+        "run_cells": run_cells,
+        "raw_rollouts": raw_rollouts,
+        "quantitative_metrics": quantitative_metrics,
+    }
+
+
+def count_run_data(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str | None = None,
+    provider_source: str | None = None,
+    dataset: str | None = None,
+    allow_all: bool = False,
+) -> dict[str, int]:
+    return count_run_data_targets(
+        conn,
+        _single_target(experiment_id=experiment_id, provider_source=provider_source, dataset=dataset),
+        allow_all=allow_all,
+    )
+
+
+def delete_run_data_targets(
+    conn: sqlite3.Connection,
+    targets: Iterable[Mapping[str, Any]],
+    *,
+    allow_all: bool = False,
+) -> dict[str, int]:
+    normalized = _normalize_delete_targets(targets, allow_all=allow_all)
+    counts = count_run_data_targets(conn, normalized, allow_all=allow_all)
+    where_cells, cell_params = _target_where("c", normalized, allow_all=allow_all)
+    where_exp, exp_params = _target_where("e", normalized, allow_all=allow_all)
+    with conn:
+        conn.execute(f"DELETE FROM run_cells WHERE id IN (SELECT c.id FROM run_cells c WHERE {where_cells})", cell_params)
+        conn.execute(f"DELETE FROM experiments WHERE rowid IN (SELECT e.rowid FROM experiments e WHERE {where_exp})", exp_params)
+    return counts
+
+
+def delete_run_data(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str | None = None,
+    provider_source: str | None = None,
+    dataset: str | None = None,
+    allow_all: bool = False,
+) -> dict[str, int]:
+    return delete_run_data_targets(
+        conn,
+        _single_target(experiment_id=experiment_id, provider_source=provider_source, dataset=dataset),
+        allow_all=allow_all,
+    )
+
+
+def delete_confirmation_phrase(counts: Mapping[str, Any]) -> str:
+    run_cells = int(counts.get("run_cells") or 0)
+    experiments = int(counts.get("experiments") or 0)
+    return f"delete {run_cells} run cells and {experiments} experiments"
+
+
+def backup_path_for_delete(db_path: Path | str, *, timestamp: str | None = None) -> Path:
+    path = Path(db_path)
+    stamp = timestamp or utc_now()
+    safe_stamp = re.sub(r"[^0-9A-Za-z_.-]+", "-", stamp).strip("-")
+    return path.with_name(f"{path.name}.backup-{safe_stamp}")
 
 
 def upsert_experiment(
@@ -631,9 +800,9 @@ def upsert_rollout_record(
           cell_id, reward, resolved, p2a_read, call_graph_hit, ground_truth_hit,
           near_hit, min_distance, turns, tool_calls, wall_time, input_tokens,
           output_tokens, reasoning_tokens, cache_hit_tokens, cache_write_tokens,
-          cost, metrics_json, updated_at
+          cost, fingerprint, metrics_json, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(cell_id) DO UPDATE SET
           reward = excluded.reward,
           resolved = excluded.resolved,
@@ -651,6 +820,7 @@ def upsert_rollout_record(
           cache_hit_tokens = excluded.cache_hit_tokens,
           cache_write_tokens = excluded.cache_write_tokens,
           cost = excluded.cost,
+          fingerprint = excluded.fingerprint,
           metrics_json = excluded.metrics_json,
           updated_at = excluded.updated_at
         """,
@@ -672,9 +842,36 @@ def upsert_rollout_record(
             _number(token_usage.get("cache_hit_tokens")),
             _number(token_usage.get("cache_write_tokens")),
             _number(token_usage.get("cost")),
+            None,
             json_dumps(metrics),
             now,
         ),
+    )
+
+
+def write_dashboard_detail_cache(
+    conn: sqlite3.Connection,
+    *,
+    cell_id: int,
+    detail: Mapping[str, Any],
+    fingerprint: str,
+) -> None:
+    now = utc_now()
+    row = conn.execute("SELECT metrics_json FROM quantitative_metrics WHERE cell_id = ?", (cell_id,)).fetchone()
+    metrics = json_loads(row["metrics_json"] if row else None, {})
+    if not isinstance(metrics, dict):
+        metrics = {}
+    metrics["detail"] = dict(detail)
+    conn.execute(
+        """
+        INSERT INTO quantitative_metrics(cell_id, fingerprint, metrics_json, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(cell_id) DO UPDATE SET
+          fingerprint = excluded.fingerprint,
+          metrics_json = excluded.metrics_json,
+          updated_at = excluded.updated_at
+        """,
+        (cell_id, fingerprint, json_dumps(metrics), now),
     )
 
 
