@@ -78,8 +78,8 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertEqual(env_config.deployment.max_replicas, 2)
         self.assertEqual(env_config.deployment.startup_env_variables, {"PIP_CACHE_DIR": "~/.cache/pip"})
         self.assertEqual(env_config.deployment.shell_post_setup_cmd, "git checkout abc123")
-        self.assertEqual(env_config.env_variables, {"PIP_CACHE_DIR": "~/.cache/pip"})
-        self.assertEqual(env_config.post_setup_cmd, "git checkout abc123")
+        self.assertIsNone(env_config.env_variables)
+        self.assertIsNone(env_config.post_setup_cmd)
         self.assertEqual(str(env_config.tool_install_dir), "/tools")
 
     def test_deployment_config_builds_direct_arl_deployment(self) -> None:
@@ -403,8 +403,13 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertEqual(agent_env.env_config.deployment.type, "arl")
         self.assertEqual(agent_env.env_config.deployment.image, "registry.local/r2e:latest")
         self.assertEqual(agent_env.env_config.deployment.gateway_url, "http://gateway")
-        self.assertEqual(agent_env.env_config.env_variables, {"PIP_CACHE_DIR": "~/.cache/pip"})
-        self.assertEqual(agent_env.env_config.post_setup_cmd, "git checkout abc123")
+        self.assertEqual(
+            agent_env.env_config.deployment.startup_env_variables,
+            {"PIP_CACHE_DIR": "~/.cache/pip"},
+        )
+        self.assertEqual(agent_env.env_config.deployment.shell_post_setup_cmd, "git checkout abc123")
+        self.assertIsNone(agent_env.env_config.env_variables)
+        self.assertIsNone(agent_env.env_config.post_setup_cmd)
 
     def test_agent_loop_attaches_p2a_traces_from_rollout_cache_without_uni_agent_patch(self) -> None:
         import env as env_package

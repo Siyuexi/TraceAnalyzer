@@ -328,8 +328,10 @@ def make_env_config(
             if post_setup_cmd:
                 deployment_with_startup["shell_post_setup_cmd"] = post_setup_cmd
             self.deployment = ArlDeploymentConfig.from_mapping(deployment_with_startup)
-            self.env_variables = env_variables
-            self.post_setup_cmd = post_setup_cmd
+            # ARL deployment owns shell setup so startup and reconnects see the
+            # same state. AgentEnv must not replay it through communicate().
+            self.env_variables = None
+            self.post_setup_cmd = None
             self.tool_install_dir = Path(tool_install_dir)
 
     return _Config()
