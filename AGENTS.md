@@ -25,6 +25,12 @@ is on `main`.
 - Do not put public/reusable datasets or model checkpoints under `src/data`.
   Do not put TraceAnalyzer-specific run artifacts under `../../datasets` or
   `../../models` by default.
+- SWE-Bench-Pro is eval-only. Phase 1 supports only Python repos and writes
+  `swe_bench_pro.parquet`; never route it into RL training. The official Pro
+  images use `/app` as the repository root, not SWE-bench Verified's `/testbed`.
+  ARL runs require the corresponding `jefzda/sweap-images:{dockerhub_tag}` tags
+  to be mirrored under `pair-diag-cn-guangzhou.cr.volces.com/code/sweap-images`;
+  Docker Hub direct pull is not assumed available from ARL.
 
 ## Research concept docs
 
@@ -78,8 +84,10 @@ is on `main`.
   score fields. New collection paths should store basic facts such as resolved
   state, token usage, runtime, artifacts, and raw rollout content, but should
   not populate localization score columns, `metrics_json.detail`, or pattern
-  flags. If dashboard-computed scores are persisted later, the write path is
-  one-way dashboard -> DB and the default read path still recomputes.
+  flags. The live dashboard may persist `metrics_json.detail` only through the
+  one-way dashboard -> DB cache writer, and the read path must validate the
+  fingerprint against scorer version, scoring params, raw rollout hash, and
+  bonus-map hash before using it.
 - Treat node source code as bonus-map data. Dashboard Node Source must read full
   callable source from the inferred or explicit P2A bonus-map directory; DB
   `source_preview` fields are only compatibility fallbacks for old artifacts.
@@ -91,6 +99,24 @@ is on `main`.
   cleanly when older artifacts do not contain them.
 - When public-facing semantics change, update the README and, where research
   claims are affected, keep the proposal/report documents synchronized.
+
+## Precompute ↔ rollout alignment (INVIOLABLE — root `FACTS.md` FACT-001)
+
+The bonus map / golden call graph is built by the **precompute** path; its process
+supervision is applied to the **rollout** path. Both MUST observe identical
+execution semantics — the *same* command-execution interface and the *same* sandbox
+environment (PATH / venv / cwd / shell init) — or the supervision no longer matches
+what the agent actually executed (P2A soundness breaks).
+
+- Current ARL rollout execution uses `ArlRuntime.run_in_session` over
+  `ManagedSession.execute`, seeds the configured repo cwd (`session_cwd`, `/testbed`
+  for R2E and `/app` for SWE-Bench-Pro), preserves `cd`/exported env through
+  runtime state files, and strips terminal control sequences from observations.
+- `InteractiveShellClient` is a human/debug readline PTY and must not be used for
+  model/tool command execution. ARL rollout command execution must stay on the same
+  `execute` interface that precompute uses.
+- Any change to one path's exec interface or environment MUST be mirrored to the
+  other. Do not introduce a precompute-only or rollout-only execution nuance.
 
 ## ARL is a sandbox, not a VRC remote
 

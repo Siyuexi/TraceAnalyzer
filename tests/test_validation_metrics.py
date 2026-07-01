@@ -11,6 +11,27 @@ class FakeBatch:
         self.non_tensor_batch = non_tensor_batch
 
 
+def test_validation_records_infer_rollout_indexes_for_repeated_instances():
+    batch = FakeBatch(
+        {
+            "uid": np.array(["u0", "u1", "u2", "u3"], dtype=object),
+            "instance_id": np.array(["case-1", "case-1", "case-2", "case-2"], dtype=object),
+            "data_source": np.array(["unit", "unit", "unit", "unit"], dtype=object),
+        }
+    )
+
+    records = validation_records_from_batch(batch, output_texts=["", "", "", ""], scores=[0.0, 1.0, 0.0, 0.0])
+
+    assert [(record["instance_id"], record["rollout_index"]) for record in records] == [
+        ("case-1", 0),
+        ("case-1", 1),
+        ("case-2", 0),
+        ("case-2", 1),
+    ]
+    assert records[1]["rollout_id"] == "case-1:1"
+    assert records[1]["extra_fields"]["rollout_index"] == 1
+
+
 def _schema_v5_bonus_map(instance_id="demo__path"):
     return {
         "instance_id": instance_id,
@@ -175,8 +196,8 @@ def test_validation_metrics_use_schema_v5_path_projection(tmp_path):
     assert detail["path_read_precision"] == 2 / 3
     assert detail["chain_node_recall"] == 2 / 3
     assert detail["chain_read_precision"] == 2 / 3
-    assert detail["first_anchor_step"] == 1
-    assert detail["first_root_step"] == 2
+    assert detail["first_anchor_step"] == 2
+    assert detail["first_root_step"] == 3
     assert detail["steps_anchor_to_root"] == 1
     assert detail["anchor_before_root"] is True
     assert detail["path_pattern_flags"]["missed_anchor"] is False
@@ -221,8 +242,8 @@ def test_validation_metrics_use_schema_v5_path_projection(tmp_path):
     assert metrics["val-p2a/unit/path_read_precision"] == 2 / 3
     assert metrics["val-p2a/unit/chain_node_recall"] == 2 / 3
     assert metrics["val-p2a/unit/chain_read_precision"] == 2 / 3
-    assert metrics["val-p2a/unit/time_to_anchor"] == 1.0
-    assert metrics["val-p2a/unit/time_to_root"] == 2.0
+    assert metrics["val-p2a/unit/time_to_anchor"] == 2.0
+    assert metrics["val-p2a/unit/time_to_root"] == 3.0
     assert metrics["val-p2a/unit/steps_anchor_to_root"] == 1.0
 
 
@@ -332,8 +353,8 @@ def test_path_metrics_fall_back_to_top_level_reads_when_step_traces_are_empty(tm
     assert detail["path_read_precision"] == 1.0
     assert detail["chain_node_recall"] == 2 / 3
     assert detail["chain_read_precision"] == 1.0
-    assert detail["first_anchor_step"] == 0
-    assert detail["first_root_step"] == 0
+    assert detail["first_anchor_step"] == 1
+    assert detail["first_root_step"] == 1
     assert detail["steps_anchor_to_root"] == 0
     assert metrics["val-p2a/unit/path_hit_rate"] == 1.0
     assert metrics["val-p2a/unit/chain_hit_rate"] == 1.0
@@ -831,8 +852,8 @@ def test_validation_metrics_preserve_trace_step_indexes(tmp_path):
     )
 
     assert details[0]["n_steps_with_reads"] == 1
-    assert details[0]["first_hit_step"] == 2
-    assert details[0]["graph_topology"]["nodes"][0]["first_step"] == 2
+    assert details[0]["first_hit_step"] == 3
+    assert details[0]["graph_topology"]["nodes"][0]["first_step"] == 3
 
 
 def test_validation_metrics_ignore_non_rewardable_nodes(tmp_path):

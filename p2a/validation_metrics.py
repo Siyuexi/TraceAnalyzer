@@ -109,6 +109,22 @@ def _row_value(values: Any, idx: int, default: Any = None) -> Any:
         return default
 
 
+def _int_value(value: Any) -> int | None:
+    value = _maybe_json(value)
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value == value:
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value.strip()))
+        except ValueError:
+            return None
+    return None
+
+
 def _get_nested(mapping: dict[str, Any], *path: str) -> Any:
     current: Any = mapping
     for key in path:
@@ -174,6 +190,7 @@ def validation_records_from_batch(
     """Build scorer records from a validation DataProto after generation."""
     non_tensor = getattr(batch, "non_tensor_batch", {})
     records = []
+    rollout_counts: dict[str, int] = defaultdict(int)
     for idx, response_text in enumerate(output_texts):
         extra_fields = _as_dict(_row_value(non_tensor.get("extra_fields"), idx, {}))
         extra_info = _as_dict(_row_value(non_tensor.get("extra_info"), idx, {}))
@@ -184,6 +201,8 @@ def validation_records_from_batch(
             "data_source": _row_value(non_tensor.get("data_source"), idx),
             "response_text": _row_value(non_tensor.get("response_text"), idx, response_text) or response_text,
             "p2a_step_traces": _row_value(non_tensor.get("p2a_step_traces"), idx),
+            "rollout_index": _row_value(non_tensor.get("rollout_index"), idx),
+            "rollout_id": _row_value(non_tensor.get("rollout_id"), idx),
             "extra_fields": dict(extra_fields),
             "extra_info": dict(extra_info),
             "score": scores[idx] if scores and idx < len(scores) else None,
@@ -197,6 +216,21 @@ def validation_records_from_batch(
             record["instance_id"] = instance_id
             record["extra_fields"].setdefault("instance_id", instance_id)
             record["extra_info"].setdefault("instance_id", instance_id)
+        rollout_key = str(record.get("instance_id") or record.get("uid") or idx)
+        rollout_index = _int_value(
+            record.get("rollout_index")
+            if record.get("rollout_index") is not None
+            else record["extra_fields"].get("rollout_index", record["extra_info"].get("rollout_index"))
+        )
+        if rollout_index is None:
+            rollout_index = rollout_counts[rollout_key]
+        rollout_counts[rollout_key] = max(rollout_counts[rollout_key], rollout_index + 1)
+        record["rollout_index"] = rollout_index
+        record["rollout_id"] = str(record.get("rollout_id") or f"{rollout_key}:{rollout_index}")
+        record["extra_fields"].setdefault("rollout_index", rollout_index)
+        record["extra_fields"].setdefault("rollout_id", record["rollout_id"])
+        record["extra_info"].setdefault("rollout_index", rollout_index)
+        record["extra_info"].setdefault("rollout_id", record["rollout_id"])
         record["extra_fields"].setdefault("data_source", record["data_source"])
         record["extra_info"].setdefault("data_source", record["data_source"])
         records.append(record)

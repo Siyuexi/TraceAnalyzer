@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+from collections.abc import Callable
 import json
 import os
 from pathlib import Path
@@ -16,8 +17,9 @@ import uuid
 import yaml
 
 from p2a.api_providers import make_chat_model, normalize_provider_config, provider_source
+from p2a.bonus_map_scope import parse_bonus_map_instance_filter, select_rows_by_bonus_map_scope
 from p2a.core import BonusMapStore
-from p2a.eval_cache import ensure_db, ingest_artifacts, upsert_experiment
+from p2a.eval_cache import ensure_db, ingest_artifacts, upsert_experiment, upsert_rollout_record
 from p2a.eval_fault_localization import (
     _json_default,
     iter_records,
@@ -29,6 +31,10 @@ from p2a.precompute.uni_agent_sandbox import build_agent_env_config, extract_too
 
 
 DEFAULT_CONFIG = {
+    "experiment": {
+        "rollouts_per_instance": 1,
+        "per_instance_parallelism": 1,
+    },
     "model": {
         "base_url_env": "P2A_THIRD_PARTY_BASE_URL",
         "api_key_env": "P2A_THIRD_PARTY_API_KEY",
@@ -64,6 +70,7 @@ DEFAULT_CONFIG = {
         "near_threshold": 0.5,
         "m_max": 3.0,
     },
+    "bonus_map_instance_filter": {},
 }
 _REDACT_KEYS = ("api_key", "apikey", "token", "secret", "password", "authorization")
 SYSTEM_ERROR_KINDS = {
@@ -71,9 +78,11 @@ SYSTEM_ERROR_KINDS = {
     "arl_shell_forbidden",
     "arl_shell_unavailable",
     "arl_gateway_unreachable",
+    "image_pull_failed",
     "network_error",
     "runtime_timeout",
 }
+RecordSink = Callable[[dict[str, Any]], Any]
 
 
 def classify_error(error: BaseException | str | None) -> str | None:
@@ -87,6 +96,8 @@ def classify_error(error: BaseException | str | None) -> str | None:
         return "arl_shell_forbidden"
     if "interactive shell" in lowered or "/shell" in lowered:
         return "arl_shell_unavailable"
+    if any(token in lowered for token in ("imagepullbackoff", "errimagepull", "pull access denied")):
+        return "image_pull_failed"
     if "arl" in lowered and any(token in lowered for token in ("connection", "connect", "gateway", "timeout", "refused")):
         return "arl_gateway_unreachable"
     if any(token in lowered for token in ("network", "connection refused", "connection reset", "temporary failure")):
@@ -162,6 +173,17 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> dic
         agent_cfg["tool_install_timeout"] = args.tool_install_timeout
     if getattr(args, "skip_tool_install", None):
         agent_cfg["skip_tool_install_commands"] = args.skip_tool_install
+    experiment_cfg = config.setdefault("experiment", {})
+    if getattr(args, "rollouts_per_instance", None) is not None:
+        experiment_cfg["rollouts_per_instance"] = args.rollouts_per_instance
+    if getattr(args, "per_instance_parallelism", None) is not None:
+        experiment_cfg["per_instance_parallelism"] = args.per_instance_parallelism
+    if getattr(args, "bonus_map_filter_json", None):
+        config["bonus_map_instance_filter"] = json.loads(args.bonus_map_filter_json)
+    if getattr(args, "case_type", None):
+        config.setdefault("bonus_map_instance_filter", {})["case_types"] = args.case_type
+    if getattr(args, "pattern_computable", None) is not None:
+        config.setdefault("bonus_map_instance_filter", {})["pattern_computable"] = args.pattern_computable
     return config
 
 
@@ -231,6 +253,14 @@ def _as_jsonable(value: Any) -> Any:
     return value
 
 
+def _assistant_metadata(interaction_result: dict[str, Any]) -> dict[str, Any]:
+    rollout_cache = interaction_result.get("rollout_cache") if isinstance(interaction_result, dict) else {}
+    if not isinstance(rollout_cache, dict):
+        return {}
+    metadata = rollout_cache.get("internal_api_assistant_metadata")
+    return _as_jsonable(metadata) if isinstance(metadata, dict) else {}
+
+
 def _load_rows(path: Path) -> list[dict[str, Any]]:
     if path.suffix.lower() == ".parquet":
         import pandas as pd
@@ -260,6 +290,32 @@ def _select_rows(
     return rows
 
 
+def _select_scoped_rows(
+    rows: list[dict[str, Any]],
+    *,
+    limit: int | None,
+    offset: int,
+    instance_ids: set[str] | None,
+    bonus_map_dir: Path | None,
+    scope_filter_config: Any,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    rows = _select_rows(rows, limit=None, offset=0, instance_ids=instance_ids)
+    scope_filter = parse_bonus_map_instance_filter(scope_filter_config)
+    if not scope_filter.active:
+        return _select_rows(rows, limit=limit, offset=offset, instance_ids=None), None
+    if bonus_map_dir is None:
+        raise ValueError("bonus_map_instance_filter requires --bonus-map-dir")
+    scoped = select_rows_by_bonus_map_scope(
+        rows,
+        bonus_map_dir=bonus_map_dir,
+        instance_id=_instance_id,
+        scope_filter=scope_filter,
+        limit=limit,
+        offset=offset,
+    )
+    return scoped.rows, scoped.metadata
+
+
 def parse_limit_arg(value: str) -> int | None:
     if value.lower() == "all":
         return None
@@ -270,6 +326,28 @@ def parse_limit_arg(value: str) -> int | None:
     if limit < 0:
         raise argparse.ArgumentTypeError("--limit must be a non-negative integer or 'all'")
     return limit
+
+
+def _positive_int(value: Any, *, default: int, name: str) -> int:
+    if value is None:
+        return default
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(f"{name} must be >= 1")
+    return parsed
+
+
+def parse_rollout_job(value: str) -> tuple[str, int]:
+    instance_id, sep, raw_index = str(value).rpartition(":")
+    if not sep or not instance_id:
+        raise argparse.ArgumentTypeError("--rollout-job must be formatted as <instance_id>:<rollout_index>")
+    try:
+        rollout_index = int(raw_index)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--rollout-job rollout_index must be an integer") from exc
+    if rollout_index < 0:
+        raise argparse.ArgumentTypeError("--rollout-job rollout_index must be non-negative")
+    return instance_id, rollout_index
 
 
 def _extra_info(row: dict[str, Any]) -> dict[str, Any]:
@@ -308,7 +386,7 @@ def _make_env(row: dict[str, Any], *, instance_id: str, deployment: str):
 
     env_dict = build_agent_env_config(row, instance_id=instance_id, deployment=deployment)
     if env_dict["deployment"].get("type") == "arl":
-        env_dict["deployment"]["require_interactive_shell"] = True
+        env_dict["deployment"]["require_bash_session"] = True
         env_config = make_env_config(
             env_dict["deployment"],
             env_variables=env_dict.get("env_variables"),
@@ -352,6 +430,8 @@ def _make_interaction(*, run_id: str, env: Any, model: Any, tools_manager: Any, 
 def _make_reward(row: dict[str, Any], *, run_id: str, env: Any, agent_cfg: dict[str, Any]):
     from uni_agent.reward import load_reward_spec
 
+    import p2a.reward_specs  # noqa: F401 - registers P2A-local Uni-Agent reward specs
+
     reward_cfg = dict(extract_tools_kwargs(row).get("reward") or {})
     if not reward_cfg:
         return None
@@ -393,21 +473,42 @@ async def _install_tools(
 
 def build_step_traces(interaction_result: dict[str, Any]) -> list[dict[str, Any]]:
     messages = interaction_result.get("messages") or []
-    assistant_messages = [message for message in messages if isinstance(message, dict) and message.get("role") == "assistant"]
+    assistant_messages = [
+        (message_index, message)
+        for message_index, message in enumerate(messages)
+        if isinstance(message, dict) and message.get("role") == "assistant"
+    ]
+    assistant_metadata = _assistant_metadata(interaction_result)
     traces = []
     for idx, step in enumerate(interaction_result.get("trajectory") or []):
         step_data = _as_jsonable(step)
-        message = assistant_messages[idx] if idx < len(assistant_messages) else {}
-        traces.append(
-            {
-                "step_idx": int(step_data.get("step_idx", idx + 1)),
-                "response_text": step_data.get("response") or message.get("content") or "",
-                "thought": step_data.get("thought") or "",
-                "tool_calls": _as_jsonable(message.get("tool_calls") or []),
-                "tool_results": _as_jsonable(step_data.get("tool_results") or []),
-                "exit_reason": step_data.get("exit_reason"),
-            }
+        message_index, message = assistant_messages[idx] if idx < len(assistant_messages) else (-1, {})
+        metadata = assistant_metadata.get(str(message_index), {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        reasoning = (
+            step_data.get("reasoning")
+            or step_data.get("reasoning_content")
+            or message.get("reasoning")
+            or message.get("reasoning_content")
+            or metadata.get("reasoning_content")
+            or ""
         )
+        trace = {
+            "step_idx": int(step_data.get("step_idx", idx + 1)),
+            "response_text": step_data.get("response") or message.get("content") or "",
+            "thought": step_data.get("thought") or "",
+            "tool_calls": _as_jsonable(message.get("tool_calls") or []),
+            "tool_results": _as_jsonable(step_data.get("tool_results") or []),
+            "exit_reason": step_data.get("exit_reason"),
+        }
+        if reasoning:
+            trace["reasoning"] = reasoning
+            trace["reasoning_content"] = reasoning
+        for key in ("reasoning_blocks", "text_blocks"):
+            if metadata.get(key):
+                trace[key] = _as_jsonable(metadata[key])
+        traces.append(trace)
     return traces
 
 
@@ -417,6 +518,7 @@ def build_dump_record(
     run_id: str,
     model_name: str,
     base_url: str,
+    rollout_index: int = 0,
     interaction_result: dict[str, Any] | None,
     reward_score: Any,
     reward_details: Any,
@@ -430,15 +532,21 @@ def build_dump_record(
         extra_info.setdefault("instance_id", instance_id)
     extra_info.setdefault("data_source", _data_source(row))
 
-    trajectory = _as_jsonable((interaction_result or {}).get("trajectory") or [])
-    messages = _as_jsonable((interaction_result or {}).get("messages") or [])
-    traces = build_step_traces(interaction_result or {})
+    interaction_result = interaction_result or {}
+    trajectory = _as_jsonable(interaction_result.get("trajectory") or [])
+    messages = _as_jsonable(interaction_result.get("messages") or [])
+    traces = build_step_traces(interaction_result)
+    assistant_metadata = _assistant_metadata(interaction_result)
+    rollout_cache = interaction_result.get("rollout_cache")
+    rollout_cache = rollout_cache if isinstance(rollout_cache, dict) else {}
     responses = [trace["response_text"] for trace in traces if trace.get("response_text")]
     termination_reason = trajectory[-1].get("exit_reason") if trajectory else "error" if error else "unknown"
 
     return {
         "schema_version": "p2a_third_party_rollout_v1",
         "run_id": run_id,
+        "rollout_index": rollout_index,
+        "rollout_id": f"{instance_id}:{rollout_index}" if instance_id is not None else str(rollout_index),
         "instance_id": instance_id,
         "data_source": _data_source(row),
         "model": model_name,
@@ -446,20 +554,101 @@ def build_dump_record(
         "messages": messages,
         "trajectory": trajectory,
         "p2a_step_traces": traces,
+        "assistant_metadata": assistant_metadata,
         "response_text": "\n".join(responses),
         "reward": reward_score,
         "reward_details": _as_jsonable(reward_details),
         "resolved": bool(reward_details.get("resolved")) if isinstance(reward_details, dict) else None,
         "termination_reason": termination_reason,
-        "execution_time": (interaction_result or {}).get("execution_time"),
-        "metrics": _as_jsonable((interaction_result or {}).get("rollout_cache", {}).get("metrics", {})),
-        "token_usage": _as_jsonable((interaction_result or {}).get("rollout_cache", {}).get("token_usage", {})),
+        "execution_time": interaction_result.get("execution_time"),
+        "metrics": _as_jsonable(rollout_cache.get("metrics", {})),
+        "token_usage": _as_jsonable(rollout_cache.get("token_usage", {})),
         "extra_info": extra_info,
         "error": error,
         "error_kind": error_kind,
         "error_stage": error_stage,
         "system_error": is_system_error_kind(error_kind),
     }
+
+
+class IncrementalRolloutSink:
+    """Serialize completed rollout records to JSONL and the eval cache immediately."""
+
+    def __init__(
+        self,
+        *,
+        rollouts_path: Path,
+        db_path: Path | None = None,
+        experiment_id: str | None = None,
+        provider_source_name: str | None = None,
+        model_api_name: str | None = None,
+        model_label: str | None = None,
+        dataset_name: str | None = None,
+        config_snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        self.rollouts_path = rollouts_path
+        self.db_path = db_path
+        self.experiment_id = experiment_id
+        self.provider_source_name = provider_source_name
+        self.model_api_name = model_api_name
+        self.model_label = model_label
+        self.dataset_name = dataset_name
+        self.config_snapshot = config_snapshot or {}
+        self.count = 0
+        self.n_cached = 0
+        self._lock = asyncio.Lock()
+
+    def prepare(self) -> None:
+        self.rollouts_path.parent.mkdir(parents=True, exist_ok=True)
+        self.rollouts_path.touch(exist_ok=True)
+        if self.db_path:
+            required = {
+                "experiment_id": self.experiment_id,
+                "provider_source_name": self.provider_source_name,
+                "model_api_name": self.model_api_name,
+                "model_label": self.model_label,
+                "dataset_name": self.dataset_name,
+            }
+            missing = [name for name, value in required.items() if not value]
+            if missing:
+                raise ValueError(f"--cache-db requires {', '.join(missing)}")
+            with ensure_db(self.db_path) as conn:
+                upsert_experiment(
+                    conn,
+                    experiment_id=str(self.experiment_id),
+                    provider_source=str(self.provider_source_name),
+                    dataset=str(self.dataset_name),
+                    config_snapshot=self.config_snapshot,
+                )
+                conn.commit()
+
+    async def __call__(self, record: dict[str, Any]) -> None:
+        async with self._lock:
+            if self.db_path:
+                with ensure_db(self.db_path) as conn:
+                    upsert_rollout_record(
+                        conn,
+                        experiment_id=str(self.experiment_id),
+                        provider_source=str(self.provider_source_name),
+                        model_api_name=str(self.model_api_name),
+                        model_label=str(self.model_label),
+                        dataset=str(self.dataset_name),
+                        record=record,
+                        artifact_rollouts=self.rollouts_path,
+                    )
+                    conn.commit()
+                self.n_cached += 1
+            with self.rollouts_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, default=_json_default, ensure_ascii=False) + "\n")
+            self.count += 1
+
+
+async def _emit_record(record_sink: RecordSink | None, record: dict[str, Any]) -> None:
+    if record_sink is None:
+        return
+    result = record_sink(record)
+    if asyncio.iscoroutine(result):
+        await result
 
 
 async def run_provider_smoke(model_cfg: dict[str, Any], provider_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -494,6 +683,7 @@ async def run_one(
     model_cfg: dict[str, Any],
     agent_cfg: dict[str, Any],
     provider_cfg: dict[str, Any] | None = None,
+    rollout_index: int = 0,
 ) -> dict[str, Any]:
     instance_id = _instance_id(row)
     run_id = f"p2a-third-party-{uuid.uuid4()}"
@@ -561,6 +751,7 @@ async def run_one(
         run_id=run_id,
         model_name=model_cfg["model_name"],
         base_url=model_cfg.get("base_url") or provider_source(provider_cfg),
+        rollout_index=rollout_index,
         interaction_result=interaction_result,
         reward_score=reward_score,
         reward_details=reward_details,
@@ -579,14 +770,46 @@ async def run_batch(
     agent_cfg: dict[str, Any],
     n_parallel: int,
     provider_cfg: dict[str, Any] | None = None,
+    rollouts_per_instance: int = 1,
+    per_instance_parallelism: int = 1,
+    rollout_jobs: list[tuple[str, int]] | None = None,
+    record_sink: RecordSink | None = None,
+    collect_records: bool = True,
 ) -> list[dict[str, Any]]:
     semaphore = asyncio.Semaphore(max(n_parallel, 1))
+    row_by_id = {_instance_id(row): row for row in rows}
+    if rollout_jobs:
+        jobs = [(row_by_id[instance_id], rollout_index) for instance_id, rollout_index in rollout_jobs if instance_id in row_by_id]
+    else:
+        jobs = [(row, rollout_index) for row in rows for rollout_index in range(max(1, int(rollouts_per_instance or 1)))]
+    instance_semaphores: dict[str, asyncio.Semaphore] = {}
 
-    async def guarded(row: dict[str, Any]) -> dict[str, Any]:
+    def instance_semaphore(row: dict[str, Any]) -> asyncio.Semaphore:
+        instance_id = _instance_id(row) or f"row-{id(row)}"
+        if instance_id not in instance_semaphores:
+            instance_semaphores[instance_id] = asyncio.Semaphore(max(1, int(per_instance_parallelism or 1)))
+        return instance_semaphores[instance_id]
+
+    async def guarded(job_index: int, row: dict[str, Any], rollout_index: int) -> tuple[int, dict[str, Any]]:
         async with semaphore:
-            return await run_one(row, model_cfg=model_cfg, agent_cfg=agent_cfg, provider_cfg=provider_cfg)
+            async with instance_semaphore(row):
+                record = await run_one(
+                    row,
+                    model_cfg=model_cfg,
+                    agent_cfg=agent_cfg,
+                    provider_cfg=provider_cfg,
+                    rollout_index=rollout_index,
+                )
+                return job_index, record
 
-    return await asyncio.gather(*(guarded(row) for row in rows))
+    tasks = [asyncio.create_task(guarded(index, row, rollout_index)) for index, (row, rollout_index) in enumerate(jobs)]
+    records_by_index: dict[int, dict[str, Any]] = {}
+    for task in asyncio.as_completed(tasks):
+        index, record = await task
+        await _emit_record(record_sink, record)
+        if collect_records:
+            records_by_index[index] = record
+    return [records_by_index[index] for index in sorted(records_by_index)]
 
 
 def write_analysis(
@@ -618,6 +841,8 @@ def write_analysis(
         near_threshold=float(analysis_cfg.get("near_threshold", 0.5)),
         m_max=float(analysis_cfg.get("m_max", 3.0)),
     )
+    if analysis_cfg.get("scope"):
+        summary["scope"] = analysis_cfg["scope"]
     if details_out:
         write_jsonl(details_out, details)
     if summary_out:
@@ -677,11 +902,19 @@ def format_report(summary: dict[str, Any], details: list[dict[str, Any]]) -> str
                 first_gt=item.get("first_ground_truth_step") if item.get("first_ground_truth_step") is not None else "-",
             )
         )
+    scope = summary.get("scope") if isinstance(summary.get("scope"), dict) else {}
+    scope_lines = []
+    if scope:
+        scope_lines = [
+            f"- Source instances: {scope.get('source_size')}",
+            f"- Selected instances: {scope.get('selected_size')} ({scope.get('filter', {}).get('case_types') or 'all case types'})",
+        ]
     return "\n".join(
         [
             "# Third-Party P2A Localization Baseline",
             "",
             f"- Records: {summary.get('counts', {}).get('n_records', 0)}",
+            *scope_lines,
             f"- Bonus-map coverage: {rates.get('bonus_map_coverage')}",
             f"- Call-graph coverage: {rates.get('call_graph_coverage')}",
             f"- Read rate: {rates.get('read_rate')}",
@@ -707,6 +940,18 @@ def main() -> int:
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--instance-id", action="append", default=[])
     parser.add_argument("--n-parallel", type=int, default=1)
+    parser.add_argument("--rollouts-per-instance", type=int, default=None)
+    parser.add_argument("--per-instance-parallelism", type=int, default=None)
+    parser.add_argument("--case-type", action="append", default=[], help="Filter by bonus-map case type: direct, latent, exposed.")
+    parser.add_argument("--pattern-computable", action="store_true", default=None, help="Keep only pattern-computable bonus-map instances.")
+    parser.add_argument("--bonus-map-filter-json", default=None, help="JSON object matching bonus_map_instance_filter config.")
+    parser.add_argument(
+        "--rollout-job",
+        action="append",
+        type=parse_rollout_job,
+        default=[],
+        help="Run one explicit rollout job formatted as <instance_id>:<rollout_index>; may be repeated",
+    )
     parser.add_argument("--provider-smoke-only", action="store_true")
     parser.add_argument("--base-url", help="Override model.base_url from config/env")
     parser.add_argument("--model-name", help="Override model.model_name from config/env")
@@ -737,6 +982,17 @@ def main() -> int:
     provider_cfg = normalize_provider_config(config.get("provider"))
     model_cfg = resolve_model_config(config)
     agent_cfg = dict(config.get("agent") or {})
+    experiment_cfg = dict(config.get("experiment") or {})
+    rollouts_per_instance = _positive_int(
+        experiment_cfg.get("rollouts_per_instance", experiment_cfg.get("rollout_n")),
+        default=1,
+        name="experiment.rollouts_per_instance",
+    )
+    per_instance_parallelism = _positive_int(
+        experiment_cfg.get("per_instance_parallelism", experiment_cfg.get("rollout_parallelism")),
+        default=1,
+        name="experiment.per_instance_parallelism",
+    )
 
     if args.provider_smoke_only:
         smoke = asyncio.run(run_provider_smoke(model_cfg, provider_cfg))
@@ -745,48 +1001,63 @@ def main() -> int:
 
     if args.data is None:
         raise ValueError("--data is required unless --provider-smoke-only is set")
-    rows = _select_rows(
+    rows, scope_metadata = _select_scoped_rows(
         _load_rows(args.data),
         limit=args.limit,
         offset=args.offset,
-        instance_ids=set(args.instance_id) if args.instance_id else None,
+        instance_ids=set(args.instance_id) if args.instance_id else {item[0] for item in args.rollout_job} if args.rollout_job else None,
+        bonus_map_dir=args.bonus_map_dir,
+        scope_filter_config=config.get("bonus_map_instance_filter"),
     )
     if not rows:
         raise ValueError("No rows selected")
+    if scope_metadata:
+        config.setdefault("experiment", {})["scope"] = scope_metadata
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    records = asyncio.run(
-        run_batch(rows, model_cfg=model_cfg, agent_cfg=agent_cfg, n_parallel=args.n_parallel, provider_cfg=provider_cfg)
+    sink = IncrementalRolloutSink(
+        rollouts_path=args.out,
+        db_path=args.cache_db,
+        experiment_id=args.experiment_id or f"third-party-{args.dataset_name or _data_source(rows[0])}",
+        provider_source_name=provider_source(provider_cfg),
+        model_api_name=model_cfg["model_name"],
+        model_label=args.model_label or model_cfg["model_name"],
+        dataset_name=args.dataset_name or _data_source(rows[0]),
+        config_snapshot=_redact_config(config),
     )
-    write_jsonl(args.out, records)
-    print(json.dumps({"rollouts": str(args.out), "n_records": len(records)}, indent=2))
+    sink.prepare()
+    asyncio.run(
+        run_batch(
+            rows,
+            model_cfg=model_cfg,
+            agent_cfg=agent_cfg,
+            n_parallel=args.n_parallel,
+            provider_cfg=provider_cfg,
+            rollouts_per_instance=rollouts_per_instance,
+            per_instance_parallelism=per_instance_parallelism,
+            rollout_jobs=args.rollout_job or None,
+            record_sink=sink,
+            collect_records=False,
+        )
+    )
+    print(json.dumps({"rollouts": str(args.out), "n_records": sink.count}, indent=2))
 
     if args.bonus_map_dir:
         details_path = args.details_out or args.out.with_suffix(".details.jsonl")
+        analysis_cfg = dict(config.get("analysis") or {})
+        if scope_metadata:
+            analysis_cfg["scope"] = scope_metadata
         write_analysis(
             rollouts=args.out,
             bonus_map_dir=args.bonus_map_dir,
             summary_out=args.summary_out or args.out.with_suffix(".summary.json"),
             details_out=details_path,
             report_out=args.report_out or args.out.with_suffix(".report.md"),
-            analysis_cfg=dict(config.get("analysis") or {}),
+            analysis_cfg=analysis_cfg,
         )
     else:
         details_path = None
     if args.cache_db:
-        dataset_name = args.dataset_name or _data_source(rows[0])
-        n_cached = cache_rollouts(
-            db_path=args.cache_db,
-            experiment_id=args.experiment_id or f"third-party-{dataset_name}",
-            provider_source_name=provider_source(provider_cfg),
-            model_api_name=model_cfg["model_name"],
-            model_label=args.model_label or model_cfg["model_name"],
-            dataset_name=dataset_name,
-            config_snapshot=_redact_config(config),
-            rollouts_path=args.out,
-            details_path=details_path,
-        )
-        print(json.dumps({"cache_db": str(args.cache_db), "n_cached": n_cached}, indent=2))
+        print(json.dumps({"cache_db": str(args.cache_db), "n_cached": sink.n_cached}, indent=2))
     return 0
 
 

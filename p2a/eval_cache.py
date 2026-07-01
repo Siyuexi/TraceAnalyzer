@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from urllib.parse import quote
 
+from p2a.bonus_map_scope import LATENT_CASE, PATH_CASE_TYPES, canonical_detail_case_type
 from p2a.eval_fault_localization import _json_default, _sync_path_aliases, iter_records
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 DONE_STATUS = "done"
 ERROR_STATUS = "error"
 PENDING_STATUS = "pending"
@@ -37,7 +39,7 @@ LEGACY_PATH_PATTERN_KEYS = (
     "error_spiral_on_chain",
 )
 CHAIN_BAD_PATTERN_KEYS = LEGACY_PATH_PATTERN_KEYS
-PATH_METRIC_CASE_TYPES = {"direct", "standard"}
+PATH_METRIC_CASE_TYPES = PATH_CASE_TYPES
 DYNAMIC_TRACEABLE_CASE_TYPES = PATH_METRIC_CASE_TYPES
 
 
@@ -83,13 +85,17 @@ def _golden_patch(record: dict[str, Any]) -> str | None:
     return _first_text_field(record, ("golden_patch", "patch", "base_patch", "fix_patch"))
 
 
-def connect(db_path: Path | str) -> sqlite3.Connection:
+def connect(db_path: Path | str, *, timeout: float = 30.0) -> sqlite3.Connection:
     path = Path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=30.0)
+    conn = sqlite3.connect(path, timeout=timeout)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 30000")
+    conn.execute(f"PRAGMA busy_timeout = {int(timeout * 1000)}")
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.DatabaseError:
+        pass
     return conn
 
 
@@ -112,14 +118,20 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaratio
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
-def init_db(conn: sqlite3.Connection) -> None:
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
+    return row is not None
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    if not _table_exists(conn, table):
+        return set()
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _create_eval_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-          version INTEGER PRIMARY KEY,
-          applied_at TEXT NOT NULL
-        );
-
         CREATE TABLE IF NOT EXISTS experiments (
           experiment_id TEXT NOT NULL,
           provider_source TEXT NOT NULL,
@@ -138,6 +150,8 @@ def init_db(conn: sqlite3.Connection) -> None:
           model_label TEXT NOT NULL,
           dataset TEXT NOT NULL,
           instance_id TEXT NOT NULL,
+          rollout_index INTEGER NOT NULL DEFAULT 0,
+          rollout_id TEXT,
           status TEXT NOT NULL,
           attempts INTEGER NOT NULL DEFAULT 0,
           run_id TEXT,
@@ -148,7 +162,7 @@ def init_db(conn: sqlite3.Connection) -> None:
           error TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
-          UNIQUE (experiment_id, provider_source, model_api_name, dataset, instance_id)
+          UNIQUE (experiment_id, provider_source, model_api_name, dataset, instance_id, rollout_index)
         );
 
         CREATE TABLE IF NOT EXISTS raw_rollouts (
@@ -186,6 +200,7 @@ def init_db(conn: sqlite3.Connection) -> None:
           cache_hit_tokens REAL,
           cache_write_tokens REAL,
           cost REAL,
+          fingerprint TEXT,
           metrics_json TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -194,10 +209,64 @@ def init_db(conn: sqlite3.Connection) -> None:
           ON run_cells (experiment_id, provider_source, dataset, model_label);
         CREATE INDEX IF NOT EXISTS idx_run_cells_status
           ON run_cells (experiment_id, provider_source, dataset, status);
+        CREATE INDEX IF NOT EXISTS idx_run_cells_instance_rollout
+          ON run_cells (experiment_id, provider_source, model_api_name, dataset, instance_id, rollout_index);
         """
     )
+
+
+def _insert_rows_with_common_columns(conn: sqlite3.Connection, table: str, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    columns = [column for column in rows[0] if column in _table_columns(conn, table)]
+    if not columns:
+        return
+    placeholders = ", ".join("?" for _ in columns)
+    conn.executemany(
+        f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})",
+        [[row.get(column) for column in columns] for row in rows],
+    )
+
+
+def _migrate_rollout_index_schema(conn: sqlite3.Connection) -> None:
+    if not _table_exists(conn, "run_cells") or "rollout_index" in _table_columns(conn, "run_cells"):
+        return
+    run_rows = [dict(row) | {"rollout_index": 0, "rollout_id": None} for row in conn.execute("SELECT * FROM run_cells")]
+    raw_rows = [dict(row) for row in conn.execute("SELECT * FROM raw_rollouts")] if _table_exists(conn, "raw_rollouts") else []
+    metric_rows = (
+        [dict(row) for row in conn.execute("SELECT * FROM quantitative_metrics")]
+        if _table_exists(conn, "quantitative_metrics")
+        else []
+    )
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("DROP TABLE IF EXISTS quantitative_metrics")
+        conn.execute("DROP TABLE IF EXISTS raw_rollouts")
+        conn.execute("DROP TABLE IF EXISTS run_cells")
+        _create_eval_tables(conn)
+        _insert_rows_with_common_columns(conn, "run_cells", run_rows)
+        _insert_rows_with_common_columns(conn, "raw_rollouts", raw_rows)
+        _insert_rows_with_common_columns(conn, "quantitative_metrics", metric_rows)
+        conn.commit()
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
+def init_db(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL
+        );
+        """
+    )
+    _migrate_rollout_index_schema(conn)
+    _create_eval_tables(conn)
     _ensure_column(conn, "raw_rollouts", "issue_description", "TEXT")
     _ensure_column(conn, "raw_rollouts", "golden_patch", "TEXT")
+    _ensure_column(conn, "quantitative_metrics", "fingerprint", "TEXT")
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
         (SCHEMA_VERSION, utc_now()),
@@ -209,6 +278,168 @@ def ensure_db(db_path: Path | str) -> sqlite3.Connection:
     conn = connect(db_path)
     init_db(conn)
     return conn
+
+
+def _clean_delete_target(
+    *,
+    experiment_id: str | None = None,
+    provider_source: str | None = None,
+    dataset: str | None = None,
+) -> dict[str, str]:
+    target = {
+        "experiment_id": str(experiment_id).strip() if experiment_id else "",
+        "provider_source": str(provider_source).strip() if provider_source else "",
+        "dataset": str(dataset).strip() if dataset else "",
+    }
+    return {key: value for key, value in target.items() if value}
+
+
+def _normalize_delete_targets(targets: Iterable[Mapping[str, Any]], *, allow_all: bool = False) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[tuple[str, str], ...]] = set()
+    for item in targets:
+        target = _clean_delete_target(
+            experiment_id=item.get("experiment_id"),
+            provider_source=item.get("provider_source"),
+            dataset=item.get("dataset"),
+        )
+        if not target and not allow_all:
+            raise ValueError("delete target must include experiment_id, provider_source, or dataset")
+        key = tuple(sorted(target.items()))
+        if key not in seen:
+            normalized.append(target)
+            seen.add(key)
+    if not normalized and not allow_all:
+        raise ValueError("at least one delete target is required")
+    return normalized
+
+
+def _target_where(alias: str, targets: Iterable[Mapping[str, Any]], *, allow_all: bool = False) -> tuple[str, list[Any]]:
+    normalized = _normalize_delete_targets(targets, allow_all=allow_all)
+    if not normalized and allow_all:
+        return "1 = 1", []
+    clauses = []
+    params: list[Any] = []
+    for target in normalized:
+        if not target:
+            clauses.append("1 = 1")
+            continue
+        parts = []
+        for key in ("experiment_id", "provider_source", "dataset"):
+            value = target.get(key)
+            if value:
+                parts.append(f"{alias}.{key} = ?")
+                params.append(value)
+        clauses.append("(" + " AND ".join(parts) + ")")
+    return " OR ".join(clauses), params
+
+
+def _single_target(
+    *,
+    experiment_id: str | None = None,
+    provider_source: str | None = None,
+    dataset: str | None = None,
+) -> list[dict[str, str]]:
+    return [_clean_delete_target(experiment_id=experiment_id, provider_source=provider_source, dataset=dataset)]
+
+
+def count_run_data_targets(
+    conn: sqlite3.Connection,
+    targets: Iterable[Mapping[str, Any]],
+    *,
+    allow_all: bool = False,
+) -> dict[str, int]:
+    where_cells, cell_params = _target_where("c", targets, allow_all=allow_all)
+    where_exp, exp_params = _target_where("e", targets, allow_all=allow_all)
+    run_cells = int(conn.execute(f"SELECT COUNT(*) FROM run_cells c WHERE {where_cells}", cell_params).fetchone()[0])
+    raw_rollouts = int(
+        conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM raw_rollouts r
+            JOIN run_cells c ON c.id = r.cell_id
+            WHERE {where_cells}
+            """,
+            cell_params,
+        ).fetchone()[0]
+    )
+    quantitative_metrics = int(
+        conn.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM quantitative_metrics q
+            JOIN run_cells c ON c.id = q.cell_id
+            WHERE {where_cells}
+            """,
+            cell_params,
+        ).fetchone()[0]
+    )
+    experiments = int(conn.execute(f"SELECT COUNT(*) FROM experiments e WHERE {where_exp}", exp_params).fetchone()[0])
+    return {
+        "experiments": experiments,
+        "run_cells": run_cells,
+        "raw_rollouts": raw_rollouts,
+        "quantitative_metrics": quantitative_metrics,
+    }
+
+
+def count_run_data(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str | None = None,
+    provider_source: str | None = None,
+    dataset: str | None = None,
+    allow_all: bool = False,
+) -> dict[str, int]:
+    return count_run_data_targets(
+        conn,
+        _single_target(experiment_id=experiment_id, provider_source=provider_source, dataset=dataset),
+        allow_all=allow_all,
+    )
+
+
+def delete_run_data_targets(
+    conn: sqlite3.Connection,
+    targets: Iterable[Mapping[str, Any]],
+    *,
+    allow_all: bool = False,
+) -> dict[str, int]:
+    normalized = _normalize_delete_targets(targets, allow_all=allow_all)
+    counts = count_run_data_targets(conn, normalized, allow_all=allow_all)
+    where_cells, cell_params = _target_where("c", normalized, allow_all=allow_all)
+    where_exp, exp_params = _target_where("e", normalized, allow_all=allow_all)
+    with conn:
+        conn.execute(f"DELETE FROM run_cells WHERE id IN (SELECT c.id FROM run_cells c WHERE {where_cells})", cell_params)
+        conn.execute(f"DELETE FROM experiments WHERE rowid IN (SELECT e.rowid FROM experiments e WHERE {where_exp})", exp_params)
+    return counts
+
+
+def delete_run_data(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str | None = None,
+    provider_source: str | None = None,
+    dataset: str | None = None,
+    allow_all: bool = False,
+) -> dict[str, int]:
+    return delete_run_data_targets(
+        conn,
+        _single_target(experiment_id=experiment_id, provider_source=provider_source, dataset=dataset),
+        allow_all=allow_all,
+    )
+
+
+def delete_confirmation_phrase(counts: Mapping[str, Any]) -> str:
+    run_cells = int(counts.get("run_cells") or 0)
+    experiments = int(counts.get("experiments") or 0)
+    return f"delete {run_cells} run cells and {experiments} experiments"
+
+
+def backup_path_for_delete(db_path: Path | str, *, timestamp: str | None = None) -> Path:
+    path = Path(db_path)
+    stamp = timestamp or utc_now()
+    safe_stamp = re.sub(r"[^0-9A-Za-z_.-]+", "-", stamp).strip("-")
+    return path.with_name(f"{path.name}.backup-{safe_stamp}")
 
 
 def upsert_experiment(
@@ -242,8 +473,10 @@ def upsert_planned_cells(
     model_label: str,
     dataset: str,
     instance_ids: Iterable[str],
+    rollouts_per_instance: int = 1,
 ) -> None:
     now = utc_now()
+    rollouts_per_instance = max(1, int(rollouts_per_instance or 1))
     rows = [
         (
             experiment_id,
@@ -252,20 +485,22 @@ def upsert_planned_cells(
             model_label,
             dataset,
             instance_id,
+            rollout_index,
             PENDING_STATUS,
             now,
             now,
         )
         for instance_id in instance_ids
+        for rollout_index in range(rollouts_per_instance)
     ]
     conn.executemany(
         """
         INSERT INTO run_cells(
           experiment_id, provider_source, model_api_name, model_label, dataset,
-          instance_id, status, created_at, updated_at
+          instance_id, rollout_index, status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(experiment_id, provider_source, model_api_name, dataset, instance_id) DO UPDATE SET
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(experiment_id, provider_source, model_api_name, dataset, instance_id, rollout_index) DO UPDATE SET
           model_label = excluded.model_label,
           updated_at = excluded.updated_at
         """,
@@ -280,9 +515,13 @@ def mark_cells_running(
     provider_source: str,
     model_api_name: str,
     dataset: str,
-    instance_ids: Iterable[str],
+    instance_ids: Iterable[str] | None = None,
+    rollout_jobs: Iterable[tuple[str, int]] | None = None,
 ) -> None:
     now = utc_now()
+    jobs = list(rollout_jobs or [])
+    if not jobs:
+        jobs = [(instance_id, 0) for instance_id in (instance_ids or [])]
     conn.executemany(
         """
         UPDATE run_cells
@@ -292,6 +531,7 @@ def mark_cells_running(
           AND model_api_name = ?
           AND dataset = ?
           AND instance_id = ?
+          AND rollout_index = ?
           AND status != ?
         """,
         [
@@ -304,9 +544,10 @@ def mark_cells_running(
                 model_api_name,
                 dataset,
                 instance_id,
+                rollout_index,
                 DONE_STATUS,
             )
-            for instance_id in instance_ids
+            for instance_id, rollout_index in jobs
         ],
     )
 
@@ -332,6 +573,29 @@ def completed_instance_ids(
         (experiment_id, provider_source, model_api_name, dataset, DONE_STATUS),
     ).fetchall()
     return {str(row["instance_id"]) for row in rows}
+
+
+def completed_rollout_keys(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str,
+    provider_source: str,
+    model_api_name: str,
+    dataset: str,
+) -> set[tuple[str, int]]:
+    rows = conn.execute(
+        """
+        SELECT instance_id, rollout_index
+        FROM run_cells
+        WHERE experiment_id = ?
+          AND provider_source = ?
+          AND model_api_name = ?
+          AND dataset = ?
+          AND status = ?
+        """,
+        (experiment_id, provider_source, model_api_name, dataset, DONE_STATUS),
+    ).fetchall()
+    return {(str(row["instance_id"]), int(row["rollout_index"] or 0)) for row in rows}
 
 
 def _bool_int(value: Any) -> int | None:
@@ -374,16 +638,17 @@ def _cell_id(
     model_label: str,
     dataset: str,
     instance_id: str,
+    rollout_index: int = 0,
 ) -> int:
     now = utc_now()
     conn.execute(
         """
         INSERT INTO run_cells(
           experiment_id, provider_source, model_api_name, model_label, dataset,
-          instance_id, status, created_at, updated_at
+          instance_id, rollout_index, status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(experiment_id, provider_source, model_api_name, dataset, instance_id) DO UPDATE SET
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(experiment_id, provider_source, model_api_name, dataset, instance_id, rollout_index) DO UPDATE SET
           model_label = excluded.model_label,
           updated_at = excluded.updated_at
         """,
@@ -394,6 +659,7 @@ def _cell_id(
             model_label,
             dataset,
             instance_id,
+            rollout_index,
             PENDING_STATUS,
             now,
             now,
@@ -407,8 +673,9 @@ def _cell_id(
           AND model_api_name = ?
           AND dataset = ?
           AND instance_id = ?
+          AND rollout_index = ?
         """,
-        (experiment_id, provider_source, model_api_name, dataset, instance_id),
+        (experiment_id, provider_source, model_api_name, dataset, instance_id, rollout_index),
     ).fetchone()
     if row is None:
         raise RuntimeError("failed to create or load run cell")
@@ -445,9 +712,12 @@ def upsert_rollout_record(
     instance_id = str(record.get("instance_id") or (detail or {}).get("instance_id") or "")
     if not instance_id:
         raise ValueError("rollout record has no instance_id; cannot key DB cell")
+    rollout_index = int(record.get("rollout_index") or (detail or {}).get("rollout_index") or 0)
 
     now = utc_now()
-    requested_run_id = str(record.get("run_id") or f"{experiment_id}:{provider_source}:{model_api_name}:{dataset}:{instance_id}")
+    requested_run_id = str(
+        record.get("run_id") or f"{experiment_id}:{provider_source}:{model_api_name}:{dataset}:{instance_id}:{rollout_index}"
+    )
     cell_id = _cell_id(
         conn,
         experiment_id=experiment_id,
@@ -456,6 +726,7 @@ def upsert_rollout_record(
         model_label=model_label,
         dataset=dataset,
         instance_id=instance_id,
+        rollout_index=rollout_index,
     )
     run_id = _unique_raw_run_id(conn, requested_run_id, cell_id)
     status = ERROR_STATUS if record.get("error") else DONE_STATUS
@@ -464,6 +735,7 @@ def upsert_rollout_record(
         UPDATE run_cells
         SET status = ?,
             attempts = attempts + 1,
+            rollout_id = ?,
             run_id = ?,
             artifact_rollouts = ?,
             artifact_details = ?,
@@ -474,6 +746,7 @@ def upsert_rollout_record(
         """,
         (
             status,
+            str(record.get("rollout_id") or rollout_index),
             run_id,
             str(artifact_rollouts) if artifact_rollouts else None,
             str(artifact_details) if artifact_details else None,
@@ -527,9 +800,9 @@ def upsert_rollout_record(
           cell_id, reward, resolved, p2a_read, call_graph_hit, ground_truth_hit,
           near_hit, min_distance, turns, tool_calls, wall_time, input_tokens,
           output_tokens, reasoning_tokens, cache_hit_tokens, cache_write_tokens,
-          cost, metrics_json, updated_at
+          cost, fingerprint, metrics_json, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(cell_id) DO UPDATE SET
           reward = excluded.reward,
           resolved = excluded.resolved,
@@ -547,6 +820,7 @@ def upsert_rollout_record(
           cache_hit_tokens = excluded.cache_hit_tokens,
           cache_write_tokens = excluded.cache_write_tokens,
           cost = excluded.cost,
+          fingerprint = excluded.fingerprint,
           metrics_json = excluded.metrics_json,
           updated_at = excluded.updated_at
         """,
@@ -568,9 +842,36 @@ def upsert_rollout_record(
             _number(token_usage.get("cache_hit_tokens")),
             _number(token_usage.get("cache_write_tokens")),
             _number(token_usage.get("cost")),
+            None,
             json_dumps(metrics),
             now,
         ),
+    )
+
+
+def write_dashboard_detail_cache(
+    conn: sqlite3.Connection,
+    *,
+    cell_id: int,
+    detail: Mapping[str, Any],
+    fingerprint: str,
+) -> None:
+    now = utc_now()
+    row = conn.execute("SELECT metrics_json FROM quantitative_metrics WHERE cell_id = ?", (cell_id,)).fetchone()
+    metrics = json_loads(row["metrics_json"] if row else None, {})
+    if not isinstance(metrics, dict):
+        metrics = {}
+    metrics["detail"] = dict(detail)
+    conn.execute(
+        """
+        INSERT INTO quantitative_metrics(cell_id, fingerprint, metrics_json, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(cell_id) DO UPDATE SET
+          fingerprint = excluded.fingerprint,
+          metrics_json = excluded.metrics_json,
+          updated_at = excluded.updated_at
+        """,
+        (cell_id, fingerprint, json_dumps(metrics), now),
     )
 
 
@@ -612,7 +913,15 @@ def _rate(values: list[int | None]) -> float | None:
     return sum(real) / len(real) if real else None
 
 
-def _detail_from_metric_row(row: sqlite3.Row) -> dict[str, Any]:
+def _std(values: list[float | int | None]) -> float | None:
+    real = [float(value) for value in values if value is not None]
+    if not real:
+        return None
+    mean = sum(real) / len(real)
+    return (sum((value - mean) ** 2 for value in real) / len(real)) ** 0.5
+
+
+def _detail_from_metric_row(row: Mapping[str, Any]) -> dict[str, Any]:
     metrics = json_loads(row["metrics_json"], {})
     detail = metrics.get("detail") if isinstance(metrics, dict) else None
     return _sync_path_aliases(detail) if isinstance(detail, dict) else {}
@@ -688,32 +997,23 @@ def _detail_distribution(details: list[dict[str, Any]], key: str) -> dict[str, i
 
 
 def _detail_case_type(detail: dict[str, Any]) -> str:
-    return str(detail.get("bonus_case_type") or _path_value(detail, "path_case_kind", "chain_case_kind", "") or "")
+    return canonical_detail_case_type(detail)
 
 
 def _is_path_metric_detail(detail: dict[str, Any]) -> bool:
     return _path_value(detail, "path_evaluable", "chain_evaluable") is True and _detail_case_type(detail) in PATH_METRIC_CASE_TYPES
 
 
-def _is_dynamic_traceable_detail(detail: dict[str, Any]) -> bool:
-    """Compatibility wrapper for old code paths; prefer _is_path_metric_detail."""
-    return _is_path_metric_detail(detail)
-
-
-def _has_dual_symptom_root(detail: dict[str, Any]) -> bool:
-    projection = _path_projection(detail)
-    anchors = set(projection.get("anchors") or [])
-    roots = set(projection.get("roots") or [])
-    return bool(anchors & roots)
-
-
-def _has_path_edges(detail: dict[str, Any]) -> bool:
-    projection = _path_projection(detail)
+def _is_order_metric_detail(detail: dict[str, Any]) -> bool:
+    if not _is_path_metric_detail(detail) or _detail_case_type(detail) != LATENT_CASE:
+        return False
+    projection = detail.get("path_projection") or detail.get("chain_projection") or {}
     return bool(projection.get("path_edges") or projection.get("chain_edges") or [])
 
 
-def _is_order_metric_detail(detail: dict[str, Any]) -> bool:
-    return _is_path_metric_detail(detail) and _has_path_edges(detail) and not _has_dual_symptom_root(detail)
+def _is_dynamic_traceable_detail(detail: dict[str, Any]) -> bool:
+    """Compatibility wrapper for old code paths; prefer _is_path_metric_detail."""
+    return _is_path_metric_detail(detail)
 
 
 def _path_pattern_distribution(details: list[dict[str, Any]], keys: Iterable[str] = PATH_PATTERN_KEYS) -> dict[str, int]:
@@ -726,6 +1026,228 @@ def _path_pattern_distribution(details: list[dict[str, Any]], keys: Iterable[str
             if patterns.get(key):
                 counts[key] += 1
     return dict(sorted(counts.items()))
+
+
+def _detail_ratio(detail: dict[str, Any], numerator: str, denominator: str) -> float | None:
+    num = _detail_number(detail, numerator)
+    den = _detail_number(detail, denominator)
+    return (num / den) if num is not None and den else None
+
+
+AVG_AT_METRIC_KEYS = (
+    "resolved_rate",
+    "reward_rate",
+    "p2a_read_rate",
+    "call_graph_hit_rate",
+    "ground_truth_hit_rate",
+    "near_hit_rate",
+    "avg_min_distance",
+    "avg_read_precision",
+    "avg_node_recall",
+    "avg_hit_f1",
+    "path_coverage",
+    "chain_graph_coverage",
+    "path_hit_rate",
+    "chain_hit_rate",
+    "anchor_hit_rate",
+    "root_hit_rate",
+    "avg_path_node_recall",
+    "avg_chain_node_recall",
+    "avg_path_node_precision",
+    "avg_chain_node_precision",
+    "avg_path_node_f1",
+    "avg_chain_node_f1",
+    "avg_path_read_precision",
+    "avg_chain_read_precision",
+    "avg_first_anchor_step",
+    "avg_first_root_step",
+    "avg_steps_anchor_to_root",
+    "anchor_before_root_rate",
+    "avg_order_score",
+    "reverse_order_rate",
+    "miracle_rate",
+    "avg_miracle_severity",
+    "avg_block_order_score",
+    "block_reverse_order_rate",
+    "block_miracle_rate",
+    "avg_block_efficiency",
+    "avg_blocks_per_trace",
+    "block_achieve_rate",
+    "block_waste_rate",
+    "block_loop_rate",
+    "achieving_block_step_share",
+    "wasted_block_step_share",
+    "loop_block_step_share",
+    "loop_trace_rate",
+    "error_spiral_rate",
+    "avg_turns",
+    "avg_tool_calls",
+    "avg_wall_time",
+    "avg_input_tokens",
+    "avg_output_tokens",
+    "avg_reasoning_tokens",
+    "cache_hit_rate",
+    "cache_write_rate",
+)
+
+
+def _rollout_metric_values(row: Mapping[str, Any]) -> dict[str, float | int | None]:
+    detail = _detail_from_metric_row(row)
+    path_metric = _is_path_metric_detail(detail) if detail else False
+    order_metric = _is_order_metric_detail(detail) if detail else False
+    order_defined = order_metric and detail.get("order_defined") is True
+    block_order_defined = order_metric and detail.get("block_order_defined") is True
+    bad_patterns = detail.get("bad_patterns") if isinstance(detail.get("bad_patterns"), dict) else {}
+    cache_hit = float(row["cache_hit_tokens"] or 0)
+    cache_write = float(row["cache_write_tokens"] or 0)
+    input_tokens = float(row["input_tokens"] or 0)
+    total_blocks = _detail_number(detail, "n_blocks") if path_metric else None
+    order_score = _detail_number(detail, "order_score") if order_defined else None
+    block_order_score = _detail_number(detail, "block_order_score") if block_order_defined else None
+    return {
+        "resolved_rate": _bool_int(row["resolved"]),
+        "reward_rate": _number(row["reward"]),
+        "p2a_read_rate": _bool_int(row["p2a_read"]),
+        "call_graph_hit_rate": _bool_int(row["call_graph_hit"]),
+        "ground_truth_hit_rate": _bool_int(row["ground_truth_hit"]),
+        "near_hit_rate": _bool_int(row["near_hit"]),
+        "avg_min_distance": _number(row["min_distance"]),
+        "avg_read_precision": _detail_number(detail, "hit_precision") if path_metric else None,
+        "avg_node_recall": _detail_number(detail, "hit_recall") if path_metric else None,
+        "avg_hit_f1": _detail_number(detail, "hit_f1") if path_metric else None,
+        "path_coverage": _bool_int(_path_value(detail, "path_covered", "chain_graph_covered")) if path_metric else None,
+        "chain_graph_coverage": _bool_int(_path_value(detail, "path_covered", "chain_graph_covered")) if path_metric else None,
+        "path_hit_rate": _bool_int(_path_value(detail, "path_hit", "chain_hit")) if path_metric else None,
+        "chain_hit_rate": _bool_int(_path_value(detail, "path_hit", "chain_hit")) if path_metric else None,
+        "anchor_hit_rate": _detail_bool(detail, "anchor_hit") if path_metric else None,
+        "root_hit_rate": _detail_bool(detail, "root_hit") if path_metric else None,
+        "avg_path_node_recall": _number(_path_value(detail, "path_node_recall", "chain_node_recall")) if path_metric else None,
+        "avg_chain_node_recall": _number(_path_value(detail, "path_node_recall", "chain_node_recall")) if path_metric else None,
+        "avg_path_node_precision": _path_node_precision(detail) if path_metric else None,
+        "avg_chain_node_precision": _path_node_precision(detail) if path_metric else None,
+        "avg_path_node_f1": _path_node_f1(detail) if path_metric else None,
+        "avg_chain_node_f1": _path_node_f1(detail) if path_metric else None,
+        "avg_path_read_precision": _number(_path_value(detail, "path_read_precision", "chain_read_precision")) if path_metric else None,
+        "avg_chain_read_precision": _number(_path_value(detail, "path_read_precision", "chain_read_precision")) if path_metric else None,
+        "avg_first_anchor_step": _detail_number(detail, "first_anchor_step") if path_metric else None,
+        "avg_first_root_step": _detail_number(detail, "first_root_step") if path_metric else None,
+        "avg_steps_anchor_to_root": _detail_number(detail, "steps_anchor_to_root") if path_metric else None,
+        "anchor_before_root_rate": _detail_bool(detail, "anchor_before_root") if path_metric else None,
+        "avg_order_score": order_score,
+        "reverse_order_rate": _bool_int(order_score < 0) if order_score is not None else None,
+        "miracle_rate": _bool_int(bool(detail.get("miracle_step")) or bool(detail.get("block_miracle_step"))) if order_metric else None,
+        "avg_miracle_severity": _detail_number(detail, "miracle_severity") if order_metric else None,
+        "avg_block_order_score": block_order_score,
+        "block_reverse_order_rate": _bool_int(block_order_score < 0) if block_order_score is not None else None,
+        "block_miracle_rate": _bool_int(detail.get("block_miracle_step")) if order_metric and detail.get("block_miracle_step") is not None else None,
+        "avg_block_efficiency": _detail_number(detail, "block_efficiency") if path_metric else None,
+        "avg_blocks_per_trace": total_blocks if path_metric else None,
+        "block_achieve_rate": _detail_ratio(detail, "n_achieving_blocks", "n_scored_read_blocks") if path_metric else None,
+        "block_waste_rate": _detail_ratio(detail, "n_wasted_blocks", "n_scored_read_blocks") if path_metric else None,
+        "block_loop_rate": _detail_ratio(detail, "n_loop_blocks", "n_blocks") if path_metric else None,
+        "achieving_block_step_share": _detail_ratio(detail, "n_achieving_block_steps", "n_scored_read_block_steps")
+        if path_metric
+        else None,
+        "wasted_block_step_share": _detail_ratio(detail, "n_wasted_block_steps", "n_scored_read_block_steps")
+        if path_metric
+        else None,
+        "loop_block_step_share": _detail_ratio(detail, "n_loop_block_steps", "n_block_steps") if path_metric else None,
+        "loop_trace_rate": _bool_int(bad_patterns.get("has_loop")) if bad_patterns else None,
+        "error_spiral_rate": _bool_int(bad_patterns.get("error_spiral")) if bad_patterns else None,
+        "avg_turns": _number(row["turns"]),
+        "avg_tool_calls": _number(row["tool_calls"]),
+        "avg_wall_time": _number(row["wall_time"]),
+        "avg_input_tokens": _number(row["input_tokens"]),
+        "avg_output_tokens": _number(row["output_tokens"]),
+        "avg_reasoning_tokens": _number(row["reasoning_tokens"]),
+        "cache_hit_rate": (cache_hit / (input_tokens + cache_hit)) if cache_hit and (input_tokens + cache_hit) else None,
+        "cache_write_rate": (cache_write / (input_tokens + cache_write)) if cache_write and (input_tokens + cache_write) else None,
+    }
+
+
+def _rollout_n(group: list[Mapping[str, Any]]) -> int:
+    if not group:
+        return 1
+    return max(1, max(int(row["rollout_index"] or 0) for row in group) + 1)
+
+
+def _rows_by_instance(rows: Iterable[Mapping[str, Any]]) -> dict[str, list[Mapping[str, Any]]]:
+    out: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in rows:
+        out[str(row["instance_id"])].append(row)
+    for values in out.values():
+        values.sort(key=lambda item: int(item["rollout_index"] or 0))
+    return out
+
+
+def _first_k_rollout_rows(rows: Iterable[Mapping[str, Any]], *, k: int) -> list[Mapping[str, Any]]:
+    return [row for row in rows if int(row["rollout_index"] or 0) < k]
+
+
+def _avg_at_payload(metric_rows: list[Mapping[str, Any]], *, n: int) -> tuple[dict[str, float | None], dict[str, float | None]]:
+    by_instance = _rows_by_instance(metric_rows)
+    values_by_key: dict[str, list[float | None]] = {key: [] for key in AVG_AT_METRIC_KEYS}
+    for rows in by_instance.values():
+        selected = _first_k_rollout_rows(rows, k=n)
+        rollout_values = [_rollout_metric_values(row) for row in selected]
+        for key in AVG_AT_METRIC_KEYS:
+            values_by_key[key].append(_avg([values.get(key) for values in rollout_values]))
+    means = {key: _avg(values) for key, values in values_by_key.items()}
+    stds = {key: _std(values) for key, values in values_by_key.items()}
+    return means, stds
+
+
+def _avg_at_payloads(
+    metric_rows: list[Mapping[str, Any]],
+    *,
+    rollout_n: int,
+) -> tuple[dict[str, dict[str, float | None]], dict[str, dict[str, float | None]]]:
+    avg_at: dict[str, dict[str, float | None]] = {}
+    avg_at_std: dict[str, dict[str, float | None]] = {}
+    for k in range(1, rollout_n + 1):
+        means, stds = _avg_at_payload(metric_rows, n=k)
+        avg_at[str(k)] = means
+        avg_at_std[str(k)] = stds
+    return avg_at, avg_at_std
+
+
+def _pass_at_payload(metric_rows: list[Mapping[str, Any]], *, rollout_n: int) -> dict[str, float | None]:
+    by_instance = _rows_by_instance(metric_rows)
+    out: dict[str, float | None] = {}
+    for k in range(1, rollout_n + 1):
+        values = []
+        for rows in by_instance.values():
+            selected = _first_k_rollout_rows(rows, k=k)
+            if selected:
+                values.append(1 if any(_bool_int(row["resolved"]) == 1 for row in selected) else 0)
+        out[str(k)] = _rate(values)
+    return out
+
+
+def _k_metric_row(row: sqlite3.Row) -> Mapping[str, Any]:
+    if row["status"] == DONE_STATUS:
+        return row
+    data = {key: row[key] for key in row.keys()}
+    data["reward"] = 0.0
+    data["resolved"] = 0
+    return data
+
+
+def _selected_scope_from_snapshot(value: str | None) -> dict[str, Any] | None:
+    snapshot = json_loads(value, {})
+    if not isinstance(snapshot, dict):
+        return None
+    for candidate in (
+        snapshot.get("selected_scope"),
+        snapshot.get("scope"),
+        (snapshot.get("experiment") or {}).get("scope") if isinstance(snapshot.get("experiment"), dict) else None,
+        ((snapshot.get("config") or {}).get("experiment") or {}).get("scope")
+        if isinstance(snapshot.get("config"), dict)
+        else None,
+    ):
+        if isinstance(candidate, dict) and candidate:
+            return candidate
+    return None
 
 
 def aggregate_model_metrics(
@@ -747,10 +1269,17 @@ def aggregate_model_metrics(
         where.append("c.dataset = ?")
         params.append(dataset)
     where_sql = "WHERE " + " AND ".join(where) if where else ""
+    cell_columns = _table_columns(conn, "run_cells")
+    rollout_index_sql = "c.rollout_index" if "rollout_index" in cell_columns else "0 AS rollout_index"
+    rollout_index_order_sql = "c.rollout_index" if "rollout_index" in cell_columns else "rollout_index"
+    rollout_id_sql = "c.rollout_id" if "rollout_id" in cell_columns else "NULL AS rollout_id"
 
     rows = conn.execute(
         f"""
         SELECT
+          c.instance_id,
+          {rollout_index_sql},
+          {rollout_id_sql},
           c.experiment_id,
           c.provider_source,
           c.dataset,
@@ -758,6 +1287,7 @@ def aggregate_model_metrics(
           c.model_label,
           c.status,
           c.error,
+          e.config_snapshot,
           q.reward,
           q.resolved,
           q.p2a_read,
@@ -776,9 +1306,13 @@ def aggregate_model_metrics(
           q.cost,
           q.metrics_json
         FROM run_cells c
+        LEFT JOIN experiments e
+          ON e.experiment_id = c.experiment_id
+         AND e.provider_source = c.provider_source
+         AND e.dataset = c.dataset
         LEFT JOIN quantitative_metrics q ON q.cell_id = c.id
         {where_sql}
-        ORDER BY c.model_label, c.instance_id
+        ORDER BY c.model_label, c.instance_id, {rollout_index_order_sql}
         """,
         params,
     ).fetchall()
@@ -799,10 +1333,18 @@ def aggregate_model_metrics(
         done = [row for row in group if row["status"] == DONE_STATUS]
         errors = [row for row in group if row["status"] == ERROR_STATUS]
         metric_rows = [row for row in done if row["turns"] is not None]
+        k_metric_rows = [_k_metric_row(row) for row in group if row["status"] in {DONE_STATUS, ERROR_STATUS}]
+        rollout_n = _rollout_n(group)
+        avg_at, avg_at_std = _avg_at_payloads(k_metric_rows, rollout_n=rollout_n)
+        avg_at_n = avg_at.get(str(rollout_n), {})
+        avg_at_n_std = avg_at_std.get(str(rollout_n), {})
+        pass_at = _pass_at_payload(k_metric_rows, rollout_n=rollout_n)
         distances = [row["min_distance"] for row in metric_rows if row["min_distance"] is not None]
         cache_hit = sum(float(row["cache_hit_tokens"] or 0) for row in metric_rows)
         cache_write = sum(float(row["cache_write_tokens"] or 0) for row in metric_rows)
         input_tokens = sum(float(row["input_tokens"] or 0) for row in metric_rows)
+        planned_instances = _rows_by_instance(group)
+        done_instances = _rows_by_instance(metric_rows)
         details = [_detail_from_metric_row(row) for row in metric_rows]
         details = [detail for detail in details if detail]
         path_metric_details = [detail for detail in details if _is_path_metric_detail(detail)]
@@ -813,17 +1355,27 @@ def aggregate_model_metrics(
         total_blocks = _sum_detail(path_metric_details, "n_blocks")
         block_steps = _sum_detail(path_metric_details, "n_block_steps")
         scored_block_steps = _sum_detail(path_metric_details, "n_scored_read_block_steps")
-        out.append(
-            {
+        row_payload = {
                 "experiment_id": exp_id,
                 "provider_source": source,
                 "dataset": ds,
                 "model_api_name": api_name,
                 "model_label": label,
-                "target": len(group),
-                "done": len(done),
+                "target": len(planned_instances),
+                "target_rollouts": len(group),
+                "done": len(done_instances),
+                "done_rollouts": len(done),
                 "errors": len(errors),
                 "pending": sum(1 for row in group if row["status"] in {PENDING_STATUS, RUNNING_STATUS}),
+                "rollouts_per_instance": rollout_n,
+                "selected_scope": _selected_scope_from_snapshot(group[0]["config_snapshot"]),
+                "pass_at_n": pass_at.get(str(rollout_n)),
+                "pass_at": pass_at,
+                "avg_at": avg_at,
+                "avg_at_std": avg_at_std,
+                "avg_at_n": avg_at_n,
+                "avg_at_n_std": avg_at_n_std,
+                "std_scale": 1,
                 "resolved_rate": _rate([row["resolved"] for row in metric_rows]),
                 "reward_rate": _avg([row["reward"] for row in metric_rows]),
                 "p2a_read_rate": _rate([row["p2a_read"] for row in metric_rows]),
@@ -938,5 +1490,10 @@ def aggregate_model_metrics(
                 "total_cache_write_tokens": cache_write if cache_write else None,
                 "total_cost": sum(float(row["cost"] or 0) for row in metric_rows) if metric_rows else None,
             }
-        )
+        for metric_key, metric_value in avg_at_n.items():
+            row_payload[metric_key] = metric_value
+            std_value = avg_at_n_std.get(metric_key)
+            if std_value is not None:
+                row_payload[f"{metric_key}_std"] = std_value
+        out.append(row_payload)
     return out

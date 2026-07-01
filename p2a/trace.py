@@ -2186,10 +2186,10 @@ def build_call_graph_from_traces(
         if rewardable:
             if node_key in terminal_root_keys:
                 node_role = "root_cause"
-            elif node_key in upstream_adapter_patched_keys:
-                node_role = "fix_adapter"
             elif node_key in selected_anchor_keys:
                 node_role = "symptom"
+            elif node_key in upstream_adapter_patched_keys:
+                node_role = "fix_adapter"
             elif node_key in test_adapter_keys:
                 node_role = "test_adapter"
             else:

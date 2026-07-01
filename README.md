@@ -13,6 +13,10 @@ Everything is **self-contained**: data comes from HuggingFace, images from the
 pair-diag mirror of the original R2E images. There is **no dependency on the old
 `src-backup` fork**.
 
+> **Terminology**: the repo-root [`GLOSSARY.md`](../GLOSSARY.md) is the canonical
+> term table for the **Graph / Path / Trace** triad and the full role/metric
+> vocabulary used in this README, the code, and the dashboard. Match it.
+
 ## Bonus-map anchors
 
 Dynamic bonus maps keep observed Graph nodes, distances, roles, rewardability,
@@ -56,7 +60,7 @@ This repo now has four mostly independent surfaces:
 
 | Surface | Use it for | Primary entry points |
 |---|---|---|
-| Data setup | Build R2E-Gym subset, SWE-bench Verified, and the default SWE-bench hard validation split. | `scripts/setup.sh data ...`, `scripts/build_data.py` |
+| Data setup | Build R2E-Gym subset, SWE-bench Verified, the default SWE-bench hard validation split, and the optional SWE-Bench-Pro Python eval subset. | `scripts/setup.sh data ...`, `scripts/build_data.py` |
 | P2A training | Run Uni-Agent baseline or P2A advantage reshaping on ARL/Ray. | `scripts/main.sh`, `scripts/train_p2a.sh` |
 | Graph diagnostics | Precompute dynamic/static bonus maps and score whether rollouts read the fault-propagation graph. | `scripts/precompute_eval_bonus_maps.sh`, `p2a.eval_fault_localization`, live `val-p2a/*` validation metrics |
 | Third-party baselines | Run an OpenAI-compatible external model through the same Uni-Agent + ARL SWE/R2E environment and produce rollout/localization artifacts. | `scripts/main_3rd.sh`, `scripts/third_party_eval.sh`, `config/third_party_eval.deepseek.example.yaml` |
@@ -75,7 +79,7 @@ src/
     bad_instances.json        #   R2E instances to exclude from training (skip-list)
     third_party_eval.deepseek.example.yaml # third-party OpenAI-compatible model config template
   scripts/
-    build_data.py             # SINGLE data builder: r2e | swebench-verified | swebench-hard | skip-list
+    build_data.py             # SINGLE data builder: r2e | swebench-verified | swebench-hard | swebench-pro | skip-list
     uni_agent_arl.sh          # prepare/data/smoke/debug launcher (ARL config)
     setup.sh                  # idempotent data/dependency/eval-map setup helpers
     ray_setup.sh              # bring up Ray and smoke-check Ray Jobs
@@ -186,11 +190,37 @@ PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
 
 PYTHONPATH=.:uni-agent:uni-agent/examples/data_preprocess \
   uv run python scripts/build_data.py swebench-hard --out $DATA/swe_bench_verified_hard.parquet
+
+# Phase 1 SWE-Bench-Pro eval subset: Python repos only, never training.
+export P2A_SWEBENCH_PRO_SCRIPTS_DIR=/path/to/SWE-bench_Pro-os/run_scripts
+PYTHONPATH=.:uni-agent:uni-agent/verl:uni-agent/examples/data_preprocess \
+  uv run python scripts/build_data.py swebench-pro \
+    --out $DATA/swe_bench_pro.parquet \
+    --scripts-dir "$P2A_SWEBENCH_PRO_SCRIPTS_DIR"
 ```
 
 `swebench-hard` is a filtered parquet, not a separate HuggingFace cache directory.
 The two upstream cache directories are expected: `SWE-Bench-Verified/` carries
 R2E-Gym eval rows, while `SWE-bench_Verified/` carries Princeton difficulty labels.
+`swebench-pro` stores the upstream `repo_language`, normalized `FAIL_TO_PASS` /
+`PASS_TO_PASS`, the mirrored `jefzda/sweap-images:{dockerhub_tag}` image, and
+the per-instance SWE-Bench-Pro run script/parser from the official open-source
+`run_scripts/` checkout. `--scripts-dir` is required because the HuggingFace
+dataset does not carry `run_script.sh` or `parser.py`; setup rejects existing
+SWE-Bench-Pro parquets with empty script fields. Pro images use `/app` as the
+repository root, so the generated setup and verifier metadata keep that path
+separate from SWE-bench Verified's `/testbed`. Dynamic ARL precompute also
+requires the corresponding `sweap-images` tags to be present in the pair-diag
+mirror; missing tags fail during sandbox startup as `ImagePullBackOff`.
+Use the image preflight helper to generate or check the Phase-1 mirror list:
+
+```bash
+uv run python scripts/swebench_pro_images.py $DATA/swe_bench_pro.parquet --limit 5
+uv run python scripts/swebench_pro_images.py $DATA/swe_bench_pro.parquet \
+  --limit 5 --check-manifests --fail-on-missing-mirror
+uv run python scripts/swebench_pro_images.py $DATA/swe_bench_pro.parquet \
+  --emit-mirror-script > /tmp/swebench_pro_mirror_python.sh
+```
 
 ### Step 3. Precompute training bonus maps for P2A
 
@@ -222,11 +252,16 @@ Skip this step for a pure baseline run. P2A training reads these maps through
 
 ```bash
 TEST_FILE=$DATA/swe_bench_verified_hard.parquet bash scripts/precompute_eval_bonus_maps.sh
+
+EVAL_DATASET=swebench-pro \
+  TEST_FILE=$DATA/swe_bench_pro.parquet \
+  bash scripts/precompute_eval_bonus_maps.sh
 ```
 
-Eval maps default to `data/bonus_maps/swebench-hard`. They are diagnostic only:
-validation logging reads them, but the training reshape should use the training
-split's `data/bonus_maps/r2e-gym-subset` directory.
+Eval maps default to `data/bonus_maps/<dataset>`, such as
+`data/bonus_maps/swebench-hard` or `data/bonus_maps/swebench-pro`. They are
+diagnostic only: validation logging reads them, but the training reshape should
+use the training split's `data/bonus_maps/r2e-gym-subset` directory.
 
 ### Step 5. Configure logging and GPU layout
 
@@ -410,6 +445,15 @@ uv run python scripts/p2a_dashboard.py \
   --bonus-map-dir data/bonus_maps/swebench-hard
 ```
 
+Live DB dashboards keep a process-local snapshot cache and reuse it while the
+underlying `run_cells`/metric update token is unchanged. To enable admin-only
+deletion, put the password in `.secrets/dashboard_admin.txt` or pass
+`--admin-secret .secrets/dashboard_admin.txt`; without that file the dashboard
+remains read-only and open for normal viewing. Admin deletion previews the DB
+blast radius, requires typing the generated confirmation phrase, backs up the
+SQLite file, and removes only DB rows (`run_cells` plus cascaded rollouts and
+metrics, and matching `experiments`). On-disk rollout artifacts are not deleted.
+
 The Overview tab is the dataset and eval-cell registry. Dataset-level
 distributions count unique instances in a dataset/split, so five model runs over
 the 45-instance `swebench-hard` split still show a distribution population of 45,
@@ -438,7 +482,11 @@ matching bonus maps. If `--bonus-map-dir` is omitted, the dashboard tries
 contains matching instance maps. Persisted DB score fields are compatibility
 fallbacks, not the default semantic source of truth; new collection paths should
 not write localization score columns, `metrics_json.detail`, or trace pattern
-flags. If old DB rows do not carry issue descriptions or golden patches, the
+flags. The live dashboard may write `metrics_json.detail` plus a `fingerprint`
+back to `quantitative_metrics` after it computes a cell from raw rollout content.
+That cache is used only when the scorer version, scoring parameters, raw rollout
+hash, and bonus-map file hash still match; stale entries are recomputed and
+overwritten. If old DB rows do not carry issue descriptions or golden patches, the
 dashboard fills them from `--data-file` or the standard local dataset parquet for
 the selected dataset. Node Source is bonus-map data: the dashboard reads full
 callable source from the explicit or inferred P2A bonus-map directory, and DB
@@ -449,7 +497,14 @@ unlinked logs are shown separately. The Traces tab is the micro-analysis
 surface: narrow instance list on the left, graph plus purpose-block/step
 timeline in the middle, and a wide right panel with parsed tool/action details,
 separate reasoning/chat text, collapsible raw action/observation payloads, and
-inline edit diffs when write actions provide old/new text. Step colors and trace
+inline edit diffs when write actions provide old/new text. When an eval cell has
+repeated rollouts for the same instance, the left instance row is split into
+per-rollout success/failure color segments and the selected instance title
+offers a rollout selector. Pattern tag toggles filter the instance list and the
+rollout selector to rollouts matching all selected tags; undefined miracle,
+reverse, or Path-hit markers do not match their tag. Copy-link controls produce
+URL-hash permalinks for experiment, instance, rollout, and exact step locations,
+and pasted links clear conflicting filters before navigating. Step colors and trace
 markers come from P2A parser/scorer fields: reads, writes, execution errors,
 root-cause edits, symptom/root-cause hits, and Path hits are computed
 in `p2a/core.py`, `p2a/eval_fault_localization.py`, and
@@ -458,8 +513,12 @@ marks use structured tool status, nonzero exit codes, explicit error fields, or
 traceback/command-failure output; source code that merely contains words such as
 `Error` is not a failed step. Miracle means root-cause access before the
 symptom/anchor evidence, or before intermediate dependency evidence; dashboard
-miracle/reverse rates are shares of the currently filtered direct/standard
-traces, matching the trace-list pattern markers. If one read step observes the
+miracle/reverse rates are shares of the currently filtered latent traces with
+defined Pattern semantics, matching the trace-list pattern markers. `latent`
+means a formerly standard case with a clean, ordered Path denominator: selected
+anchors exist, root causes do not overlap those anchors, and reward Path edges
+with distinct distances exist. `exposed` is the complementary formerly standard
+case where that clean Pattern denominator is collapsed or unavailable. If one read step observes the
 symptom, intermediate nodes, and root cause together, that simultaneous
 observation is not a miracle. Step colors split into equal role segments when a
 single step hits multiple map roles; a callable that is both symptom and root
@@ -467,7 +526,8 @@ cause uses a diagonal split so it is visually distinct from a multi-node step
 hit. Node Source uses the full captured callable source when the bonus map
 provides it. The
 global case filters keep Overview as the full dataset registry while restricting
-Metrics and Traces to the checked `standard`, `direct`, or `other` case types.
+Metrics and Traces to the checked `direct`, `latent`, `exposed`, or `other` case
+types.
 
 The offline `summary-out` and `details-out` files are post-hoc artifacts for
 inspecting dumped rollouts. Training and validation do not read them; live
@@ -488,6 +548,18 @@ export P2A_THIRD_PARTY_MODEL=deepseek-v4-flash
 
 bash scripts/main_3rd.sh
 ```
+
+To run a pattern-focused subset without creating subtype-specific dataset
+parquets, keep the source dataset and filter through bonus-map metadata:
+
+```bash
+P2A_THIRD_PARTY_CASE_TYPES=latent bash scripts/main_3rd.sh
+```
+
+Batch configs support the same scope as `bonus_map_instance_filter.case_type:
+latent`. Training-time validation uses `P2A_EVAL_CASE_TYPES=latent` with
+`P2A_EVAL_BONUS_MAP_DIR`; the launcher writes a derived eval parquet plus a
+`.scope.json` metadata file while leaving the canonical dataset parquet intact.
 
 For API batches, put a non-secret config under `config/` or a private one under
 `.secrets/`, then run the same entry point in batch mode:
@@ -527,12 +599,14 @@ If the smoke phase records only system errors such as ARL gateway or interactive
 shell failures, batch mode stops before the full phase and reports the structured
 error kind in the rollout artifacts.
 
-Switch datasets with `THIRD_PARTY_DATASET=swebench-verified` or
-`THIRD_PARTY_DATASET=r2e-gym-subset`. Keep `P2A_THIRD_PARTY_LIMIT` small for
-smoke tests; set it higher, or to `all`, for a real baseline. The wrapper does
-not sync dependencies by default so it does not prune a shared training `.venv`;
-set `P2A_THIRD_PARTY_SYNC_DEPS=1` only when you intentionally want a core CPU
-sync in the active environment.
+Switch datasets with `THIRD_PARTY_DATASET=swebench-verified`,
+`THIRD_PARTY_DATASET=swebench-pro`, or `THIRD_PARTY_DATASET=r2e-gym-subset`.
+For `swebench-pro`, set `P2A_SWEBENCH_PRO_SCRIPTS_DIR` before the setup phase so
+the parquet embeds the per-instance verifier scripts. Keep
+`P2A_THIRD_PARTY_LIMIT` small for smoke tests; set it higher, or to `all`, for a
+real baseline. The wrapper does not sync dependencies by default so it does not
+prune a shared training `.venv`; set `P2A_THIRD_PARTY_SYNC_DEPS=1` only when you
+intentionally want a core CPU sync in the active environment.
 
 The lower-level pass-through remains available when you want explicit control
 over every path and CLI flag:
@@ -555,8 +629,8 @@ timeout 15m bash scripts/third_party_eval.sh \
 ```
 
 The harness uses Uni-Agent's `OpenAICompatibleChatModel`, the local ARL
-deployment adapter, and the same SWE/R2E reward specs as training. It writes
-`p2a_third_party_rollout_v1` JSONL with `messages`, structured tool calls,
+deployment adapter, and the same SWE/R2E/SWE-Bench-Pro reward specs as training.
+It writes `p2a_third_party_rollout_v1` JSONL with `messages`, structured tool calls,
 `p2a_step_traces`, reward details, and termination status. When
 `--bonus-map-dir` is set it also writes scorer details, a summary JSON, and a
 short Markdown localization baseline report. For smoke tests, `--max-turns`,
@@ -582,6 +656,7 @@ These are knobs you set; the repo does not pin them:
 | Third-party run scope | `THIRD_PARTY_DATASET`, `THIRD_PARTY_DATA_FILE`, `P2A_THIRD_PARTY_LIMIT`, `P2A_THIRD_PARTY_N_PARALLEL`, `P2A_THIRD_PARTY_RUN_TIMEOUT`, `P2A_THIRD_PARTY_BONUS_*` |
 | ARL gateway | `ARL_GATEWAY_URL` |
 | Hard-subset criterion | `--difficulties` flag of `build_data.py swebench-hard` (default = the `1-4 hours` / `>4 hours` difficulty set) |
+| SWE-Bench-Pro scripts | `P2A_SWEBENCH_PRO_SCRIPTS_DIR` / `SWEBENCH_PRO_SCRIPTS_DIR`, pointing at the official `SWE-bench_Pro-os/run_scripts` checkout |
 | R2E bad-case policy | `config/bad_instances.json` (pair-diag ARL gate evidence) |
 
 Hydra training overrides live in `scripts/train_p2a.sh`; if you move any to a json/yaml
@@ -611,7 +686,7 @@ the training split and `P2A_EVAL_BONUS_MAP_DIR` at the validation split.
 | `avg_path_node_precision` / `avg_path_node_recall` / `avg_path_node_f1` | Dashboard Path P., Path R., and Path F1 over deduplicated Path/context node hits; legacy `avg_chain_*` aliases are kept for old artifacts. |
 | `path_node_recall` / `path_read_precision` | CLI summary aliases for Path node recall and read-level Path hit share; legacy `chain_*` aliases are kept for old artifacts. |
 | `avg_order_score` / `reverse_order_rate` | Kendall-style agreement between read order and movement from tests toward patched callables. |
-| `miracle_rate_over_gt_hits` | Fraction of ground-truth hits that jump directly to patched code before reading intermediate graph levels. |
+| `miracle_rate_over_gt_hits` | Fraction of Pattern-evaluable latent ground-truth hits that jump directly to patched code before reading intermediate graph levels. |
 | `avg_block_order_score` / `block_miracle_rate_over_gt_hits` | Same order and miracle diagnostics after purpose-block segmentation. |
 | `block_achieve_rate` / `block_waste_rate` / `block_loop_rate` | Purpose-block outcomes, including repeated same-action loop blocks. |
 | `avg_block_efficiency_steps` | Average steps to first Graph hit inside achieving read blocks. |
@@ -676,11 +751,12 @@ debugging individual instances and for the unified HTML dashboard. The logger
 metrics above are still returned directly from validation and do not depend on
 `summary-out` / `details-out` from the offline CLI.
 
-Current SWE-bench Verified eval-map sanity check, after the targeted F2P,
+Historical SWE-bench Verified eval-map sanity check, before the `standard` split
+into `latent` and `exposed`, after the targeted F2P,
 trace-capture, unittest-description F2P, zero-test runner, and F2P collection
 guards, is:
 
-| Split | Rows | Dynamic (`standard+direct`) | `standard` | `direct` | `newly_created` | `no_callable` | `no_f2p` | `instrumentation_failed` | `signature_mismatch` | `all_pass` | `no_trace` | `no_gt` |
+| Split | Rows | Dynamic (`legacy standard+direct`) | legacy `standard` | `direct` | `newly_created` | `no_callable` | `no_f2p` | `instrumentation_failed` | `signature_mismatch` | `all_pass` | `no_trace` | `no_gt` |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | hard validation | 45 | 39 (86.7%) | 32 | 7 | 4 | 0 | 1 | 1 | 0 | 0 | 0 | 0 |
 | test rest | 455 | 389 (85.5%) | 258 | 131 | 35 | 18 | 2 | 2 | 7 | 2 | 0 | 0 |
@@ -704,13 +780,15 @@ maps. The remaining residuals are 2 deterministic `all_pass` Django cases and 1
 | `no_f2p` | 3 | F2P failures remain unaligned with traces after description-to-method recovery. |
 | `all_pass` | 2 | Buggy F2P tests exit 0 after checkout/test-selection verification, so the bug does not reproduce locally. |
 
-Trace parsing covers all captured tracer JSONL lines by default.  Set
-`P2A_TRACE_PARSE_MAX_LINES` only as an explicit debugging cap; bonus-map
-metadata records both `trace_parse_line_cap_reached` and
-`trace_event_cap_reached`.  The runtime tracer still keeps a finite
-`P2A_TRACE_MAX_EVENTS` guard, defaulting to `10000`; when a trace cap is
-reached before missing F2P evidence can be proven, the map is classified as
-`trace_cap_inconclusive` instead of a confident `no_f2p`.
+After a buggy F2P run fails and enters trace classification, trace parsing
+covers all captured tracer JSONL lines by default. Clean buggy runs are
+classified as `all_pass` before trace parsing. Set `P2A_TRACE_PARSE_MAX_LINES`
+only as an explicit debugging cap; bonus-map metadata records both
+`trace_parse_line_cap_reached` and `trace_event_cap_reached`.  The runtime
+tracer still keeps a finite `P2A_TRACE_MAX_EVENTS` guard, defaulting to
+`10000`; when a trace cap is reached before missing F2P evidence can be proven,
+the map is classified as `trace_cap_inconclusive` instead of a confident
+`no_f2p`.
 
 ## Training Smoke Check
 

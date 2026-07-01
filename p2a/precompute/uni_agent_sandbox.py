@@ -18,6 +18,19 @@ from pathlib import Path
 from typing import Any
 
 
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+def _hash_ref_matches_head(commit_ref: str, actual_head: str | None) -> bool:
+    ref = commit_ref.strip().lower()
+    head = (actual_head or "").strip().lower()
+    if not (7 <= len(ref) <= 40) or not all(ch in _HEX_DIGITS for ch in ref):
+        return False
+    if len(head) < len(ref) or not all(ch in _HEX_DIGITS for ch in head):
+        return False
+    return head.startswith(ref)
+
+
 R2E_POST_SETUP_CMD = """
 export PIP_CACHE_DIR=~/.cache/pip
 export PATH=/root/.venv/bin:/root/.local/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
@@ -41,7 +54,7 @@ ln -s /root/r2e_tests /testbed/r2e_tests
 
 # R2E-Gym containers run a plain venv (no conda); its DockerRuntime passes
 # environment={"PATH": DOCKER_PATH} with the venv bin first. A one-shot ``execute`` is a
-# FRESH shell each call, so — unlike the old persistent interactive shell — it does NOT
+# fresh shell each call, so it does not
 # inherit post_setup_cmd's PATH export; we must re-inject this every call or the sandbox's
 # ``python``/pytest is not found (exit 127 → empty trace). Value copied from the pre-migration
 # tracer (rllm swe.py DOCKER_PATH).
@@ -259,6 +272,7 @@ def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment
             "container_runtime": os.getenv("P2A_LOCAL_CONTAINER_RUNTIME", "docker"),
         }
     elif impl == "arl":
+        repo_path = _repo_path_for_task(task) if _is_swebench_pro_task(task) else "/testbed"
         deployment_config = {
             "type": "arl",
             "image": image,
@@ -267,6 +281,7 @@ def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment
             "experiment_id": os.getenv("ARL_EXPERIMENT_ID", "p2a-uniagent-arl-precompute"),
             "timeout": float(os.getenv("ARL_TIMEOUT", "600")),
             "startup_timeout": float(os.getenv("ARL_STARTUP_TIMEOUT", os.getenv("ARL_SWEREX_STARTUP_TIMEOUT", "240"))),
+            "session_cwd": repo_path,
         }
         max_replicas = os.getenv("ARL_MAX_REPLICAS")
         if max_replicas:
@@ -293,12 +308,17 @@ class UniAgentSandboxAdapter:
         *,
         default_timeout: int = 300,
         swebench_verified: bool = False,
+        swebench_pro: bool = False,
+        repo_path: str | None = None,
         startup_env_variables: dict[str, str] | None = None,
         post_setup_cmd: str | None = None,
     ):
         self.agent_env = agent_env
         self.default_timeout = default_timeout
         self.swebench_verified = swebench_verified
+        self.swebench_pro = swebench_pro
+        if repo_path:
+            self.repo_path = repo_path
         self.startup_env_variables = startup_env_variables or {}
         self.post_setup_cmd = post_setup_cmd
 
@@ -320,20 +340,20 @@ class UniAgentSandboxAdapter:
 
     def _execute_raw(self, command: str, timeout: int | float | None = None) -> tuple[str, str, int]:
         # One-shot ``execute`` (stateless ManagedSession.execute over HTTP, retry-wrapped
-        # in ArlRuntime._session_execute), NOT the interactive WebSocket PTY shell.
-        # Tracing commands are self-contained (each does its own ``cd``) and all cross-step
-        # state lives on the sandbox filesystem, so a persistent shell buys nothing here —
-        # while ``run_in_session`` opens an InteractiveShellClient whose ``connect`` returns
-        # HTTP 404 for whole repos (the orange3 regression). This mirrors the pre-migration
-        # tracer, which ran every command through ``ManagedSession.execute`` (0 WS404), and
-        # returns stdout/stderr as separate streams the way ``_run`` callers expect.
+        # in ArlRuntime._session_execute). Tracing commands are self-contained
+        # and all cross-step state lives on the sandbox filesystem. This mirrors
+        # the pre-migration tracer and returns stdout/stderr as separate streams
+        # the way ``_run`` callers expect.
         from swerex.runtime.abstract import Command
 
         # Inject the sandbox env every call (one-shot execute = fresh shell, no persistent state),
         # mirroring the pre-migration tracer: R2E-Gym → PATH with the venv first + cwd=/testbed;
         # SWE-bench → conda activate testbed. Without this the venv python is unresolved (exit 127).
-        if self.swebench_verified:
+        if self.swebench_verified and not self.swebench_pro:
             run_command = f"source /opt/miniconda3/bin/activate && conda activate testbed && {command}"
+            env = None
+        elif self.swebench_pro:
+            run_command = command
             env = None
         else:
             run_command = command
@@ -416,9 +436,17 @@ class UniAgentSandboxAdapter:
             "buggy_checkout_head_full": actual_head,
             "buggy_checkout_stderr": stderr.strip()[-500:] if exit_code != 0 else "",
         }
-        if exit_code == 0 and expected_commit and actual_head == expected_commit:
+        if exit_code == 0 and actual_head and (
+            (expected_commit and actual_head == expected_commit)
+            or _hash_ref_matches_head(commit_ref, actual_head)
+        ):
             diag["buggy_checkout_verified"] = True
             diag["sandbox_code_state"] = "git_checkout_verified"
+            diag["buggy_checkout_verification"] = (
+                "expected_head" if expected_commit and actual_head == expected_commit else "commit_ref_head"
+            )
+            if self.swebench_pro:
+                diag.update(self._restore_swebench_pro_tests(task))
             return diag
 
         diag["buggy_checkout_verified"] = False
@@ -433,12 +461,26 @@ class UniAgentSandboxAdapter:
         diag["sandbox_code_state_mismatch"] = True
         return diag
 
+    def _restore_swebench_pro_tests(self, task: dict[str, Any]) -> dict[str, Any]:
+        cmd = _swebench_pro_restore_tests_cmd(task)
+        if not cmd:
+            return {"swebench_pro_restore_tests_cmd": None, "swebench_pro_restore_tests_exit": None}
+        stdout, stderr, exit_code = self._execute_raw(f"cd {self.repo_path} && {cmd}", timeout=120)
+        return {
+            "swebench_pro_restore_tests_cmd": cmd,
+            "swebench_pro_restore_tests_exit": exit_code,
+            "swebench_pro_restore_tests_stdout": stdout.strip()[-500:] if exit_code != 0 else "",
+            "swebench_pro_restore_tests_stderr": stderr.strip()[-500:] if exit_code != 0 else "",
+        }
+
 
 def create_uni_agent_sandbox(task: dict[str, Any], *, instance_id: str) -> UniAgentSandboxAdapter:
     from uni_agent.interaction import AgentEnv, AgentEnvConfig
 
     config = build_agent_env_config(task, instance_id=instance_id)
-    swebench_verified = _is_swebench_verified_task(task)
+    swebench_pro = _is_swebench_pro_task(task)
+    swebench_verified = False if swebench_pro else _is_swebench_verified_task(task)
+    repo_path = _repo_path_for_task(task) if swebench_pro else None
     if config["deployment"].get("type") == "arl":
         from env.deployment import make_env_config
 
@@ -455,10 +497,17 @@ def create_uni_agent_sandbox(task: dict[str, Any], *, instance_id: str) -> UniAg
         return UniAgentSandboxAdapter(
             env,
             swebench_verified=swebench_verified,
+            swebench_pro=swebench_pro,
+            repo_path=repo_path,
             startup_env_variables=config.get("env_variables"),
             post_setup_cmd=config.get("post_setup_cmd"),
         )
-    return UniAgentSandboxAdapter(env, swebench_verified=swebench_verified)
+    return UniAgentSandboxAdapter(
+        env,
+        swebench_verified=swebench_verified,
+        swebench_pro=swebench_pro,
+        repo_path=repo_path,
+    )
 
 
 def _is_swebench_verified_task(task: dict[str, Any]) -> bool:
@@ -471,6 +520,38 @@ def _is_swebench_verified_task(task: dict[str, Any]) -> bool:
     if metadata.get("FAIL_TO_PASS") is not None or task.get("FAIL_TO_PASS") is not None:
         return True
     return False
+
+
+def _is_swebench_pro_task(task: dict[str, Any]) -> bool:
+    tools_kwargs = extract_tools_kwargs(task)
+    reward = tools_kwargs.get("reward") if isinstance(tools_kwargs.get("reward"), dict) else {}
+    metadata = extract_reward_metadata(task)
+    if reward.get("name") == "swe_bench_pro":
+        return True
+    for source in (task, metadata):
+        data_source = str(source.get("data_source") or "").strip().lower()
+        if data_source in {"swebench-pro", "swe-bench-pro"}:
+            return True
+    return False
+
+
+def _swebench_pro_restore_tests_cmd(task: dict[str, Any]) -> str | None:
+    from p2a.datasets import last_nonempty_line
+
+    for source in (task, extract_reward_metadata(task)):
+        value = source.get("swebench_pro_restore_tests_cmd")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        line = last_nonempty_line(source.get("before_repo_set_cmd"))
+        if line:
+            return line
+    return None
+
+
+def _repo_path_for_task(task: dict[str, Any]) -> str:
+    from p2a.datasets import swebench_pro_repo_path
+
+    return swebench_pro_repo_path(task, extract_reward_metadata(task))
 
 
 def _read_old_sources(env: UniAgentSandboxAdapter, files: set[str]) -> tuple[dict[str, str], set[str]]:

@@ -7,6 +7,7 @@
 # Usage:
 #   TRAIN_FILE=... TEST_FILE=... MODEL_PATH=... bash scripts/train_p2a.sh
 #   TRAIN_FILE=... TEST_FILE=... MODEL_PATH=... P2A_BONUS_MAP_DIR=... P2A_M_MAX=3.0 P2A_CREDIT_GRANULARITY=step bash scripts/train_p2a.sh
+#   P2A_TRAIN_ROLLOUT_N=8 P2A_VAL_ROLLOUT_N=1 bash scripts/train_p2a.sh
 set -xeuo pipefail
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.0}"
 export CUDA_PATH="${CUDA_PATH:-${CUDA_HOME}}"
@@ -54,6 +55,7 @@ resolve_env_path_if_set() {
 }
 resolve_env_path_if_set P2A_BONUS_MAP_DIR
 resolve_env_path_if_set P2A_EVAL_BONUS_MAP_DIR
+resolve_env_path_if_set P2A_EVAL_FILTER_BONUS_MAP_DIR
 resolve_env_path_if_set P2A_EVAL_DETAILS_DIR
 RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/swe_agent/runtime_env_arl.yaml"}
 # Agent-loop actors on every node load this path, so it must resolve on all of
@@ -167,7 +169,8 @@ update_weights_bucket_megabytes="${P2A_UPDATE_WEIGHTS_BUCKET_MB:-2048}"
 nccl_timeout="${P2A_NCCL_TIMEOUT:-9600}"
 
 train_prompt_bsz=0
-n_resp_per_prompt=8
+n_resp_per_prompt=${P2A_TRAIN_ROLLOUT_N:-${P2A_ROLLOUT_N:-8}}
+val_resp_per_prompt=${P2A_VAL_ROLLOUT_N:-${P2A_VALIDATION_ROLLOUT_N:-1}}
 train_prompt_mini_bsz=16
 total_rollout_steps=200000
 test_freq=10
@@ -195,6 +198,45 @@ fi
 "${PYTHON_BIN}" -m p2a.runtime_env "${RUNTIME_ENV}" --src-root "${SRC_ROOT}" --drop-working-dir
 
 ensure_model_path
+
+if [[ -n "${P2A_EVAL_CASE_TYPES:-}${P2A_EVAL_PATTERN_COMPUTABLE:-}" ]]; then
+    eval_pattern_computable="${P2A_EVAL_PATTERN_COMPUTABLE:-}"
+    eval_filter_bonus_map_dir="${P2A_EVAL_FILTER_BONUS_MAP_DIR:-${P2A_EVAL_BONUS_MAP_DIR:-}}"
+    if [[ -z "${eval_filter_bonus_map_dir}" ]]; then
+        echo "[P2A] P2A_EVAL_CASE_TYPES/P2A_EVAL_PATTERN_COMPUTABLE requires P2A_EVAL_BONUS_MAP_DIR or P2A_EVAL_FILTER_BONUS_MAP_DIR." >&2
+        exit 2
+    fi
+    scope_slug="${P2A_EVAL_CASE_TYPES:-all}"
+    scope_slug="${scope_slug//,/+}"
+    scope_slug="${scope_slug//\//_}"
+    if [[ "${eval_pattern_computable}" == "1" || "${eval_pattern_computable,,}" == "true" ]]; then
+        scope_slug="${scope_slug}+pattern"
+    fi
+    test_stem="$(basename "${TEST_FILE}")"
+    test_stem="${test_stem%.*}"
+    filtered_test_file="${P2A_FILTERED_TEST_FILE:-$(dirname "${TEST_FILE}")/${test_stem}.${scope_slug}.parquet}"
+    filter_cmd=(
+        "${PYTHON_BIN}" -m p2a.filter_bonus_map_instances
+        "${TEST_FILE}"
+        --bonus-map-dir "${eval_filter_bonus_map_dir}"
+        --out "${filtered_test_file}"
+    )
+    if [[ -n "${P2A_EVAL_CASE_TYPES:-}" ]]; then
+        IFS=',' read -r -a eval_case_types <<< "${P2A_EVAL_CASE_TYPES}"
+        for case_type in "${eval_case_types[@]}"; do
+            [[ -n "${case_type}" ]] && filter_cmd+=(--case-type "${case_type}")
+        done
+    fi
+    if [[ "${eval_pattern_computable}" == "1" || "${eval_pattern_computable,,}" == "true" ]]; then
+        filter_cmd+=(--pattern-computable true)
+    fi
+    "${filter_cmd[@]}"
+    TEST_FILE="${filtered_test_file}"
+    export TEST_FILE
+    export P2A_EVAL_SCOPE_FILE="${filtered_test_file}.scope.json"
+    echo "[P2A] filtered validation data: ${TEST_FILE}"
+    echo "[P2A] validation scope metadata: ${P2A_EVAL_SCOPE_FILE}"
+fi
 
 if [[ "${P2A_SKIP_MEGATRON_PREFLIGHT:-0}" != "1" ]]; then
     "${PYTHON_BIN}" - <<'PY'
@@ -360,7 +402,7 @@ PY
     actor_rollout_ref.rollout.val_kwargs.top_p=${val_top_p} \
     actor_rollout_ref.rollout.val_kwargs.top_k=${val_top_k} \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    actor_rollout_ref.rollout.val_kwargs.n=1 \
+    actor_rollout_ref.rollout.val_kwargs.n=${val_resp_per_prompt} \
     actor_rollout_ref.rollout.name=${rollout_name} \
     actor_rollout_ref.rollout.mode=${rollout_mode} \
     actor_rollout_ref.rollout.calculate_log_probs=True \

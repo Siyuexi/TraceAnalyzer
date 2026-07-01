@@ -14,23 +14,28 @@ from typing import Any
 import yaml
 
 from p2a.api_providers import check_provider_available, normalize_provider_config, provider_source
+from p2a.bonus_map_scope import (
+    BonusMapInstanceFilter,
+    parse_bonus_map_instance_filter,
+    select_rows_by_bonus_map_scope,
+)
+from p2a.datasets import SUPPORTED_EVAL_DATASETS, canonical_dataset
 from p2a.eval_cache import (
     DONE_STATUS,
     ERROR_STATUS,
-    completed_instance_ids,
+    completed_rollout_keys,
     ensure_db,
-    ingest_artifacts,
     mark_cells_running,
     upsert_experiment,
     upsert_planned_cells,
     utc_now,
 )
 from p2a.eval_fault_localization import iter_records
-from p2a.hf_assets import shared_p2a_data_dir
-from p2a.third_party_eval import _instance_id, _load_rows, _select_rows, is_system_error_kind, parse_limit_arg
+from p2a.hf_assets import project_artifacts_dir
+from p2a.third_party_eval import _instance_id, _load_rows, is_system_error_kind, parse_limit_arg
 
 
-SUPPORTED_DATASETS = {"swebench-hard", "swebench-verified", "r2e-gym-subset"}
+SUPPORTED_DATASETS = set(SUPPORTED_EVAL_DATASETS)
 REDACT_KEYS = ("api_key", "apikey", "token", "secret", "password", "authorization")
 SYSTEM_ERROR_STATUS = "system_error"
 
@@ -54,6 +59,8 @@ class BatchConfig:
     limit: int | None
     offset: int
     max_turns: int
+    rollouts_per_instance: int
+    per_instance_parallelism: int
     run_timeout: str | None
     per_model_concurrency: int
     model_parallelism: int
@@ -61,6 +68,7 @@ class BatchConfig:
     artifacts_dir: Path
     precompute_maps: bool
     bonus_map_dir: Path | None
+    bonus_map_instance_filter: BonusMapInstanceFilter
     models: list[BatchModel]
 
 
@@ -84,20 +92,17 @@ def _parse_limit(value: Any, *, default: int | None) -> int | None:
     raise ValueError("experiment.limit must be an integer or 'all'")
 
 
+def _positive_int(value: Any, *, default: int, name: str) -> int:
+    if value is None:
+        return default
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(f"{name} must be >= 1")
+    return parsed
+
+
 def _canonical_dataset(name: str) -> str:
-    aliases = {
-        "hard": "swebench-hard",
-        "swe-bench-hard": "swebench-hard",
-        "verified": "swebench-verified",
-        "swe-bench-verified": "swebench-verified",
-        "r2e": "r2e-gym-subset",
-        "r2e-gym": "r2e-gym-subset",
-    }
-    canonical = aliases.get(name, name)
-    if canonical not in SUPPORTED_DATASETS:
-        supported = ", ".join(sorted(SUPPORTED_DATASETS))
-        raise ValueError(f"dataset.name must be one of: {supported}")
-    return canonical
+    return canonical_dataset(name)
 
 
 def _redact(value: Any) -> Any:
@@ -115,12 +120,13 @@ def _redact(value: Any) -> Any:
     return value
 
 
-def sanitized_config_snapshot(config: BatchConfig) -> dict[str, Any]:
+def sanitized_config_snapshot(config: BatchConfig, *, scope: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "schema": "p2a_third_party_batch_v1",
         "source_config": str(config.path),
         "captured_at": utc_now(),
         "config": _redact(config.raw),
+        "selected_scope": scope,
     }
 
 
@@ -133,6 +139,7 @@ def load_batch_config(path: Path) -> BatchConfig:
     dataset_cfg = _as_mapping(payload.get("dataset"), name="dataset")
     experiment_cfg = _as_mapping(payload.get("experiment"), name="experiment")
     storage_cfg = _as_mapping(payload.get("storage"), name="storage")
+    filter_cfg = payload.get("bonus_map_instance_filter", experiment_cfg.get("bonus_map_instance_filter"))
 
     dataset_name = _canonical_dataset(str(dataset_cfg.get("name") or "swebench-hard"))
     dataset_file = Path(dataset_cfg["file"]).expanduser() if dataset_cfg.get("file") else None
@@ -166,6 +173,16 @@ def load_batch_config(path: Path) -> BatchConfig:
         limit=_parse_limit(experiment_cfg.get("limit"), default=500),
         offset=int(experiment_cfg.get("offset") or 0),
         max_turns=int(experiment_cfg.get("max_turns") or 20),
+        rollouts_per_instance=_positive_int(
+            experiment_cfg.get("rollouts_per_instance", experiment_cfg.get("rollout_n")),
+            default=1,
+            name="experiment.rollouts_per_instance",
+        ),
+        per_instance_parallelism=_positive_int(
+            experiment_cfg.get("per_instance_parallelism", experiment_cfg.get("rollout_parallelism")),
+            default=1,
+            name="experiment.per_instance_parallelism",
+        ),
         run_timeout=str(experiment_cfg["run_timeout"]) if experiment_cfg.get("run_timeout") else None,
         per_model_concurrency=max(1, int(experiment_cfg.get("per_model_concurrency") or 1)),
         model_parallelism=max(1, int(experiment_cfg.get("model_parallelism") or len(models))),
@@ -180,6 +197,7 @@ def load_batch_config(path: Path) -> BatchConfig:
             if storage_cfg.get("bonus_map_dir")
             else None
         ),
+        bonus_map_instance_filter=parse_bonus_map_instance_filter(filter_cfg),
         models=models,
     )
 
@@ -216,7 +234,7 @@ def _resolve_storage_path(value: Any, *, default_relative: str) -> Path:
     parts = path.parts
     if parts and parts[0] == "data":
         path = Path(*parts[1:]) if len(parts) > 1 else Path(".")
-    return shared_p2a_data_dir() / path
+    return project_artifacts_dir() / path
 
 
 def _run_setup(args: list[str], *, env: dict[str, str]) -> str:
@@ -248,23 +266,61 @@ def resolve_bonus_map_dir(config: BatchConfig, data_file: Path, *, env: dict[str
     if config.bonus_map_dir is not None:
         output_dir = config.bonus_map_dir
     else:
-        output_dir = shared_p2a_data_dir() / "eval_bonus_maps" / config.dataset_name
+        output_dir = project_artifacts_dir() / "bonus_maps" / config.dataset_name
     setup_env = dict(env)
-    if config.limit is not None:
+    if config.bonus_map_instance_filter.active:
+        setup_env.setdefault("P2A_SETUP_BONUS_OFFSET", "0")
+    elif config.limit is not None:
         setup_env.setdefault("P2A_SETUP_BONUS_LIMIT", str(config.limit))
-    setup_env.setdefault("P2A_SETUP_BONUS_OFFSET", str(config.offset))
+        setup_env.setdefault("P2A_SETUP_BONUS_OFFSET", str(config.offset))
+    else:
+        setup_env.setdefault("P2A_SETUP_BONUS_OFFSET", str(config.offset))
     return Path(_run_setup(["maps", config.dataset_name, str(data_file), str(output_dir)], env=setup_env))
 
 
-def selected_instance_ids(data_file: Path, *, limit: int | None, offset: int) -> list[str]:
-    rows = _select_rows(_load_rows(data_file), limit=limit, offset=offset, instance_ids=None)
+def selected_instance_scope(
+    data_file: Path,
+    *,
+    limit: int | None,
+    offset: int,
+    bonus_map_dir: Path | None,
+    scope_filter: BonusMapInstanceFilter,
+) -> tuple[list[str], dict[str, Any]]:
+    if scope_filter.active and bonus_map_dir is None:
+        raise ValueError("bonus_map_instance_filter requires storage.bonus_map_dir or precompute_maps: true")
+    rows = _load_rows(data_file)
+    scoped = select_rows_by_bonus_map_scope(
+        rows,
+        bonus_map_dir=bonus_map_dir,
+        instance_id=_instance_id,
+        scope_filter=scope_filter,
+        limit=limit,
+        offset=offset,
+    )
     instance_ids = []
-    for row in rows:
+    for row in scoped.rows:
         instance_id = _instance_id(row)
         if not instance_id:
             raise ValueError(f"selected row at offset {offset} has no instance_id")
         instance_ids.append(instance_id)
+    if scope_filter.active and not instance_ids:
+        raise ValueError("bonus_map_instance_filter selected zero rows")
+    return instance_ids, scoped.metadata
+
+
+def selected_instance_ids(data_file: Path, *, limit: int | None, offset: int) -> list[str]:
+    instance_ids, _scope = selected_instance_scope(
+        data_file,
+        limit=limit,
+        offset=offset,
+        bonus_map_dir=None,
+        scope_filter=BonusMapInstanceFilter(),
+    )
     return instance_ids
+
+
+def _rollout_jobs(instance_ids: list[str], rollouts_per_instance: int) -> list[tuple[str, int]]:
+    return [(instance_id, rollout_index) for instance_id in instance_ids for rollout_index in range(rollouts_per_instance)]
 
 
 def _model_eval_config(config: BatchConfig, model: BatchModel, run_dir: Path) -> Path:
@@ -272,6 +328,8 @@ def _model_eval_config(config: BatchConfig, model: BatchModel, run_dir: Path) ->
     for key in ("agent", "analysis"):
         if key in config.raw:
             payload[key] = copy.deepcopy(config.raw[key])
+    if config.bonus_map_instance_filter.active:
+        payload["bonus_map_instance_filter"] = config.bonus_map_instance_filter.metadata()
     payload["provider"] = copy.deepcopy(config.provider)
 
     model_cfg = copy.deepcopy(config.raw.get("model") or {})
@@ -294,8 +352,9 @@ def _base_command(
     eval_config: Path,
     data_file: Path,
     run_dir: Path,
-    missing_ids: list[str],
+    missing_jobs: list[tuple[str, int]],
     config: BatchConfig,
+    model: BatchModel,
     bonus_map_dir: Path | None,
 ) -> list[str]:
     command = [
@@ -313,6 +372,10 @@ def _base_command(
         "0",
         "--n-parallel",
         str(config.per_model_concurrency),
+        "--rollouts-per-instance",
+        str(config.rollouts_per_instance),
+        "--per-instance-parallelism",
+        str(config.per_instance_parallelism),
         "--max-turns",
         str(config.max_turns),
         "--summary-out",
@@ -321,11 +384,19 @@ def _base_command(
         str(run_dir / "details.jsonl"),
         "--report-out",
         str(run_dir / "report.md"),
+        "--cache-db",
+        str(config.db_path),
+        "--experiment-id",
+        config.experiment_id,
+        "--dataset-name",
+        config.dataset_name,
+        "--model-label",
+        model.label,
     ]
     if bonus_map_dir is not None:
         command.extend(["--bonus-map-dir", str(bonus_map_dir)])
-    for instance_id in missing_ids:
-        command.extend(["--instance-id", instance_id])
+    for instance_id, rollout_index in missing_jobs:
+        command.extend(["--rollout-job", f"{instance_id}:{rollout_index}"])
     return command
 
 
@@ -382,7 +453,7 @@ def _mark_missing_error(
     *,
     config: BatchConfig,
     model: BatchModel,
-    instance_ids: list[str],
+    rollout_jobs: list[tuple[str, int]],
     error: str,
 ) -> None:
     with ensure_db(db_path) as conn:
@@ -396,6 +467,7 @@ def _mark_missing_error(
               AND model_api_name = ?
               AND dataset = ?
               AND instance_id = ?
+              AND rollout_index = ?
             """,
             [
                 (
@@ -408,11 +480,45 @@ def _mark_missing_error(
                     model.api_name,
                     config.dataset_name,
                     instance_id,
+                    rollout_index,
                 )
-                for instance_id in instance_ids
+                for instance_id, rollout_index in rollout_jobs
             ],
         )
         conn.commit()
+
+
+def _remaining_unfinished_jobs(
+    db_path: Path,
+    *,
+    config: BatchConfig,
+    model: BatchModel,
+    rollout_jobs: list[tuple[str, int]],
+) -> list[tuple[str, int]]:
+    if not rollout_jobs:
+        return []
+    source = provider_source(config.provider)
+    with ensure_db(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT instance_id, rollout_index, status
+            FROM run_cells
+            WHERE experiment_id = ?
+              AND provider_source = ?
+              AND model_api_name = ?
+              AND dataset = ?
+            """,
+            (config.experiment_id, source, model.api_name, config.dataset_name),
+        ).fetchall()
+    status_by_job = {(str(row["instance_id"]), int(row["rollout_index"] or 0)): str(row["status"]) for row in rows}
+    terminal = {DONE_STATUS, ERROR_STATUS}
+    return [job for job in rollout_jobs if status_by_job.get(job) not in terminal]
+
+
+def _count_rollout_records(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return sum(1 for _record in iter_records(path))
 
 
 async def run_model_phase(
@@ -426,14 +532,21 @@ async def run_model_phase(
     env: dict[str, str],
 ) -> dict[str, Any]:
     source = provider_source(config.provider)
-    target_ids = selected_instance_ids(data_file, limit=phase_limit, offset=config.offset)
+    target_ids, scope_metadata = selected_instance_scope(
+        data_file,
+        limit=phase_limit,
+        offset=config.offset,
+        bonus_map_dir=bonus_map_dir,
+        scope_filter=config.bonus_map_instance_filter,
+    )
+    target_jobs = _rollout_jobs(target_ids, config.rollouts_per_instance)
     with ensure_db(config.db_path) as conn:
         upsert_experiment(
             conn,
             experiment_id=config.experiment_id,
             provider_source=source,
             dataset=config.dataset_name,
-            config_snapshot=sanitized_config_snapshot(config),
+            config_snapshot=sanitized_config_snapshot(config, scope=scope_metadata),
         )
         upsert_planned_cells(
             conn,
@@ -443,26 +556,27 @@ async def run_model_phase(
             model_label=model.label,
             dataset=config.dataset_name,
             instance_ids=target_ids,
+            rollouts_per_instance=config.rollouts_per_instance,
         )
-        done_ids = completed_instance_ids(
+        done_jobs = completed_rollout_keys(
             conn,
             experiment_id=config.experiment_id,
             provider_source=source,
             model_api_name=model.api_name,
             dataset=config.dataset_name,
         )
-        missing_ids = [instance_id for instance_id in target_ids if instance_id not in done_ids]
+        missing_jobs = [job for job in target_jobs if job not in done_jobs]
         mark_cells_running(
             conn,
             experiment_id=config.experiment_id,
             provider_source=source,
             model_api_name=model.api_name,
             dataset=config.dataset_name,
-            instance_ids=missing_ids,
+            rollout_jobs=missing_jobs,
         )
         conn.commit()
 
-    if not missing_ids:
+    if not missing_jobs:
         return {"model": model.label, "phase": phase, "status": "skipped", "n_missing": 0}
 
     run_dir = config.artifacts_dir / config.experiment_id / phase / config.dataset_name / _safe_slug(model.label)
@@ -472,24 +586,30 @@ async def run_model_phase(
         eval_config=eval_config,
         data_file=data_file,
         run_dir=run_dir,
-        missing_ids=missing_ids,
+        missing_jobs=missing_jobs,
         config=config,
+        model=model,
         bonus_map_dir=bonus_map_dir,
     )
     model_env = dict(env)
     model_env["P2A_THIRD_PARTY_MODEL"] = model.api_name
 
     rollouts_path = run_dir / "rollouts.jsonl"
-    details_path = run_dir / "details.jsonl"
     returncode, output = await _run_subprocess(command, env=model_env, timeout_s=_duration_seconds(config.run_timeout))
     log_path = run_dir / "run.log"
     log_path.write_text(output, encoding="utf-8")
     if returncode != 0:
+        unfinished_jobs = _remaining_unfinished_jobs(
+            config.db_path,
+            config=config,
+            model=model,
+            rollout_jobs=missing_jobs,
+        )
         _mark_missing_error(
             config.db_path,
             config=config,
             model=model,
-            instance_ids=missing_ids,
+            rollout_jobs=unfinished_jobs,
             error=f"third_party_eval exited {returncode}; see {log_path}",
         )
         return {
@@ -498,28 +618,18 @@ async def run_model_phase(
             "status": "error",
             "returncode": returncode,
             "log": str(log_path),
-            "n_missing": len(missing_ids),
+            "n_missing": len(missing_jobs),
+            "n_persisted": len(missing_jobs) - len(unfinished_jobs),
         }
 
-    with ensure_db(config.db_path) as conn:
-        n_ingested = ingest_artifacts(
-            conn,
-            experiment_id=config.experiment_id,
-            provider_source=source,
-            model_api_name=model.api_name,
-            model_label=model.label,
-            dataset=config.dataset_name,
-            rollouts_path=rollouts_path,
-            details_path=details_path,
-        )
-        conn.commit()
+    n_ingested = _count_rollout_records(rollouts_path)
     system_error = _system_error_summary(rollouts_path)
     if system_error is not None:
         return {
             "model": model.label,
             "phase": phase,
             "status": SYSTEM_ERROR_STATUS,
-            "n_missing": len(missing_ids),
+            "n_missing": len(missing_jobs),
             "n_ingested": n_ingested,
             "run_dir": str(run_dir),
             **system_error,
@@ -528,7 +638,7 @@ async def run_model_phase(
         "model": model.label,
         "phase": phase,
         "status": DONE_STATUS,
-        "n_missing": len(missing_ids),
+        "n_missing": len(missing_jobs),
         "n_ingested": n_ingested,
         "run_dir": str(run_dir),
     }

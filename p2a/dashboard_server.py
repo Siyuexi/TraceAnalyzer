@@ -3,20 +3,39 @@
 from __future__ import annotations
 
 import argparse
+import hmac
+import json
 import mimetypes
 import os
+import secrets
 import shutil
 import socket
 import sqlite3
 import threading
 import time
+from dataclasses import replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from p2a.dashboard_adapter import DashboardRequest, build_dashboard_snapshot, read_dashboard_log, snapshot_to_json
+from p2a.dashboard_adapter import (
+    DashboardRequest,
+    _artifact_root_candidates,
+    build_dashboard_snapshot,
+    read_dashboard_log,
+    snapshot_to_json,
+)
+from p2a.eval_cache import (
+    backup_path_for_delete,
+    connect,
+    connect_readonly,
+    count_run_data_targets,
+    delete_confirmation_phrase,
+    delete_run_data_targets,
+    init_db,
+)
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "dashboard_static"
@@ -78,9 +97,143 @@ def write_static_dashboard(out_dir: Path, snapshot: dict[str, Any]) -> dict[str,
     return {"html": html_path, "snapshot": snapshot_path, "app": app_path, "css": css_path}
 
 
-def make_handler(request: DashboardRequest) -> type[BaseHTTPRequestHandler]:
-    snapshot_cache: dict[str, Any] = {"payload": None}
+def _tree_change_token(root: Path, *, file_suffixes: tuple[str, ...] | None = None) -> tuple[Any, ...]:
+    try:
+        root_stat = root.stat()
+    except OSError:
+        return ((".", "missing", None, None),)
+    root_is_dir = root.is_dir()
+    entries: list[Any] = [(".", "dir" if root_is_dir else "file", int(root_stat.st_mtime_ns), int(root_stat.st_size))]
+    if not root_is_dir:
+        return tuple(entries)
+    try:
+        children = sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix())
+    except OSError:
+        return tuple(entries)
+    for path in children:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        is_dir = path.is_dir()
+        if file_suffixes is not None and not is_dir and path.suffix not in file_suffixes:
+            continue
+        entries.append((path.relative_to(root).as_posix(), "dir" if is_dir else "file", int(stat.st_mtime_ns), int(stat.st_size)))
+    return tuple(entries)
+
+
+def _bonus_map_change_token(request: DashboardRequest) -> tuple[Any, ...]:
+    paths: list[Path] = []
+
+    def add(path: Path) -> None:
+        expanded = path.expanduser()
+        if expanded not in paths:
+            paths.append(expanded)
+
+    if request.bonus_map_dir is not None:
+        add(request.bonus_map_dir)
+    else:
+        for root in _artifact_root_candidates(request):
+            base = root / "bonus_maps"
+            add(base / request.dataset if request.dataset else base)
+    return tuple((str(path), _tree_change_token(path, file_suffixes=(".json",))) for path in paths)
+
+
+def _snapshot_change_token(request: DashboardRequest) -> tuple[Any, ...]:
+    parts: list[Any] = []
+    for label, paths in (("rollouts", request.rollouts), ("details", request.details)):
+        for path in paths:
+            try:
+                stat = path.stat()
+                parts.append((label, str(path), int(stat.st_mtime_ns), int(stat.st_size)))
+            except OSError:
+                parts.append((label, str(path), None, None))
+    if request.log_dir:
+        parts.append(("log_dir", str(request.log_dir), _tree_change_token(request.log_dir)))
+    if request.data_file:
+        try:
+            stat = request.data_file.stat()
+            parts.append(("data_file", str(request.data_file), int(stat.st_mtime_ns), int(stat.st_size)))
+        except OSError:
+            parts.append(("data_file", str(request.data_file), None, None))
+    if request.db_path:
+        try:
+            conn = connect_readonly(request.db_path, timeout=1.0)
+            try:
+                metric_columns = {str(row["name"]) for row in conn.execute("PRAGMA table_info(quantitative_metrics)").fetchall()}
+                fingerprint_sql = "MAX(q.fingerprint)" if "fingerprint" in metric_columns else "NULL"
+                row = conn.execute(
+                    f"""
+                    SELECT
+                      COUNT(*) AS n,
+                      MAX(c.updated_at) AS max_cell_updated,
+                      MAX(q.updated_at) AS max_metric_updated,
+                      {fingerprint_sql} AS max_fingerprint
+                    FROM run_cells c
+                    LEFT JOIN quantitative_metrics q ON q.cell_id = c.id
+                    """
+                ).fetchone()
+                parts.append((
+                    "db",
+                    str(request.db_path),
+                    int(row["n"] or 0),
+                    row["max_cell_updated"],
+                    row["max_metric_updated"],
+                    row["max_fingerprint"],
+                    request.experiment_id,
+                    request.provider_source,
+                    request.dataset,
+                ))
+            finally:
+                conn.close()
+        except (FileNotFoundError, sqlite3.Error):
+            parts.append(("db", str(request.db_path), "unavailable", request.experiment_id, request.provider_source, request.dataset))
+    parts.append(("bonus_maps", _bonus_map_change_token(request)))
+    parts.append(("params", request.tracking_mode, request.near_threshold, request.m_max, request.detail_limit))
+    return tuple(parts)
+
+
+def _backup_sqlite_database(db_path: Path, backup_path: Path) -> None:
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    source = connect_readonly(db_path, timeout=30.0)
+    destination = sqlite3.connect(backup_path)
+    try:
+        source.backup(destination)
+    finally:
+        destination.close()
+        source.close()
+
+
+def _load_admin_password(path: Path | None) -> str | None:
+    if path is not None:
+        try:
+            value = path.expanduser().read_text(encoding="utf-8").strip()
+        except OSError:
+            value = ""
+        if value:
+            return value
+    env_secret = os.environ.get("P2A_DASHBOARD_ADMIN_PASSWORD")
+    if env_secret:
+        return env_secret.strip()
+    candidates = []
+    env_file = os.environ.get("P2A_DASHBOARD_ADMIN_SECRET") or os.environ.get("P2A_DASHBOARD_ADMIN_SECRET_FILE")
+    if env_file:
+        candidates.append(Path(env_file))
+    candidates.append(Path.cwd() / ".secrets" / "dashboard_admin.txt")
+    for candidate in candidates:
+        try:
+            value = candidate.expanduser().read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return None
+
+
+def make_handler(request: DashboardRequest, *, admin_password: str | None = None) -> type[BaseHTTPRequestHandler]:
+    snapshot_cache: dict[str, Any] = {"payload": None, "change_token": None}
     snapshot_lock = threading.Lock()
+    admin_tokens: set[str] = set()
 
     class P2ADashboardHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -88,17 +241,17 @@ def make_handler(request: DashboardRequest) -> type[BaseHTTPRequestHandler]:
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path == "/":
-                try:
-                    snapshot = self._build_or_cached_snapshot()
-                except sqlite3.OperationalError:
-                    snapshot = None
-                self._send_bytes(_index_html(embedded_snapshot=snapshot), "text/html; charset=utf-8")
+                self._send_bytes(_index_html(), "text/html; charset=utf-8")
                 return
             if parsed.path == "/api/health":
                 self._send_json({"ok": True, "schema_version": "p2a_unified_dashboard_v1"})
                 return
+            if parsed.path == "/api/auth/status":
+                self._send_json({"ok": True, "admin_enabled": bool(admin_password), "admin": self._is_admin()})
+                return
             if parsed.path == "/api/snapshot":
-                self._send_snapshot()
+                params = parse_qs(parsed.query)
+                self._send_snapshot(force=params.get("force", [""])[0].lower() in {"1", "true", "yes"})
                 return
             if parsed.path == "/api/log":
                 params = parse_qs(parsed.query)
@@ -120,6 +273,22 @@ def make_handler(request: DashboardRequest) -> type[BaseHTTPRequestHandler]:
                 return
             self._serve_static(parsed.path.lstrip("/"))
 
+        def do_POST(self) -> None:
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/auth/login":
+                self._handle_login()
+                return
+            if parsed.path == "/api/auth/logout":
+                self._handle_logout()
+                return
+            if parsed.path == "/api/delete/preview":
+                self._handle_delete_preview()
+                return
+            if parsed.path == "/api/delete":
+                self._handle_delete()
+                return
+            self.send_error(HTTPStatus.NOT_FOUND)
+
         def log_message(self, format: str, *args: Any) -> None:
             return
 
@@ -132,9 +301,9 @@ def make_handler(request: DashboardRequest) -> type[BaseHTTPRequestHandler]:
             mime_type, _encoding = mimetypes.guess_type(name)
             self._send_bytes(payload, mime_type or "application/octet-stream")
 
-        def _send_snapshot(self) -> None:
+        def _send_snapshot(self, *, force: bool = False) -> None:
             try:
-                payload = self._build_or_cached_snapshot()
+                payload = self._build_or_cached_snapshot(force=force)
             except sqlite3.OperationalError as exc:
                 status = HTTPStatus.SERVICE_UNAVAILABLE if "locked" in str(exc).lower() else HTTPStatus.INTERNAL_SERVER_ERROR
                 self._send_json(
@@ -144,12 +313,29 @@ def make_handler(request: DashboardRequest) -> type[BaseHTTPRequestHandler]:
                 return
             self._send_json(payload)
 
-        def _build_or_cached_snapshot(self) -> dict[str, Any]:
+        def _build_or_cached_snapshot(self, *, force: bool = False) -> dict[str, Any]:
+            change_token = _snapshot_change_token(request)
             cached = snapshot_cache.get("payload")
+            if cached is not None and not force and snapshot_cache.get("change_token") == change_token:
+                return cached
+            if request.db_path is not None and not force:
+                started = self._start_background_snapshot_build()
+                if cached is not None:
+                    reason = "snapshot_refresh_started" if started else "snapshot_build_in_progress"
+                    return {**cached, "snapshot_status": {"stale": True, "reason": reason}}
+                deferred = build_dashboard_snapshot(replace(request, defer_db_scoring=True))
+                deferred["snapshot_status"] = {
+                    "stale": False,
+                    "reason": "snapshot_warming" if started else "snapshot_build_in_progress",
+                }
+                return deferred
             acquired = snapshot_lock.acquire(blocking=cached is None)
             if not acquired:
                 return {**cached, "snapshot_status": {"stale": True, "reason": "snapshot_build_in_progress"}}
             try:
+                current = snapshot_cache.get("payload")
+                if current is not None and not force and snapshot_cache.get("change_token") == _snapshot_change_token(request):
+                    return current
                 payload = build_dashboard_snapshot(request)
             except sqlite3.OperationalError as exc:
                 if "locked" in str(exc).lower() and cached is not None:
@@ -157,20 +343,169 @@ def make_handler(request: DashboardRequest) -> type[BaseHTTPRequestHandler]:
                 raise
             else:
                 snapshot_cache["payload"] = payload
+                snapshot_cache["change_token"] = _snapshot_change_token(request)
                 return payload
             finally:
                 snapshot_lock.release()
 
-        def _send_json(self, payload: dict[str, Any], *, status: HTTPStatus = HTTPStatus.OK) -> None:
-            self._send_bytes(snapshot_to_json(payload).encode("utf-8"), "application/json; charset=utf-8", status=status)
+        def _start_background_snapshot_build(self) -> bool:
+            if not snapshot_lock.acquire(blocking=False):
+                return False
 
-        def _send_bytes(self, payload: bytes, content_type: str, *, status: HTTPStatus = HTTPStatus.OK) -> None:
+            def worker() -> None:
+                try:
+                    payload = build_dashboard_snapshot(request)
+                    snapshot_cache["payload"] = payload
+                    snapshot_cache["change_token"] = _snapshot_change_token(request)
+                except sqlite3.OperationalError:
+                    pass
+                finally:
+                    snapshot_lock.release()
+
+            threading.Thread(target=worker, daemon=True).start()
+            return True
+
+        def _read_json_body(self) -> dict[str, Any]:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0:
+                return {}
+            try:
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise ValueError("invalid JSON body")
+            return payload if isinstance(payload, dict) else {}
+
+        def _cookie_token(self) -> str | None:
+            cookie = self.headers.get("Cookie") or ""
+            for item in cookie.split(";"):
+                name, _, value = item.strip().partition("=")
+                if name == "p2a_admin":
+                    return value
+            return None
+
+        def _is_admin(self) -> bool:
+            token = self._cookie_token()
+            return bool(token and token in admin_tokens)
+
+        def _require_admin(self) -> bool:
+            if self._is_admin():
+                return True
+            self._send_json({"ok": False, "error": "forbidden"}, status=HTTPStatus.FORBIDDEN)
+            return False
+
+        def _handle_login(self) -> None:
+            if not admin_password:
+                self._send_json({"ok": False, "error": "admin_not_configured"}, status=HTTPStatus.FORBIDDEN)
+                return
+            try:
+                body = self._read_json_body()
+            except ValueError as exc:
+                self._send_json({"ok": False, "error": "bad_request", "detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            password = str(body.get("password") or "")
+            if not hmac.compare_digest(password, admin_password):
+                self._send_json({"ok": False, "error": "invalid_password"}, status=HTTPStatus.FORBIDDEN)
+                return
+            token = secrets.token_urlsafe(32)
+            admin_tokens.add(token)
+            self._send_json(
+                {"ok": True, "admin_enabled": True, "admin": True},
+                headers={"Set-Cookie": f"p2a_admin={token}; Path=/; HttpOnly; SameSite=Strict"},
+            )
+
+        def _handle_logout(self) -> None:
+            token = self._cookie_token()
+            if token:
+                admin_tokens.discard(token)
+            self._send_json(
+                {"ok": True, "admin_enabled": bool(admin_password), "admin": False},
+                headers={"Set-Cookie": "p2a_admin=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"},
+            )
+
+        def _delete_targets_from_body(self, body: dict[str, Any]) -> list[dict[str, Any]]:
+            targets = body.get("targets")
+            if isinstance(targets, list):
+                return [item for item in targets if isinstance(item, dict)]
+            target = body.get("target") if isinstance(body.get("target"), dict) else body
+            return [target]
+
+        def _handle_delete_preview(self) -> None:
+            if not self._require_admin():
+                return
+            if request.db_path is None:
+                self._send_json({"ok": False, "error": "db_required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                body = self._read_json_body()
+                targets = self._delete_targets_from_body(body)
+                conn = connect_readonly(request.db_path)
+                try:
+                    counts = count_run_data_targets(conn, targets)
+                finally:
+                    conn.close()
+            except (ValueError, FileNotFoundError, sqlite3.Error) as exc:
+                self._send_json({"ok": False, "error": "bad_request", "detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            self._send_json({"ok": True, "counts": counts, "confirmation_phrase": delete_confirmation_phrase(counts)})
+
+        def _handle_delete(self) -> None:
+            if not self._require_admin():
+                return
+            if request.db_path is None:
+                self._send_json({"ok": False, "error": "db_required"}, status=HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                body = self._read_json_body()
+                targets = self._delete_targets_from_body(body)
+                conn = connect_readonly(request.db_path)
+                try:
+                    counts = count_run_data_targets(conn, targets)
+                finally:
+                    conn.close()
+                expected = delete_confirmation_phrase(counts)
+                if str(body.get("confirmation") or "") != expected:
+                    self._send_json({"ok": False, "error": "confirmation_required", "confirmation_phrase": expected, "counts": counts}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                backup_path = backup_path_for_delete(request.db_path)
+                _backup_sqlite_database(request.db_path, backup_path)
+                writer = connect(request.db_path)
+                try:
+                    init_db(writer)
+                    deleted = delete_run_data_targets(writer, targets)
+                finally:
+                    writer.close()
+            except (ValueError, FileNotFoundError, sqlite3.Error, OSError) as exc:
+                self._send_json({"ok": False, "error": "delete_failed", "detail": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            snapshot_cache["payload"] = None
+            snapshot_cache["change_token"] = None
+            self._send_json({"ok": True, "counts": deleted, "backup_path": str(backup_path)})
+
+        def _send_json(
+            self,
+            payload: dict[str, Any],
+            *,
+            status: HTTPStatus = HTTPStatus.OK,
+            headers: dict[str, str] | None = None,
+        ) -> None:
+            self._send_bytes(snapshot_to_json(payload).encode("utf-8"), "application/json; charset=utf-8", status=status, headers=headers)
+
+        def _send_bytes(
+            self,
+            payload: bytes,
+            content_type: str,
+            *,
+            status: HTTPStatus = HTTPStatus.OK,
+            headers: dict[str, str] | None = None,
+        ) -> None:
             try:
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(payload)))
                 self.send_header("Cache-Control", "no-store, max-age=0")
                 self.send_header("Pragma", "no-cache")
+                for key, value in (headers or {}).items():
+                    self.send_header(key, value)
                 self.end_headers()
                 self.wfile.write(payload)
             except (BrokenPipeError, ConnectionResetError):
@@ -216,8 +551,8 @@ def _dashboard_urls(host: str, port: int) -> list[tuple[str, str]]:
     return [("URL", f"http://{host}:{port}")]
 
 
-def serve_dashboard(request: DashboardRequest, *, host: str, port: int) -> None:
-    server = ThreadingHTTPServer((host, port), make_handler(request))
+def serve_dashboard(request: DashboardRequest, *, host: str, port: int, admin_secret: Path | None = None) -> None:
+    server = ThreadingHTTPServer((host, port), make_handler(request, admin_password=_load_admin_password(admin_secret)))
     print("Serving unified P2A dashboard")
     print(f"  Bind: http://{host}:{port}")
     urls = _dashboard_urls(host, port)
@@ -251,6 +586,7 @@ def add_dashboard_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--out-dir", type=Path, default=None, help="Write a static snapshot instead of serving")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8766)
+    parser.add_argument("--admin-secret", type=Path, default=None, help="File containing the dashboard admin password")
     parser.add_argument("--snapshot-json", type=Path, default=None, help="Write one snapshot JSON and exit")
 
 
@@ -289,7 +625,10 @@ def main(argv: list[str] | None = None) -> int:
         paths = write_static_dashboard(args.out_dir, snapshot)
         print(paths["html"])
         return 0
-    serve_dashboard(request, host=args.host, port=args.port)
+    if args.admin_secret is not None:
+        serve_dashboard(request, host=args.host, port=args.port, admin_secret=args.admin_secret)
+    else:
+        serve_dashboard(request, host=args.host, port=args.port)
     return 0
 
 

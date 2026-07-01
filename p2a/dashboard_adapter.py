@@ -6,6 +6,7 @@ import json
 import os
 import pickle
 import re
+import hashlib
 import sqlite3
 import time
 from collections import defaultdict
@@ -13,8 +14,14 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
+from p2a.bonus_map_scope import (
+    CASE_FILTER_BUCKETS,
+    LATENT_CASE,
+    PATH_CASE_TYPES,
+    canonical_detail_case_type,
+)
 from p2a.core import BonusMapStore, _bonus_map_candidate_ids, normalize_action, reads_from_step_trace, writes_from_step_trace
-from p2a.eval_cache import aggregate_model_metrics, connect_readonly, json_loads
+from p2a.eval_cache import aggregate_model_metrics, connect, connect_readonly, init_db, json_dumps, json_loads, write_dashboard_detail_cache
 from p2a.eval_fault_localization import (
     _json_default,
     _kendall_order,
@@ -29,6 +36,7 @@ from p2a.hf_assets import shared_p2a_data_dir
 
 
 DASHBOARD_SCHEMA_VERSION = "p2a_unified_dashboard_v1"
+DASHBOARD_DETAIL_CACHE_VERSION = "dashboard_detail_cache_v1"
 THIRD_PARTY_PROVIDER_SOURCES = {
     "internal_api",
     "openai_compatible",
@@ -58,12 +66,12 @@ LEGACY_PATH_PATTERN_KEYS = (
     "error_spiral_on_chain",
 )
 CHAIN_BAD_PATTERN_KEYS = LEGACY_PATH_PATTERN_KEYS
-PATH_METRIC_CASE_TYPES = {"direct", "standard"}
+PATH_METRIC_CASE_TYPES = PATH_CASE_TYPES
 DYNAMIC_TRACEABLE_CASE_TYPES = PATH_METRIC_CASE_TYPES
-CASE_FILTER_BUCKETS = ("direct", "standard", "others")
 DATASET_PARQUET_FILENAMES = {
     "swebench-hard": ("swe_bench_verified_hard.parquet",),
     "swebench-verified": ("swe_bench_verified.parquet",),
+    "swebench-pro": ("swe_bench_pro.parquet",),
     "r2e-gym-subset": ("r2e_gym_subset_p2a.parquet", "r2e_gym_subset_p2a.train.parquet"),
 }
 THINK_BLOCK_RE = re.compile(r"<think>([\s\S]*?)(?:</think>|\Z)", re.IGNORECASE)
@@ -106,6 +114,7 @@ class DashboardRequest:
     near_threshold: float = 0.5
     m_max: float = 3.0
     detail_limit: int = 500
+    defer_db_scoring: bool = False
 
 
 def _safe_json_loads(value: str | None, default: Any) -> Any:
@@ -115,6 +124,21 @@ def _safe_json_loads(value: str | None, default: Any) -> Any:
 
 def _jsonable(value: Any) -> Any:
     return json.loads(json.dumps(value, default=_json_default, ensure_ascii=False))
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def _sha256_file(path: Path) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
 
 
 def _as_mapping(value: Any) -> dict[str, Any]:
@@ -256,6 +280,24 @@ def _content_block_text(value: Any, *, types: set[str]) -> str:
     return "".join(parts)
 
 
+def _join_unique_text(parts: Iterable[str | None]) -> str:
+    selected: list[str] = []
+    seen_blocks: set[str] = set()
+    for part in parts:
+        if not part:
+            continue
+        text = str(part).strip()
+        if not text:
+            continue
+        blocks = [block.strip() for block in re.split(r"\n\s*\n", text) if block.strip()]
+        block_keys = blocks or [text]
+        if all(block in seen_blocks for block in block_keys):
+            continue
+        selected.append(text)
+        seen_blocks.update(block_keys)
+    return "\n\n".join(selected)
+
+
 def _split_reasoning_and_chat(trace: dict[str, Any], tool_calls: list[Any]) -> tuple[str, str, list[dict[str, Any]]]:
     response_text = _first_text(trace, ("completion", "response_text", "response", "assistant_response", "content"))
     reasoning = _first_text(trace, ("reasoning", "reasoning_content", "reasoning_text"))
@@ -266,13 +308,13 @@ def _split_reasoning_and_chat(trace: dict[str, Any], tool_calls: list[Any]) -> t
     if content_reasoning:
         reasoning_parts.append(content_reasoning)
     if reasoning_parts:
-        reasoning = "\n\n".join([part for part in [reasoning, *reasoning_parts] if part])
+        reasoning = _join_unique_text([reasoning, *reasoning_parts])
     text_block_chat = "\n\n".join(_block_values(trace.get("text_blocks")))
     if not response_text:
         response_text = text_block_chat or _content_block_text(trace.get("content"), types={"text", "output_text", "message"})
     think_parts = [match.group(1).strip() for match in THINK_BLOCK_RE.finditer(response_text) if match.group(1).strip()]
     if think_parts:
-        reasoning = "\n\n".join([part for part in [reasoning, *think_parts] if part])
+        reasoning = _join_unique_text([reasoning, *think_parts])
     chat = THINK_BLOCK_RE.sub("", response_text).strip()
     parsed_calls = [_parsed_tool_call(call) for call in tool_calls]
     if not parsed_calls:
@@ -335,6 +377,7 @@ def _record_metadata(record: dict[str, Any], request: DashboardRequest, *, log_d
         log_dir=log_dir,
     )
     run_id = record.get("run_id") or extra.get("run_id")
+    rollout_index = record.get("rollout_index", extra.get("rollout_index"))
     model_label = record.get("model_label") or record.get("model") or extra.get("model_label") or extra.get("model")
     model_api_name = record.get("model_api_name") or extra.get("model_api_name") or model_label
     experiment_id = (
@@ -353,6 +396,8 @@ def _record_metadata(record: dict[str, Any], request: DashboardRequest, *, log_d
         "model_api_name": str(model_api_name) if model_api_name is not None else None,
         "model_label": str(model_label) if model_label is not None else None,
         "run_id": str(run_id) if run_id is not None else None,
+        "rollout_index": int(rollout_index) if isinstance(rollout_index, int | float) and not isinstance(rollout_index, bool) else 0,
+        "rollout_id": str(record.get("rollout_id") or extra.get("rollout_id") or "") or None,
         "run_step": run_step,
         "artifact_root": str(record.get("artifact_root") or record.get("artifact_rollouts") or ""),
         "schema_version": schema_version or None,
@@ -542,6 +587,13 @@ def _enrich_details_from_bonus_map_dirs(details: list[dict[str, Any]], bonus_map
 
 def _step_inspection(record: dict[str, Any], step_details: list[dict[str, Any]]) -> list[dict[str, Any]]:
     traces = _as_sequence(record.get("p2a_step_traces"))
+    explicit_step_values: list[int] = []
+    for trace_value in traces:
+        trace = _as_mapping(trace_value)
+        value = trace.get("step_idx", trace.get("step_index"))
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            explicit_step_values.append(int(value))
+    explicit_step_offset = 1 if explicit_step_values and min(explicit_step_values) == 0 else 0
     by_trace_index = {
         int(detail.get("trace_index", index)): detail
         for index, detail in enumerate(step_details or [])
@@ -567,10 +619,17 @@ def _step_inspection(record: dict[str, Any], step_details: list[dict[str, Any]])
         computed_execution_error = _step_execution_error(trace, tool_results, observation)
         stale_scored_error = bool(scored.get("execution_error")) and not tool_results and not observation
         execution_error = bool(stale_scored_error or computed_execution_error)
+        raw_step_index = trace.get("step_idx", trace.get("step_index"))
+        if isinstance(scored.get("step_index"), int | float) and not isinstance(scored.get("step_index"), bool):
+            display_step_index = int(scored["step_index"])
+        elif isinstance(raw_step_index, int | float) and not isinstance(raw_step_index, bool):
+            display_step_index = int(raw_step_index) + explicit_step_offset
+        else:
+            display_step_index = index + 1
         out.append(
             {
                 "trace_index": index,
-                "step_index": trace.get("step_idx", scored.get("step_index", index)),
+                "step_index": display_step_index,
                 "tool_names": tool_names,
                 "tool_name": tool_names[0] if tool_names else "no-tool",
                 "tool_args": _jsonable(tool_args),
@@ -737,12 +796,38 @@ def _stored_step_order(step: dict[str, Any], fallback: int) -> int:
     return fallback
 
 
-def _stored_step_first_hits(detail: dict[str, Any]) -> dict[str, int]:
+def _stored_step_label_offset(detail: dict[str, Any]) -> int:
+    labels: list[int] = []
+    for step in detail.get("step_details") or []:
+        if not isinstance(step, dict):
+            continue
+        value = step.get("step_index")
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            labels.append(int(value))
+    return 1 if labels and min(labels) == 0 else 0
+
+
+def _stored_step_display_order(step: dict[str, Any], fallback: int, offset: int) -> int:
+    value = step.get("step_index")
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return int(value) + offset
+    value = step.get("trace_index")
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return int(value) + 1
+    return fallback + 1
+
+
+def _stored_step_first_hits(detail: dict[str, Any], *, display: bool = False) -> dict[str, int]:
     first_hits: dict[str, int] = {}
+    offset = _stored_step_label_offset(detail) if display else 0
     for fallback, step in enumerate(detail.get("step_details") or []):
         if not isinstance(step, dict):
             continue
-        order = _stored_step_order(step, fallback)
+        order = (
+            _stored_step_display_order(step, fallback, offset)
+            if display
+            else _stored_step_order(step, fallback)
+        )
         for node in _stored_step_hit_nodes(step):
             first_hits.setdefault(str(node["key"]), order)
     return first_hits
@@ -786,6 +871,7 @@ def _repair_order_semantics(detail: dict[str, Any]) -> None:
     roots = set(bonus_map.get("root_cause_nodes") or [])
     first_hits = _stored_step_first_hits(detail)
     if first_hits:
+        display_first_hits = _stored_step_first_hits(detail, display=True)
         detail["order_score"], detail["order_defined"] = _kendall_order(first_hits, bonus_map)
         detail["miracle_step"], detail["miracle_severity"] = _miracle_stats(
             first_hits,
@@ -795,8 +881,10 @@ def _repair_order_semantics(detail: dict[str, Any]) -> None:
         )
         first_anchor = _first_hit(first_hits, anchors)
         first_root = _first_hit(first_hits, roots)
-        detail["first_anchor_step"] = first_anchor
-        detail["first_root_step"] = first_root
+        display_first_anchor = _first_hit(display_first_hits, anchors)
+        display_first_root = _first_hit(display_first_hits, roots)
+        detail["first_anchor_step"] = display_first_anchor
+        detail["first_root_step"] = display_first_root
         if first_anchor is not None and first_root is not None:
             detail["anchor_before_root"] = first_anchor <= first_root
             detail["steps_anchor_to_root"] = first_root - first_anchor
@@ -938,6 +1026,94 @@ def _empty_summary(request: DashboardRequest) -> dict[str, Any]:
     ))
 
 
+def _record_dashboard_cache(record: dict[str, Any]) -> dict[str, Any]:
+    cache = record.get("_dashboard_cache")
+    return cache if isinstance(cache, dict) else {}
+
+
+def _bonus_map_file_for_instance(bonus_map_dir: Path | None, instance_id: str) -> Path | None:
+    if bonus_map_dir is None or not instance_id:
+        return None
+    for candidate_id in _bonus_map_candidate_ids(instance_id):
+        path = bonus_map_dir / f"{candidate_id}.json"
+        if path.exists():
+            return path
+    return None
+
+
+def _dashboard_detail_fingerprint(record: dict[str, Any], *, request: DashboardRequest) -> str | None:
+    if request.bonus_map_dir is None:
+        return None
+    cache = _record_dashboard_cache(record)
+    raw_hash = cache.get("raw_rollout_sha256")
+    if not raw_hash:
+        raw_hash = _sha256_text(json_dumps(_scoreable_record(record)))
+    instance_id = str(record.get("instance_id") or "")
+    bonus_map_file = _bonus_map_file_for_instance(request.bonus_map_dir, instance_id)
+    payload = {
+        "version": DASHBOARD_DETAIL_CACHE_VERSION,
+        "tracking_mode": request.tracking_mode,
+        "near_threshold": request.near_threshold,
+        "m_max": request.m_max,
+        "raw_rollout_sha256": raw_hash,
+        "bonus_map_path": str(bonus_map_file) if bonus_map_file else None,
+        "bonus_map_sha256": _sha256_file(bonus_map_file) if bonus_map_file else None,
+    }
+    return _sha256_text(json_dumps(payload))
+
+
+def _cached_dashboard_detail(record: dict[str, Any], fingerprint: str | None) -> dict[str, Any] | None:
+    if not fingerprint:
+        return None
+    cache = _record_dashboard_cache(record)
+    if cache.get("fingerprint") != fingerprint:
+        return None
+    detail = cache.get("detail")
+    return dict(detail) if isinstance(detail, dict) and detail else None
+
+
+def _scoreable_record(record: dict[str, Any]) -> dict[str, Any]:
+    if "_dashboard_cache" not in record:
+        return record
+    return {key: value for key, value in record.items() if key != "_dashboard_cache"}
+
+
+def _write_pending_dashboard_detail_cache(
+    request: DashboardRequest,
+    pending_writes: list[tuple[int, str, dict[str, Any]]],
+) -> None:
+    if not request.db_path or not pending_writes:
+        return
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect(request.db_path, timeout=0.5)
+        init_db(conn)
+        for cell_id, fingerprint, detail in pending_writes:
+            write_dashboard_detail_cache(conn, cell_id=cell_id, fingerprint=fingerprint, detail=detail)
+        conn.commit()
+    except (OSError, sqlite3.Error):
+        if conn is not None:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _deferred_dashboard_detail(record: dict[str, Any], *, index: int) -> dict[str, Any]:
+    return {
+        "record_index": index,
+        "instance_id": _row_instance_id(record),
+        "data_source": _record_dataset(record) or "unknown",
+        "has_step_traces": bool(record.get("p2a_step_traces")),
+        "not_path_evaluable_reason": "dashboard_cache_pending",
+        "not_chain_evaluable_reason": "dashboard_cache_pending",
+        "dashboard_cache_pending": True,
+    }
+
+
 def _score_records(
     records: Iterable[dict[str, Any]],
     *,
@@ -948,16 +1124,28 @@ def _score_records(
         return []
     bonus_maps = BonusMapStore(str(request.bonus_map_dir))
     scored = []
+    pending_writes: list[tuple[int, str, dict[str, Any]]] = []
     for index, record in enumerate(records):
-        detail = score_record(
-            record,
-            index=start_index + index,
-            bonus_maps=bonus_maps,
-            tracking_mode=request.tracking_mode,
-            near_threshold=request.near_threshold,
-            m_max=request.m_max,
-        )
+        fingerprint = _dashboard_detail_fingerprint(record, request=request)
+        cached = _cached_dashboard_detail(record, fingerprint)
+        if cached is not None:
+            detail = cached
+        elif request.defer_db_scoring and _record_dashboard_cache(record).get("cell_id"):
+            detail = _deferred_dashboard_detail(record, index=start_index + index)
+        else:
+            detail = score_record(
+                _scoreable_record(record),
+                index=start_index + index,
+                bonus_maps=bonus_maps,
+                tracking_mode=request.tracking_mode,
+                near_threshold=request.near_threshold,
+                m_max=request.m_max,
+            )
+            cache = _record_dashboard_cache(record)
+            if fingerprint and cache.get("cell_id"):
+                pending_writes.append((int(cache["cell_id"]), fingerprint, detail))
         scored.append(_enrich_detail_from_record(detail, record, request))
+    _write_pending_dashboard_detail_cache(request, pending_writes)
     return scored
 
 
@@ -1088,16 +1276,24 @@ def _load_db_records(conn: sqlite3.Connection, request: DashboardRequest) -> tup
         dataset=request.dataset,
     )
     raw_columns = _sqlite_columns(conn, "raw_rollouts")
+    cell_columns = _sqlite_columns(conn, "run_cells")
     issue_sql = "r.issue_description" if "issue_description" in raw_columns else "NULL AS issue_description"
     patch_sql = "r.golden_patch" if "golden_patch" in raw_columns else "NULL AS golden_patch"
+    rollout_index_sql = "c.rollout_index" if "rollout_index" in cell_columns else "0 AS rollout_index"
+    rollout_id_sql = "c.rollout_id" if "rollout_id" in cell_columns else "NULL AS rollout_id"
+    metric_columns = _sqlite_columns(conn, "quantitative_metrics")
+    fingerprint_sql = "q.fingerprint" if "fingerprint" in metric_columns else "NULL AS fingerprint"
     rows = conn.execute(
         f"""
         SELECT
+          c.id AS cell_id,
           c.experiment_id,
           c.provider_source,
           c.dataset,
           c.model_api_name,
           c.model_label,
+          {rollout_index_sql},
+          {rollout_id_sql},
           c.status,
           c.error,
           c.artifact_rollouts,
@@ -1106,6 +1302,7 @@ def _load_db_records(conn: sqlite3.Connection, request: DashboardRequest) -> tup
           {issue_sql},
           {patch_sql},
           r.rollout_json,
+          {fingerprint_sql},
           q.metrics_json
         FROM run_cells c
         LEFT JOIN raw_rollouts r ON r.cell_id = c.id
@@ -1120,7 +1317,22 @@ def _load_db_records(conn: sqlite3.Connection, request: DashboardRequest) -> tup
     stored_details: list[dict[str, Any]] = []
     for row in rows:
         record = _safe_json_loads(row["rollout_json"], {})
+        metrics = _safe_json_loads(row["metrics_json"], {})
+        detail = metrics.get("detail") if isinstance(metrics, dict) else None
         if isinstance(record, dict) and record:
+            if isinstance(detail, dict) and detail:
+                record["_dashboard_cache"] = {
+                    "cell_id": row["cell_id"],
+                    "fingerprint": row["fingerprint"],
+                    "raw_rollout_sha256": _sha256_text(str(row["rollout_json"] or "")),
+                    "detail": detail,
+                }
+            else:
+                record["_dashboard_cache"] = {
+                    "cell_id": row["cell_id"],
+                    "fingerprint": row["fingerprint"],
+                    "raw_rollout_sha256": _sha256_text(str(row["rollout_json"] or "")),
+                }
             record.setdefault("experiment_id", row["experiment_id"])
             record.setdefault("provider_source", row["provider_source"])
             record.setdefault("data_source", row["dataset"])
@@ -1128,6 +1340,8 @@ def _load_db_records(conn: sqlite3.Connection, request: DashboardRequest) -> tup
             record.setdefault("model_label", row["model_label"])
             record.setdefault("model_api_name", row["model_api_name"])
             record.setdefault("run_id", row["run_id"])
+            record.setdefault("rollout_index", row["rollout_index"])
+            record.setdefault("rollout_id", row["rollout_id"])
             record.setdefault("artifact_rollouts", row["artifact_rollouts"])
             if row["issue_description"] and not _issue_description(record):
                 record["issue_description"] = row["issue_description"]
@@ -1135,8 +1349,6 @@ def _load_db_records(conn: sqlite3.Connection, request: DashboardRequest) -> tup
                 record["golden_patch"] = row["golden_patch"]
             records.append(record)
 
-        metrics = _safe_json_loads(row["metrics_json"], {})
-        detail = metrics.get("detail") if isinstance(metrics, dict) else None
         if isinstance(detail, dict) and detail:
             if isinstance(record, dict) and record:
                 stored_details.append(_enrich_detail_from_record(detail, record, request))
@@ -1149,6 +1361,8 @@ def _load_db_records(conn: sqlite3.Connection, request: DashboardRequest) -> tup
                     "model_label": row["model_label"],
                     "model_api_name": row["model_api_name"],
                     "run_id": row["run_id"],
+                    "rollout_index": row["rollout_index"],
+                    "rollout_id": row["rollout_id"],
                     "artifact_rollouts": row["artifact_rollouts"],
                     "issue_description": row["issue_description"],
                     "golden_patch": row["golden_patch"],
@@ -1393,6 +1607,25 @@ def _bonus_map_dir_has_instance(candidate: Path, instance_id: str) -> bool:
     return any((candidate / f"{candidate_id}.json").exists() for candidate_id in _bonus_map_candidate_ids(instance_id))
 
 
+_BONUS_MAP_DIR_CACHE: dict[tuple[Any, ...], dict[str, Path]] = {}
+
+
+def _source_version(path: Path | None) -> tuple[str, int, int] | None:
+    if path is None:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path), -1, -1)
+    return (str(path), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _records_version(raw_records: Iterable[dict[str, Any]], details: Iterable[dict[str, Any]]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    record_bits = tuple(sorted(str(record.get("instance_id") or "") for record in raw_records if record.get("instance_id")))
+    detail_bits = tuple(sorted(str(detail.get("instance_id") or "") for detail in details if detail.get("instance_id")))
+    return record_bits, detail_bits
+
+
 def _effective_bonus_map_dirs(
     request: DashboardRequest,
     raw_records: Iterable[dict[str, Any]],
@@ -1400,14 +1633,30 @@ def _effective_bonus_map_dirs(
 ) -> dict[str, Path]:
     raw_records = list(raw_records)
     details = list(details)
+    cache_key = (
+        str(request.bonus_map_dir) if request.bonus_map_dir is not None else None,
+        request.dataset,
+        _source_version(request.db_path),
+        _source_version(request.log_dir),
+        _source_version(request.data_file),
+        _records_version(raw_records, details),
+        tuple((str(path), _source_version(path)) for path in request.rollouts),
+        tuple((str(path), _source_version(path)) for path in request.details),
+    )
+    cached = _BONUS_MAP_DIR_CACHE.get(cache_key)
+    if cached is not None:
+        return dict(cached)
     datasets = {name for name in [_record_dataset(record) for record in raw_records] if name}
     datasets.update(name for name in [_detail_dataset(detail) for detail in details] if name)
     if request.dataset:
         datasets = {request.dataset}
     if request.bonus_map_dir is not None:
         if not datasets:
-            return {"": request.bonus_map_dir}
-        return {dataset: request.bonus_map_dir for dataset in datasets}
+            result = {"": request.bonus_map_dir}
+        else:
+            result = {dataset: request.bonus_map_dir for dataset in datasets}
+        _BONUS_MAP_DIR_CACHE[cache_key] = dict(result)
+        return result
     if not datasets:
         return {}
     instance_ids_by_dataset = _dataset_instance_ids(raw_records, details)
@@ -1421,6 +1670,7 @@ def _effective_bonus_map_dirs(
             ):
                 bonus_map_dirs[dataset] = candidate
                 break
+    _BONUS_MAP_DIR_CACHE[cache_key] = dict(bonus_map_dirs)
     return bonus_map_dirs
 
 
@@ -1509,6 +1759,14 @@ def _sqlite_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 def _avg(values: Iterable[Any]) -> float | None:
     real = [float(value) for value in values if isinstance(value, int | float) and not isinstance(value, bool)]
     return sum(real) / len(real) if real else None
+
+
+def _std(values: Iterable[Any]) -> float | None:
+    real = [float(value) for value in values if isinstance(value, int | float) and not isinstance(value, bool)]
+    if not real:
+        return None
+    mean = sum(real) / len(real)
+    return (sum((value - mean) ** 2 for value in real) / len(real)) ** 0.5
 
 
 def _rate(values: Iterable[Any]) -> float | None:
@@ -1623,12 +1881,12 @@ def _distribution(items: Iterable[dict[str, Any]], key: str) -> dict[str, int]:
 
 
 def _detail_case_type(detail: dict[str, Any]) -> str:
-    return str(detail.get("bonus_case_type") or _path_value(detail, "path_case_kind", "chain_case_kind", "") or "")
+    return canonical_detail_case_type(detail)
 
 
 def _case_filter_bucket(detail: dict[str, Any]) -> str:
     case_type = _detail_case_type(detail)
-    if _path_value(detail, "path_evaluable", "chain_evaluable") is True and case_type in {"direct", "standard"}:
+    if _path_value(detail, "path_evaluable", "chain_evaluable") is True and case_type in CASE_FILTER_BUCKETS:
         return case_type
     return "others"
 
@@ -1654,7 +1912,7 @@ def _has_path_edges(detail: dict[str, Any]) -> bool:
 
 
 def _is_order_metric_detail(detail: dict[str, Any]) -> bool:
-    return _is_path_metric_detail(detail) and _has_path_edges(detail) and not _has_dual_symptom_root(detail)
+    return _is_path_metric_detail(detail) and _detail_case_type(detail) == LATENT_CASE and _has_path_edges(detail)
 
 
 def _instance_key(detail: dict[str, Any]) -> str:
@@ -1691,7 +1949,7 @@ def _dataset_distributions(details: list[dict[str, Any]]) -> dict[str, dict[str,
             "not_chain_evaluable": 0,
         }
         for item in items:
-            case_types[str(item.get("bonus_case_type") or "missing_bonus_map")] += 1
+            case_types[_detail_case_type(item) or "missing_bonus_map"] += 1
             if item.get("has_bonus_map"):
                 availability["with_bonus_map"] += 1
             if item.get("has_call_graph"):
@@ -1726,6 +1984,187 @@ def _path_pattern_distribution(details: Iterable[dict[str, Any]], keys: Iterable
             if patterns.get(key):
                 counts[key] += 1
     return dict(sorted(counts.items()))
+
+
+AVG_AT_METRIC_KEYS = (
+    "resolved_rate",
+    "reward_rate",
+    "p2a_read_rate",
+    "call_graph_hit_rate",
+    "ground_truth_hit_rate",
+    "near_hit_rate",
+    "avg_min_distance",
+    "avg_read_precision",
+    "avg_node_recall",
+    "avg_hit_f1",
+    "path_coverage",
+    "chain_graph_coverage",
+    "path_hit_rate",
+    "chain_hit_rate",
+    "anchor_hit_rate",
+    "root_hit_rate",
+    "avg_path_node_recall",
+    "avg_chain_node_recall",
+    "avg_path_node_precision",
+    "avg_chain_node_precision",
+    "avg_path_node_f1",
+    "avg_chain_node_f1",
+    "avg_path_read_precision",
+    "avg_chain_read_precision",
+    "avg_first_anchor_step",
+    "avg_first_root_step",
+    "avg_steps_anchor_to_root",
+    "anchor_before_root_rate",
+    "avg_order_score",
+    "reverse_order_rate",
+    "miracle_rate",
+    "avg_miracle_severity",
+    "avg_block_order_score",
+    "block_reverse_order_rate",
+    "block_miracle_rate",
+    "avg_block_efficiency",
+    "avg_blocks_per_trace",
+    "block_achieve_rate",
+    "block_waste_rate",
+    "block_loop_rate",
+    "achieving_block_step_share",
+    "wasted_block_step_share",
+    "loop_block_step_share",
+    "loop_trace_rate",
+    "error_spiral_rate",
+    "avg_turns",
+    "avg_tool_calls",
+    "avg_wall_time",
+    "avg_input_tokens",
+    "avg_output_tokens",
+    "avg_reasoning_tokens",
+    "cache_hit_rate",
+    "cache_write_rate",
+)
+
+
+def _ratio(item: dict[str, Any], numerator: str, denominator: str) -> float | None:
+    num = _number(item.get(numerator))
+    den = _number(item.get(denominator))
+    return (num / den) if num is not None and den else None
+
+
+def _bool_number(value: Any) -> int | None:
+    return None if value is None else 1 if bool(value) else 0
+
+
+def _detail_metric_values(item: dict[str, Any]) -> dict[str, Any]:
+    path_metric = _is_path_metric_detail(item)
+    order_metric = _is_order_metric_detail(item)
+    order_score = item.get("order_score") if order_metric and item.get("order_defined") is True else None
+    block_order_score = item.get("block_order_score") if order_metric and item.get("block_order_defined") is True else None
+    cache_hit = float(item.get("cache_hit_tokens") or 0)
+    cache_write = float(item.get("cache_write_tokens") or 0)
+    input_tokens = float(item.get("input_tokens") or 0)
+    return {
+        "resolved_rate": _bool_number(item.get("resolved")),
+        "reward_rate": item.get("reward"),
+        "p2a_read_rate": _bool_number((item.get("n_reads") or 0) > 0),
+        "call_graph_hit_rate": _bool_number(item.get("hit_call_graph")),
+        "ground_truth_hit_rate": _bool_number(item.get("hit_ground_truth")),
+        "near_hit_rate": _bool_number(item.get("hit_near")),
+        "avg_min_distance": item.get("min_distance"),
+        "avg_read_precision": item.get("hit_precision") if path_metric else None,
+        "avg_node_recall": item.get("hit_recall") if path_metric else None,
+        "avg_hit_f1": item.get("hit_f1") if path_metric else None,
+        "path_coverage": _bool_number(_path_value(item, "path_covered", "chain_graph_covered")) if path_metric else None,
+        "chain_graph_coverage": _bool_number(_path_value(item, "path_covered", "chain_graph_covered")) if path_metric else None,
+        "path_hit_rate": _bool_number(_path_value(item, "path_hit", "chain_hit")) if path_metric else None,
+        "chain_hit_rate": _bool_number(_path_value(item, "path_hit", "chain_hit")) if path_metric else None,
+        "anchor_hit_rate": _bool_number(item.get("anchor_hit")) if path_metric else None,
+        "root_hit_rate": _bool_number(item.get("root_hit")) if path_metric else None,
+        "avg_path_node_recall": _path_value(item, "path_node_recall", "chain_node_recall") if path_metric else None,
+        "avg_chain_node_recall": _path_value(item, "path_node_recall", "chain_node_recall") if path_metric else None,
+        "avg_path_node_precision": _path_node_precision(item) if path_metric else None,
+        "avg_chain_node_precision": _path_node_precision(item) if path_metric else None,
+        "avg_path_node_f1": _path_node_f1(item) if path_metric else None,
+        "avg_chain_node_f1": _path_node_f1(item) if path_metric else None,
+        "avg_path_read_precision": _path_value(item, "path_read_precision", "chain_read_precision") if path_metric else None,
+        "avg_chain_read_precision": _path_value(item, "path_read_precision", "chain_read_precision") if path_metric else None,
+        "avg_first_anchor_step": item.get("first_anchor_step") if path_metric else None,
+        "avg_first_root_step": item.get("first_root_step") if path_metric else None,
+        "avg_steps_anchor_to_root": item.get("steps_anchor_to_root") if path_metric else None,
+        "anchor_before_root_rate": _bool_number(item.get("anchor_before_root")) if path_metric else None,
+        "avg_order_score": order_score,
+        "reverse_order_rate": _bool_number(_negative(order_score)) if order_score is not None else None,
+        "miracle_rate": _bool_number(_combined_miracle_marker(item)) if order_metric else None,
+        "avg_miracle_severity": item.get("miracle_severity") if order_metric else None,
+        "avg_block_order_score": block_order_score,
+        "block_reverse_order_rate": _bool_number(_negative(block_order_score)) if block_order_score is not None else None,
+        "block_miracle_rate": _bool_number(item.get("block_miracle_step")) if order_metric else None,
+        "avg_block_efficiency": item.get("block_efficiency") if path_metric else None,
+        "avg_blocks_per_trace": item.get("n_blocks") if path_metric else None,
+        "block_achieve_rate": _ratio(item, "n_achieving_blocks", "n_scored_read_blocks") if path_metric else None,
+        "block_waste_rate": _ratio(item, "n_wasted_blocks", "n_scored_read_blocks") if path_metric else None,
+        "block_loop_rate": _ratio(item, "n_loop_blocks", "n_blocks") if path_metric else None,
+        "achieving_block_step_share": _ratio(item, "n_achieving_block_steps", "n_scored_read_block_steps") if path_metric else None,
+        "wasted_block_step_share": _ratio(item, "n_wasted_block_steps", "n_scored_read_block_steps") if path_metric else None,
+        "loop_block_step_share": _ratio(item, "n_loop_block_steps", "n_block_steps") if path_metric else None,
+        "loop_trace_rate": _bool_number((item.get("bad_patterns") or {}).get("has_loop")),
+        "error_spiral_rate": _bool_number((item.get("bad_patterns") or {}).get("error_spiral")),
+        "avg_turns": item.get("turns"),
+        "avg_tool_calls": item.get("tool_calls"),
+        "avg_wall_time": item.get("wall_time"),
+        "avg_input_tokens": item.get("input_tokens"),
+        "avg_output_tokens": item.get("output_tokens"),
+        "avg_reasoning_tokens": item.get("reasoning_tokens"),
+        "cache_hit_rate": (cache_hit / (input_tokens + cache_hit)) if cache_hit and (input_tokens + cache_hit) else None,
+        "cache_write_rate": (cache_write / (input_tokens + cache_write)) if cache_write and (input_tokens + cache_write) else None,
+    }
+
+
+def _rollout_index(item: dict[str, Any]) -> int:
+    value = item.get("rollout_index")
+    return int(value) if isinstance(value, int | float) and not isinstance(value, bool) else 0
+
+
+def _items_by_instance(items: Iterable[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    out: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in items:
+        out[str(item.get("instance_id") or item.get("uid") or "")].append(item)
+    for values in out.values():
+        values.sort(key=_rollout_index)
+    return out
+
+
+def _apply_avg_at_metrics(row: dict[str, Any], items: list[dict[str, Any]]) -> None:
+    if not items:
+        return
+    rollout_n = max(1, max(_rollout_index(item) for item in items) + 1)
+    by_instance = _items_by_instance(items)
+    pass_at = {}
+    for k in range(1, rollout_n + 1):
+        pass_at[str(k)] = _rate(any(item.get("resolved") for item in values[:k]) for values in by_instance.values() if values[:k])
+    row["rollouts_per_instance"] = rollout_n
+    row["target_rollouts"] = len(items)
+    row["done_rollouts"] = len(items)
+    row["pass_at"] = pass_at
+    row["pass_at_n"] = pass_at.get(str(rollout_n))
+    row["avg_at"] = {}
+    row["avg_at_std"] = {}
+    row["std_scale"] = 1
+    for k in range(1, rollout_n + 1):
+        row["avg_at"][str(k)] = {}
+        row["avg_at_std"][str(k)] = {}
+        for key in AVG_AT_METRIC_KEYS:
+            instance_values = []
+            for values in by_instance.values():
+                selected = values[:k]
+                instance_values.append(_avg(_detail_metric_values(item).get(key) for item in selected))
+            row["avg_at"][str(k)][key] = _avg(instance_values)
+            row["avg_at_std"][str(k)][key] = _std(instance_values)
+    row["avg_at_n"] = row["avg_at"].get(str(rollout_n), {})
+    row["avg_at_n_std"] = row["avg_at_std"].get(str(rollout_n), {})
+    for key, mean in row["avg_at_n"].items():
+        row[key] = mean
+        std = row["avg_at_n_std"].get(key)
+        if std is not None:
+            row[f"{key}_std"] = std
 
 
 def _detail_model_metrics(details: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1852,6 +2291,7 @@ def _detail_model_metrics(details: list[dict[str, Any]]) -> list[dict[str, Any]]
             "path_pattern_flags": _path_pattern_distribution(items, PATH_PATTERN_KEYS),
             "chain_bad_patterns": _path_pattern_distribution(items, CHAIN_BAD_PATTERN_KEYS),
         }
+        _apply_avg_at_metrics(row, items)
         rows.append(row)
     return rows
 
@@ -1895,7 +2335,7 @@ def _merge_model_metrics(base_rows: list[dict[str, Any]], detail_rows: list[dict
     for row in detail_rows:
         current = merged.get(row["eval_cell_key"], {})
         merged_row = dict(row)
-        for key in ("target", "done", "errors", "pending"):
+        for key in ("target", "done", "errors", "pending", "selected_scope"):
             if current.get(key) is not None:
                 merged_row[key] = current[key]
         merged[row["eval_cell_key"]] = _normalize_model_row(merged_row)
@@ -1929,6 +2369,7 @@ def _eval_cell_registry(model_metrics: list[dict[str, Any]], details: list[dict[
                 "done": row.get("done"),
                 "errors": row.get("errors"),
                 "pending": row.get("pending"),
+                "selected_scope": row.get("selected_scope"),
                 "detail_count": detail_counts.get(key, 0),
                 "trajectory_count": trace_counts.get(key, 0),
                 "resolved_rate": row.get("resolved_rate"),

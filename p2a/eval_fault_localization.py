@@ -27,6 +27,15 @@ from p2a.core import (
     segment_purpose_blocks,
     writes_from_step_trace,
 )
+from p2a.bonus_map_scope import (
+    LATENT_CASE,
+    PATH_CASE_TYPES,
+    bonus_map_pattern_computable,
+    bonus_map_root_anchor_overlap,
+    canonical_bonus_case_type,
+    canonical_detail_case_type,
+    traceable_case_family,
+)
 
 SUMMARY_SCHEMA_VERSION = "p2a_eval_fault_localization_v1"
 TEXT_FIELDS = (
@@ -49,7 +58,6 @@ EXECUTION_ERROR_TEXT_PATTERN = re.compile(
 # Persisted eval artifacts historically used `chain_*` keys for what the
 # dashboard now calls Path. New code should prefer the `path_*` aliases; the
 # legacy keys remain readable/writable for old DB rows and detail JSON files.
-PATH_CASE_TYPES = {"standard", "direct"}
 LEGACY_NODE_ROLE_ALIASES = {
     "pre_symptom": "test_adapter",
 }
@@ -310,6 +318,31 @@ def extract_run_step(record: dict) -> int | None:
     return None
 
 
+def extract_rollout_index(record: dict) -> int:
+    for container in _candidate_containers(record):
+        value = _maybe_json(container.get("rollout_index"))
+        if isinstance(value, bool) or value is None:
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and math.isfinite(value):
+            return int(value)
+        if isinstance(value, str):
+            try:
+                return int(float(value.strip()))
+            except ValueError:
+                continue
+    return 0
+
+
+def extract_rollout_id(record: dict) -> str | None:
+    for container in _candidate_containers(record):
+        value = _as_str(container.get("rollout_id"))
+        if value:
+            return value
+    return None
+
+
 def _normalize_tool_call(tool_call: Any) -> dict | None:
     tool_call = _maybe_json(tool_call)
     if not isinstance(tool_call, dict):
@@ -491,12 +524,24 @@ def extract_record_reads(
 
 
 def _first_matching_step(step_reads: list[list[dict]], bonus_map: dict, *, require_gt: bool) -> int | None:
+    return _first_matching_step_with_indices(step_reads, bonus_map, require_gt=require_gt)
+
+
+def _first_matching_step_with_indices(
+    step_reads: list[list[dict]],
+    bonus_map: dict,
+    *,
+    require_gt: bool,
+    step_indices: list[int] | None = None,
+) -> int | None:
     for idx, reads in enumerate(step_reads):
         distance = match_reads_to_graph(reads, bonus_map)
         if distance < 0:
             continue
         if require_gt and distance != 0.0:
             continue
+        if step_indices and idx < len(step_indices):
+            return step_indices[idx]
         return idx
     return None
 
@@ -523,13 +568,34 @@ def _step_node_first_hits(
     bonus_map: dict,
     *,
     rewardable_only: bool = True,
+    step_indices: list[int] | None = None,
 ) -> dict[str, int]:
     first_hits: dict[str, int] = {}
     for step_idx, reads in enumerate(step_reads):
+        step_label = step_indices[step_idx] if step_indices and step_idx < len(step_indices) else step_idx
         for read in reads:
             for node_key in _read_hit_nodes(read, bonus_map, rewardable_only=rewardable_only):
-                first_hits.setdefault(node_key, step_idx)
+                first_hits.setdefault(node_key, step_label)
     return first_hits
+
+
+def _trace_step_indices(step_items: list[Any]) -> list[int]:
+    explicit_values: list[int] = []
+    for trace in step_items:
+        normalized = _normalized_trace(trace)
+        value = normalized.get("step_idx", normalized.get("step_index"))
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            explicit_values.append(int(value))
+    offset = 1 if explicit_values and min(explicit_values) == 0 else 0
+    indices: list[int] = []
+    for index, trace in enumerate(step_items):
+        normalized = _normalized_trace(trace)
+        value = normalized.get("step_idx", normalized.get("step_index"))
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            indices.append(int(value) + offset)
+        else:
+            indices.append(index + 1)
+    return indices
 
 
 def _all_read_hit_nodes(reads: list[dict], bonus_map: dict, *, rewardable_only: bool = True) -> set[str]:
@@ -765,7 +831,7 @@ def _can_reach(starts: set[str], edges: list[tuple[str, str]]) -> set[str]:
 def _path_evaluability(bonus_map: dict | None) -> tuple[bool, str | None]:
     if not bonus_map:
         return False, "missing_bonus_map"
-    case_type = str(bonus_map.get("case_type") or "")
+    case_type = canonical_bonus_case_type(bonus_map)
     anchors = _string_list(bonus_map.get("selected_issue_anchor_nodes"))
     if case_type not in PATH_CASE_TYPES:
         return False, str(bonus_map.get("reason_code") or case_type or "missing_case_type")
@@ -842,6 +908,8 @@ def _path_projection(
             "group": group,
             "selected_issue_anchor": node_key in anchors,
             "root_cause": node_key in roots,
+            "patched_callable": node.get("patched_callable"),
+            "patch_role": node.get("patch_role"),
             "hit": node_key in hit_nodes,
             "first_step": first_hits.get(node_key),
         }
@@ -875,7 +943,11 @@ def _path_projection(
 
 def _path_case_kind(item: dict[str, Any]) -> str | None:
     value = item.get("path_case_kind", item.get("chain_case_kind"))
-    return str(value) if value is not None else None
+    if value is None:
+        value = item.get("bonus_case_type")
+    if value is None:
+        return None
+    return canonical_detail_case_type(item)
 
 
 def _is_path_metric_evaluable(item: dict[str, Any]) -> bool:
@@ -886,11 +958,9 @@ def _is_path_metric_evaluable(item: dict[str, Any]) -> bool:
 def _is_order_metric_evaluable(item: dict[str, Any]) -> bool:
     if not _is_path_metric_evaluable(item):
         return False
-    projection = item.get("path_projection") or item.get("chain_projection") or {}
-    anchors = set(projection.get("anchors") or [])
-    roots = set(projection.get("roots") or [])
-    if anchors & roots:
+    if canonical_detail_case_type(item) != LATENT_CASE:
         return False
+    projection = item.get("path_projection") or item.get("chain_projection") or {}
     return bool(projection.get("path_edges") or projection.get("chain_edges") or [])
 
 
@@ -900,6 +970,8 @@ def _path_step_hits(
     path_nodes: set[str],
     anchor_nodes: set[str],
     root_nodes: set[str],
+    *,
+    step_indices: list[int] | None = None,
 ) -> dict[str, Any]:
     path_hit_steps: list[int] = []
     anchor_hit_steps: list[int] = []
@@ -909,6 +981,7 @@ def _path_step_hits(
     read_hits_off_path = 0
     node_step_counts: Counter[str] = Counter()
     for step_idx, reads in enumerate(step_reads):
+        step_label = step_indices[step_idx] if step_indices and step_idx < len(step_indices) else step_idx
         step_path_hits: set[str] = set()
         for read in reads:
             hits = _read_hit_nodes(read, bonus_map, rewardable_only=False)
@@ -920,13 +993,13 @@ def _path_step_hits(
             else:
                 read_hits_off_path += 1
         if step_path_hits:
-            path_hit_steps.append(step_idx)
+            path_hit_steps.append(step_label)
             for node_key in step_path_hits:
                 node_step_counts[node_key] += 1
             if step_path_hits & anchor_nodes:
-                anchor_hit_steps.append(step_idx)
+                anchor_hit_steps.append(step_label)
             if step_path_hits & root_nodes:
-                root_hit_steps.append(step_idx)
+                root_hit_steps.append(step_label)
     return {
         "path_hit_steps": path_hit_steps,
         "anchor_hit_steps": anchor_hit_steps,
@@ -962,7 +1035,7 @@ def _path_pattern_flags(
         and any(step >= first_anchor_step for step in root_hit_steps)
     )
     root_before_anchor = (
-        path_case_kind != "direct"
+        path_case_kind == LATENT_CASE
         and first_anchor_step is not None
         and first_root_step is not None
         and first_root_step < first_anchor_step
@@ -1017,6 +1090,8 @@ def _graph_topology(bonus_map: dict, hit_nodes: set[str], first_hits: dict[str, 
                 "node_role": _node_role(node_key, nodes),
                 "excluded_from_hop_max": node.get("excluded_from_hop_max"),
                 "exclusion_reason": node.get("exclusion_reason"),
+                "patched_callable": node.get("patched_callable"),
+                "patch_role": node.get("patch_role"),
                 "hit": node_key in hit_nodes,
                 "first_step": first_hits.get(node_key),
                 "source": _source_text(node),
@@ -1041,6 +1116,8 @@ def _node_summaries(node_keys: Iterable[str], bonus_map: dict) -> list[dict]:
                 "normalized_distance": node.get("normalized_distance"),
                 "rewardable": node.get("rewardable", True),
                 "node_role": _node_role(node_key, nodes),
+                "patched_callable": node.get("patched_callable"),
+                "patch_role": node.get("patch_role"),
             }
         )
     return summaries
@@ -1061,7 +1138,14 @@ def _normalized_trace(trace: Any) -> dict:
     return trace if isinstance(trace, dict) else {}
 
 
-def _step_details(step_items: list[Any], step_reads: list[list[dict]], bonus_map: dict, tracking_mode: str) -> list[dict]:
+def _step_details(
+    step_items: list[Any],
+    step_reads: list[list[dict]],
+    bonus_map: dict,
+    tracking_mode: str,
+    *,
+    step_indices: list[int] | None = None,
+) -> list[dict]:
     details = []
     root_nodes = set(bonus_map.get("root_cause_nodes") or [])
     for step_idx, trace in enumerate(step_items):
@@ -1075,7 +1159,7 @@ def _step_details(step_items: list[Any], step_reads: list[list[dict]], bonus_map
         action = normalize_action(trace, tracking_mode=tracking_mode)
         details.append(
             {
-                "step_index": trace.get("step_idx", step_idx),
+                "step_index": step_indices[step_idx] if step_indices and step_idx < len(step_indices) else step_idx + 1,
                 "trace_index": step_idx,
                 "family": action.get("family"),
                 "target_path": action.get("target_path"),
@@ -1184,11 +1268,18 @@ def _purpose_blocks(
     step_reads: list[list[dict]],
     bonus_map: dict,
     tracking_mode: str,
+    *,
+    step_indices: list[int] | None = None,
 ) -> list[dict]:
     normalized_traces = [_normalized_trace(trace) for trace in step_items]
+    display_step_indices = step_indices or _trace_step_indices(step_items)
     has_graph = bool((bonus_map or {}).get("call_graph_nodes"))
     blocks = []
     for block_index, block in enumerate(segment_purpose_blocks(normalized_traces, tracking_mode=tracking_mode)):
+        block_step_indices = [
+            display_step_indices[idx] if idx < len(display_step_indices) else idx + 1
+            for idx in block["trace_indices"]
+        ]
         reads = []
         hit_nodes: set[str] = set()
         hit_trace_offsets = []
@@ -1208,17 +1299,17 @@ def _purpose_blocks(
         wasted = outcome_defined and not achieved
         first_hit_offset = min(hit_trace_offsets) if hit_trace_offsets else None
         first_hit_step = (
-            block["step_indices"][first_hit_offset]
-            if first_hit_offset is not None and first_hit_offset < len(block["step_indices"])
+            block_step_indices[first_hit_offset]
+            if first_hit_offset is not None and first_hit_offset < len(block_step_indices)
             else None
         )
         steps_to_achievement = first_hit_offset + 1 if first_hit_offset is not None else None
         blocks.append(
             {
-                "block_index": block_index,
+                "block_index": block_index + 1,
                 "family": block["family"],
                 "target_path": block["target_path"],
-                "step_indices": block["step_indices"],
+                "step_indices": block_step_indices,
                 "trace_indices": block["trace_indices"],
                 "n_steps": len(block["trace_indices"]),
                 "n_reads": len(reads),
@@ -1286,10 +1377,25 @@ def score_record(
     instance_id = extract_instance_id(record)
     data_source = extract_data_source(record)
     run_step = extract_run_step(record)
+    rollout_index = extract_rollout_index(record)
+    rollout_id = extract_rollout_id(record)
     bonus_map = bonus_maps.get(instance_id) if instance_id else None
     step_reads, reads = extract_record_reads(record, tracking_mode, step_items=step_items)
-    step_details = _step_details(step_items, step_reads, bonus_map or {}, tracking_mode)
-    purpose_blocks = _purpose_blocks(step_items, step_reads, bonus_map or {}, tracking_mode)
+    display_step_indices = _trace_step_indices(step_items)
+    step_details = _step_details(
+        step_items,
+        step_reads,
+        bonus_map or {},
+        tracking_mode,
+        step_indices=display_step_indices,
+    )
+    purpose_blocks = _purpose_blocks(
+        step_items,
+        step_reads,
+        bonus_map or {},
+        tracking_mode,
+        step_indices=display_step_indices,
+    )
     block_stats = _block_stats(purpose_blocks, n_trace_steps=len(step_items))
     bad_patterns = _bad_patterns(step_items, purpose_blocks)
 
@@ -1298,6 +1404,9 @@ def score_record(
         "instance_id": instance_id,
         "data_source": data_source,
         "run_step": run_step,
+        "rollout_index": rollout_index,
+        "rollout_id": rollout_id,
+        "step_index_origin": "one_based_display",
         "has_bonus_map": bonus_map is not None,
         "has_step_traces": bool(step_reads),
         "n_steps_with_reads": sum(1 for reads_for_step in step_reads if reads_for_step),
@@ -1354,7 +1463,13 @@ def score_record(
     if not bonus_map:
         return _sync_path_aliases(result)
 
-    result["bonus_case_type"] = bonus_map.get("case_type")
+    raw_case_type = bonus_map.get("case_type")
+    canonical_case_type = canonical_bonus_case_type(bonus_map)
+    result["bonus_case_type"] = canonical_case_type
+    result["bonus_case_type_raw"] = raw_case_type
+    result["traceable_case_family"] = traceable_case_family(canonical_case_type)
+    result["pattern_computable"] = bonus_map_pattern_computable(bonus_map)
+    result["root_anchor_overlap"] = bonus_map.get("root_anchor_overlap") or bonus_map_root_anchor_overlap(bonus_map)
     result["bonus_traceable"] = bool(bonus_map.get("traceable"))
     nodes = bonus_map.get("call_graph_nodes", {})
     rewardable_nodes = {key: node for key, node in nodes.items() if is_rewardable_graph_node(node)}
@@ -1362,18 +1477,29 @@ def score_record(
     result["n_call_graph_nodes"] = len(nodes)
     result["n_rewardable_call_graph_nodes"] = len(rewardable_nodes)
     scoring_step_reads = step_reads if any(reads_for_step for reads_for_step in step_reads) else ([reads] if reads else [])
+    scoring_display_step_indices = display_step_indices if scoring_step_reads is step_reads else ([1] if reads else [])
     step_first_hits = _step_node_first_hits(step_reads, bonus_map) if step_reads else {}
-    scoring_first_hits_all = (
-        _step_node_first_hits(scoring_step_reads, bonus_map, rewardable_only=False) if scoring_step_reads else {}
+    display_step_first_hits = (
+        _step_node_first_hits(step_reads, bonus_map, step_indices=display_step_indices) if step_reads else {}
     )
-    result["graph_topology"] = _graph_topology(bonus_map, set(), step_first_hits)
+    display_scoring_first_hits_all = (
+        _step_node_first_hits(
+            scoring_step_reads,
+            bonus_map,
+            rewardable_only=False,
+            step_indices=scoring_display_step_indices,
+        )
+        if scoring_step_reads
+        else {}
+    )
+    result["graph_topology"] = _graph_topology(bonus_map, set(), display_step_first_hits)
     path_evaluable, not_path_reason = _path_evaluability(bonus_map)
     result["path_evaluable"] = path_evaluable
     result["not_path_evaluable_reason"] = not_path_reason
     result["path_case_kind"] = result["bonus_case_type"] if result["bonus_case_type"] in PATH_CASE_TYPES else None
 
     all_hit_nodes = _all_read_hit_nodes(reads, bonus_map, rewardable_only=False)
-    path_projection = _path_projection(bonus_map, all_hit_nodes, scoring_first_hits_all)
+    path_projection = _path_projection(bonus_map, all_hit_nodes, display_scoring_first_hits_all)
     result["path_projection"] = path_projection
     path_node_keys = {node["key"] for node in path_projection.get("path_nodes", path_projection.get("chain_nodes", []))}
     context_node_keys = {node["key"] for node in path_projection.get("context_nodes", [])}
@@ -1384,21 +1510,33 @@ def score_record(
     result["path_covered"] = path_evaluable and bool(path_node_keys) and bool(anchor_nodes) and bool(root_nodes)
     if path_evaluable and path_node_keys:
         path_stats = _path_step_hits(scoring_step_reads, bonus_map, path_node_keys, anchor_nodes, root_nodes)
+        display_path_stats = _path_step_hits(
+            scoring_step_reads,
+            bonus_map,
+            path_node_keys,
+            anchor_nodes,
+            root_nodes,
+            step_indices=scoring_display_step_indices,
+        )
         hit_path_nodes = path_stats["hit_path_nodes"]
         first_anchor = min(path_stats["anchor_hit_steps"]) if path_stats["anchor_hit_steps"] else None
         first_root = min(path_stats["root_hit_steps"]) if path_stats["root_hit_steps"] else None
+        display_first_anchor = (
+            min(display_path_stats["anchor_hit_steps"]) if display_path_stats["anchor_hit_steps"] else None
+        )
+        display_first_root = min(display_path_stats["root_hit_steps"]) if display_path_stats["root_hit_steps"] else None
         result["n_hit_path_nodes"] = len(hit_path_nodes)
         result["path_hit"] = bool(hit_path_nodes)
         result["anchor_hit"] = first_anchor is not None
         result["root_hit"] = first_root is not None
-        result["first_anchor_step"] = first_anchor
-        result["first_root_step"] = first_root
+        result["first_anchor_step"] = display_first_anchor
+        result["first_root_step"] = display_first_root
         result["path_node_recall"] = len(hit_path_nodes) / len(path_node_keys) if path_node_keys else None
         n_path_scored_reads = path_stats["read_hits_path"] + path_stats["read_hits_off_path"]
         result["path_read_precision"] = (
             path_stats["read_hits_path"] / n_path_scored_reads if n_path_scored_reads else None
         )
-        if result["path_case_kind"] != "direct" and first_anchor is not None and first_root is not None:
+        if result["path_case_kind"] == LATENT_CASE and first_anchor is not None and first_root is not None:
             result["steps_anchor_to_root"] = first_root - first_anchor
             result["anchor_before_root"] = first_anchor <= first_root
         result["path_pattern_flags"] = _path_pattern_flags(
@@ -1420,7 +1558,7 @@ def score_record(
 
     hit_nodes = _all_read_hit_nodes(reads, bonus_map)
     result["n_hit_nodes"] = len(hit_nodes)
-    result["graph_topology"] = _graph_topology(bonus_map, hit_nodes, step_first_hits)
+    result["graph_topology"] = _graph_topology(bonus_map, hit_nodes, display_step_first_hits)
     if rewardable_nodes:
         result["hit_recall"] = len(hit_nodes) / len(rewardable_nodes)
         hit_read_count = sum(1 for read in reads if _read_hit_nodes(read, bonus_map))
@@ -1435,8 +1573,18 @@ def score_record(
     result["min_distance"] = distance
     result["best_positive_multiplier"] = compute_p2a_multiplier(distance, m_max, 1)
     if step_reads:
-        result["first_hit_step"] = _first_matching_step(step_reads, bonus_map, require_gt=False)
-        result["first_ground_truth_step"] = _first_matching_step(step_reads, bonus_map, require_gt=True)
+        result["first_hit_step"] = _first_matching_step_with_indices(
+            step_reads,
+            bonus_map,
+            require_gt=False,
+            step_indices=display_step_indices,
+        )
+        result["first_ground_truth_step"] = _first_matching_step_with_indices(
+            step_reads,
+            bonus_map,
+            require_gt=True,
+            step_indices=display_step_indices,
+        )
         if _is_order_metric_evaluable(result):
             result["order_score"], result["order_defined"] = _kendall_order(step_first_hits, bonus_map)
             result["miracle_step"], result["miracle_severity"] = _miracle_stats(
@@ -1456,9 +1604,9 @@ def score_record(
                 root_nodes=root_nodes,
             )
     else:
-        result["first_hit_step"] = 0
+        result["first_hit_step"] = 1
         if distance == 0.0:
-            result["first_ground_truth_step"] = 0
+            result["first_ground_truth_step"] = 1
     return _sync_path_aliases(result)
 
 
@@ -1539,7 +1687,7 @@ def summarize(details: list[dict], *, source: Path, bonus_map_dir: Path, trackin
                 times_to_anchor.append(item["first_anchor_step"])
             if item.get("first_root_step") is not None:
                 times_to_root.append(item["first_root_step"])
-            if item.get("path_case_kind") != "direct":
+            if _is_order_metric_evaluable(item):
                 counts["n_chain_order_candidates"] += 1
                 if item.get("anchor_before_root") is not None:
                     counts["n_chain_order_defined"] += 1
@@ -1601,7 +1749,7 @@ def summarize(details: list[dict], *, source: Path, bonus_map_dir: Path, trackin
         if _is_order_metric_evaluable(item) and item["block_miracle_step"] is True:
             counts["n_block_miracle"] += 1
 
-        case_type = item["bonus_case_type"] or "missing_bonus_map"
+        case_type = canonical_detail_case_type(item) or "missing_bonus_map"
         bucket = by_case[case_type]
         bucket["n"] += 1
         if item["has_call_graph"]:
@@ -1652,7 +1800,7 @@ def summarize(details: list[dict], *, source: Path, bonus_map_dir: Path, trackin
         "tracking_mode": tracking_mode,
         "near_threshold": near_threshold,
         "m_max": m_max,
-        "step_index_origin": "zero_based",
+        "step_index_origin": "one_based_display",
         "counts": dict(counts),
         "rates": {
             "instance_id_rate": _rate(counts["n_with_instance_id"], n_records),

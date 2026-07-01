@@ -15,12 +15,19 @@
   <div class="top-actions">
     <fieldset class="case-filter" aria-label="Case filter">
       <legend>Case filter</legend>
-      <label class="toggle"><input class="case-filter-checkbox" id="case-filter-direct" type="checkbox" data-case-filter="direct" checked> Direct</label>
-      <label class="toggle"><input class="case-filter-checkbox" id="case-filter-standard" type="checkbox" data-case-filter="standard" checked> Standard</label>
+      <label class="toggle"><input class="case-filter-checkbox" id="case-filter-direct" type="checkbox" data-case-filter="direct"> Direct</label>
+      <label class="toggle"><input class="case-filter-checkbox" id="case-filter-latent" type="checkbox" data-case-filter="latent" checked> Latent</label>
+      <label class="toggle"><input class="case-filter-checkbox" id="case-filter-exposed" type="checkbox" data-case-filter="exposed"> Exposed</label>
       <label class="toggle"><input class="case-filter-checkbox" id="case-filter-others" type="checkbox" data-case-filter="others"> Others</label>
     </fieldset>
     <button id="refresh-button" type="button">Refresh</button>
+    <button id="rebuild-button" type="button">Rebuild</button>
     <label class="toggle"><input id="auto-refresh" type="checkbox"> Live</label>
+    <form id="admin-login" class="admin-login" hidden>
+      <input id="admin-password" type="password" autocomplete="current-password" placeholder="Admin password">
+      <button id="admin-login-button" type="submit">Admin</button>
+      <button id="admin-logout-button" type="button" hidden>Logout</button>
+    </form>
   </div>
 </header>
 <nav class="tabs" aria-label="Dashboard views">
@@ -36,9 +43,15 @@
       <div id="selected-experiment">None</div>
     </div>
     <button id="clear-experiment" type="button">Clear</button>
+    <form id="permalink-jump" class="permalink-jump">
+      <input id="permalink-input" type="text" placeholder="Paste dashboard link">
+      <button type="submit">Go</button>
+    </form>
   </section>
+  <div id="permalink-notice" class="notice" hidden></div>
   <section id="overview" class="tab-panel is-active">
     <div id="summary-grid" class="metric-grid"></div>
+    <section id="admin-panel" class="section admin-panel" hidden></section>
     <section class="section">
       <h2>Datasets and eval cells</h2>
       <div id="experiment-table" class="table-wrap"></div>
@@ -62,6 +75,16 @@
     <section class="section trace-toolbar">
       <h2>Trace drill-down</h2>
       <input id="trace-search" type="search" placeholder="Filter by instance, file, or pattern">
+      <fieldset class="trace-pattern-filter" aria-label="Trace pattern filter">
+        <legend>Pattern tags</legend>
+        <label class="toggle"><input class="trace-pattern-checkbox" type="checkbox" data-pattern-filter="miracle"> ✨</label>
+        <label class="toggle"><input class="trace-pattern-checkbox" type="checkbox" data-pattern-filter="reverse"> 🌀</label>
+        <label class="toggle"><input class="trace-pattern-checkbox" type="checkbox" data-pattern-filter="loop"> 🔁</label>
+        <label class="toggle"><input class="trace-pattern-checkbox" type="checkbox" data-pattern-filter="hit_symptom"> 🔎</label>
+        <label class="toggle"><input class="trace-pattern-checkbox" type="checkbox" data-pattern-filter="hit_root_cause"> 🎯</label>
+        <label class="toggle"><input class="trace-pattern-checkbox" type="checkbox" data-pattern-filter="edited_root_cause"> ✎</label>
+        <label class="toggle"><input class="trace-pattern-checkbox" type="checkbox" data-pattern-filter="error_spiral"> error</label>
+      </fieldset>
     </section>
     <div id="trace-legend"></div>
     <div id="trace-inspector" class="trace-inspector"></div>

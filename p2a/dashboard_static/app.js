@@ -12,7 +12,7 @@ const state = {
   traceQuery: "",
   refreshTimer: null,
   loadingSnapshot: false,
-  caseFilters: { direct: true, standard: true, others: false },
+  caseFilters: { direct: false, latent: true, exposed: false, others: false },
   metricGroupFilters: {
     scope: true,
     graph: true,
@@ -24,9 +24,31 @@ const state = {
   },
   showGraphContext: false,
   graphEdgeFilters: { path: true, graph: false, trace: true },
+  passAtK: null,
+  tracePatternFilters: {
+    miracle: false,
+    reverse: false,
+    loop: false,
+    hit_symptom: false,
+    hit_root_cause: false,
+    edited_root_cause: false,
+    error_spiral: false,
+  },
+  permalinkNotice: "",
+  permalinkMissing: false,
+  pendingLocator: null,
+  suppressHashUpdate: false,
+  ignoreNextHashChange: false,
+  admin: { enabled: false, authenticated: false },
+  adminDeleteKeys: new Set(),
+  adminManualTarget: null,
+  adminPreview: null,
+  adminMessage: "",
 };
 
-const BONUS_MAP_METRIC_CASE_TYPES = new Set(["direct", "standard"]);
+const BONUS_MAP_METRIC_CASE_TYPES = new Set(["direct", "latent", "exposed"]);
+const CASE_FILTER_BUCKETS = ["direct", "latent", "exposed", "others"];
+const TRACE_PATTERN_FILTERS = ["miracle", "reverse", "loop", "hit_symptom", "hit_root_cause", "edited_root_cause", "error_spiral"];
 
 const MACRO_METRIC_GROUPS = [
   {
@@ -69,6 +91,7 @@ const MACRO_METRIC_GROUPS = [
   {
     key: "exploration_behavior",
     title: "Pattern",
+    note: "Reverse and miracle rates use latent traces whose marker is defined, so their denominator can be smaller than the latent trace count.",
     items: [
       ["Order score", "Whether graph hits move from symptom toward root cause."],
       ["Reverse rate", "Filtered Trace share with reverse traversal marker."],
@@ -89,11 +112,10 @@ const MACRO_METRIC_GROUPS = [
   },
   {
     key: "efficiency_cost",
-    title: "Efficiency and Cost",
+    title: "Efficiency",
     items: [
       ["Turns/Tools/Wall", "Average turns, tool calls, and seconds."],
       ["In/Out/Reason", "Average provider token counts."],
-      ["Cost", "Total reported API cost."],
       ["Cache hit/write", "Provider prompt-cache token ratios."],
     ],
   },
@@ -119,7 +141,6 @@ const TRACE_LEGEND_GROUPS = [
       { sample: '<span class="legend-step intermediate"><span class="legend-step-num">5</span><span>intermediate</span></span>', text: "This step hit an intermediate Graph node." },
       { sample: '<span class="legend-step fix-adapter"><span class="legend-step-num">6</span><span>fix-adapter</span></span>', text: "This step hit an upstream patched adapter." },
       { sample: '<span class="legend-step root"><span class="legend-step-num">7</span><span>root cause</span></span>', text: "This step hit root cause." },
-      { sample: '<span class="legend-step multi-hit" style="--step-bg: linear-gradient(90deg, #dcfce7 0 20%, #fef3c7 20% 40%, #dbeafe 40% 60%, #fce7f3 60% 80%, #fee2e2 80% 100%);"><span class="legend-step-num">3</span><span>split</span></span>', text: "One step hit multiple node roles." },
       { sample: '<span class="legend-step offmap"><span class="legend-step-num">9</span><span>off Path</span></span>', text: "Parsed read outside the Path." },
     ],
   },
@@ -130,6 +151,8 @@ const TRACE_LEGEND_GROUPS = [
       { sample: '<span class="legend-step edit"><span class="legend-step-num">4</span><span>edit</span></span>', text: "Write action did not hit root cause." },
       { sample: '<span class="legend-step neutral is-error"><span class="legend-step-num">6</span><span>failed</span></span>', text: "Tool or command execution failed." },
       { sample: '<span class="legend-step exec-other"><span class="legend-step-num">2</span><span>exec / other</span></span>', text: "Exec or other tool without a parsed read hit." },
+      { sample: '<span class="legend-step multi-hit" style="--step-bg: linear-gradient(90deg, #dcfce7 0 20%, #ffedd5 20% 40%, #dbeafe 40% 60%, #fce7f3 60% 80%, #fee2e2 80% 100%);"><span class="legend-step-num">3</span><span>split</span></span>', text: "Read step that hit multiple node roles." },
+      { sample: '<span class="legend-step symptom-root-cause"><span class="legend-step-num">3</span><span>S+RC</span></span>', text: "Read step that hit symptom + root cause." },
     ],
   },
 ];
@@ -151,7 +174,7 @@ const GRAPH_LEGEND_GROUPS = [
     items: [
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-path" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2563eb"></path></marker></defs><path class="graph-edge path" d="M12 20 C42 6, 74 6, 108 20" marker-end="url(#legend-arrow-path)"></path></svg>', text: "Path edge: fixed Graph edge on the symptom-to-root Path." },
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-context" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#667085"></path></marker></defs><path class="graph-edge context" d="M12 20 C42 32, 74 32, 108 20" marker-end="url(#legend-arrow-context)"></path></svg>', text: "Graph edge: fixed Graph edge outside the Path." },
-      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-trace" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#c2410c"></path></marker></defs><path class="graph-edge trace" d="M12 20 C42 6, 74 32, 108 20" marker-end="url(#legend-arrow-trace)"></path><text class="graph-trace-label" x="58" y="19">1</text></svg>', text: "Trace edge: observed jump between visited Graph nodes." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-trace" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#c2410c"></path></marker></defs><path class="graph-edge trace" d="M12 20 C42 6, 74 32, 108 20" marker-end="url(#legend-arrow-trace)"></path></svg>', text: "Trace edge: observed jump between adjacent Graph-hit steps when at least one side is single-hit." },
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><marker id="legend-arrow-order" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#2563eb"></path></marker></defs><circle cx="16" cy="19" r="10" fill="#dcfce7" stroke="#15803d" stroke-width="2"></circle><path class="graph-edge path" d="M28 19 C48 19, 62 19, 82 19" marker-end="url(#legend-arrow-order)"></path><circle cx="98" cy="19" r="10" fill="#fee2e2" stroke="#b42318" stroke-width="2"></circle></svg>', text: "Dependency direction: symptom to root cause." },
     ],
   },
@@ -159,6 +182,7 @@ const GRAPH_LEGEND_GROUPS = [
     title: "Symbols",
     items: [
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node symptom hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">7</text></g><text class="legend-graph-text" x="42" y="16">hit step</text><text class="legend-graph-sub" x="42" y="29">step 7</text></svg>', text: "Number is the first visited step." },
+      { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><text class="graph-trace-label" x="18" y="23">3x4</text><text class="legend-graph-text" x="54" y="16">trace label</text><text class="legend-graph-sub" x="54" y="29">step x repeats</text></svg>', text: "Trace label 3x4 means first seen at step 3, repeated 4 times." },
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node path miss" transform="translate(20,19)"><circle r="14"></circle></g><text class="legend-graph-text" x="42" y="16">not hit</text><text class="legend-graph-sub" x="42" y="29">faded</text></svg>', text: "Faded node was not visited." },
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><g class="graph-node path hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">4</text></g><text class="legend-graph-text" x="42" y="16">save x3</text><text class="legend-graph-sub" x="42" y="29">same span</text></svg>', text: "Multiple symbols share one source span." },
       { sample: '<svg class="legend-graph-sample" viewBox="0 0 124 38"><defs><linearGradient id="graph-symptom-root-cause-fill" x1="0" y1="1" x2="1" y2="0"><stop offset="50%" stop-color="#dcfce7"></stop><stop offset="50%" stop-color="#fee2e2"></stop></linearGradient></defs><g class="graph-node symptom-root-cause hit" transform="translate(20,19)"><circle r="14"></circle><text class="graph-step" y="4">2</text></g><text class="legend-graph-text" x="42" y="16">S+RC</text><text class="legend-graph-sub" x="42" y="29">same callable</text></svg>', text: "Same callable has both roles." },
@@ -185,6 +209,52 @@ function fmt(value, digits = 3) {
 function pct(value) {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";
   return `${(value * 100).toFixed(1)}%`;
+}
+
+function selectedRolloutK(row) {
+  const rolloutN = Number(row?.rollouts_per_instance || 1);
+  return Math.max(1, Math.min(Number(state.passAtK || rolloutN), rolloutN));
+}
+
+function avgAtValue(row, key) {
+  const k = selectedRolloutK(row);
+  return row?.avg_at?.[String(k)]?.[key] ?? row?.[key];
+}
+
+function avgAtStd(row, key) {
+  const k = selectedRolloutK(row);
+  return row?.avg_at_std?.[String(k)]?.[key] ?? row?.[`${key}_std`];
+}
+
+function withStd(row, key, formatter = fmt, digits = 3) {
+  const value = avgAtValue(row, key);
+  const shown = formatter === fmt ? formatter(value, digits) : formatter(value);
+  const std = avgAtStd(row, key);
+  if (selectedRolloutK(row) <= 1 || std === null || std === undefined || Number.isNaN(std)) return shown;
+  const stdShown = formatter === fmt ? formatter(std, digits) : formatter(std);
+  return `${shown} ± ${stdShown}`;
+}
+
+function passAtValue(row) {
+  const rolloutN = Number(row?.rollouts_per_instance || 1);
+  const k = selectedRolloutK(row);
+  return row?.pass_at?.[String(k)] ?? (k === rolloutN ? row?.pass_at_n : null);
+}
+
+function pathF1Value(row) {
+  const pathF1Key = avgAtValue(row, "avg_path_node_f1") === null || avgAtValue(row, "avg_path_node_f1") === undefined
+    ? "avg_chain_node_f1"
+    : "avg_path_node_f1";
+  if (avgAtValue(row, pathF1Key) !== null && avgAtValue(row, pathF1Key) !== undefined) {
+    return withStd(row, pathF1Key, pct);
+  }
+  const precisionKey = avgAtValue(row, "avg_path_node_precision") === null || avgAtValue(row, "avg_path_node_precision") === undefined
+    ? "avg_chain_node_precision"
+    : "avg_path_node_precision";
+  const recallKey = avgAtValue(row, "avg_path_node_recall") === null || avgAtValue(row, "avg_path_node_recall") === undefined
+    ? "avg_chain_node_recall"
+    : "avg_path_node_recall";
+  return pct(f1(avgAtValue(row, precisionKey), avgAtValue(row, recallKey)));
 }
 
 function numeric(value) {
@@ -220,11 +290,6 @@ function token(value) {
   if (value < 1000) return String(Math.round(value));
   if (value < 1000000) return `${(value / 1000).toFixed(1)}k`;
   return `${(value / 1000000).toFixed(1)}m`;
-}
-
-function money(value) {
-  if (value === null || value === undefined || Number.isNaN(value)) return "-";
-  return `$${Number(value).toFixed(4)}`;
 }
 
 function badge(label, active = true, tone = "") {
@@ -277,6 +342,31 @@ function renderKpiTable(columns, rows) {
   return `<table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>`;
 }
 
+function tableScrollKey(el, index) {
+  if (el?.dataset?.scrollKey) return el.dataset.scrollKey;
+  if (el?.id) return el.id;
+  const parentId = typeof el?.closest === "function" ? el.closest("[id]")?.id : "";
+  return parentId ? `${parentId}:${index}` : `table:${index}`;
+}
+
+function captureTableScroll() {
+  const scroll = {};
+  document.querySelectorAll(".table-wrap").forEach((el, index) => {
+    scroll[tableScrollKey(el, index)] = { left: el.scrollLeft || 0, top: el.scrollTop || 0 };
+  });
+  return scroll;
+}
+
+function restoreTableScroll(scrollState) {
+  if (!scrollState) return;
+  document.querySelectorAll(".table-wrap").forEach((el, index) => {
+    const saved = scrollState[tableScrollKey(el, index)];
+    if (!saved) return;
+    el.scrollLeft = saved.left || 0;
+    el.scrollTop = saved.top || 0;
+  });
+}
+
 function glossaryItem(item) {
   const term = Array.isArray(item) ? item[0] : item.term;
   const text = Array.isArray(item) ? item[1] : item.text;
@@ -299,6 +389,7 @@ function metricDefinitions(title, groups) {
     <div class="glossary-title">${esc(title)}</div>
     <div class="metric-def-grid">${groups.map((group) => `<section class="metric-def-group">
       <h4>${esc(group.title)}</h4>
+      ${group.note ? `<p class="metric-def-note">${esc(group.note)}</p>` : ""}
       <div class="metric-def-rows">${[...group.items].sort(([a], [b]) => a.localeCompare(b)).map(([term, text]) => `<div class="metric-def-row">
         <strong>${esc(term)}</strong>
         <span>${esc(text)}</span>
@@ -323,9 +414,12 @@ function visualLegend(title, items) {
 }
 
 function captureInspectorScroll() {
+  const graphWrap = typeof document.querySelector === "function" ? document.querySelector("#trace-graph-pane .graph-wrap") : null;
   return {
     left: document.getElementById("trace-left-pane")?.scrollTop || 0,
     graph: document.getElementById("trace-graph-pane")?.scrollTop || 0,
+    graphWrapLeft: graphWrap?.scrollLeft || 0,
+    graphWrapTop: graphWrap?.scrollTop || 0,
     middle: document.getElementById("trace-middle-pane")?.scrollTop || 0,
     right: document.getElementById("trace-right-pane")?.scrollTop || 0,
   };
@@ -344,6 +438,11 @@ function restoreInspectorScroll(scrollState) {
       const el = document.getElementById(id);
       if (el) el.scrollTop = scrollTop || 0;
     });
+    const graphWrap = typeof document.querySelector === "function" ? document.querySelector("#trace-graph-pane .graph-wrap") : null;
+    if (graphWrap) {
+      graphWrap.scrollLeft = scrollState.graphWrapLeft || 0;
+      graphWrap.scrollTop = scrollState.graphWrapTop || 0;
+    }
   };
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(apply);
   else apply();
@@ -371,7 +470,35 @@ function setTracePanelOpen(panel, open) {
 }
 
 function rowKey(detail) {
-  return `${detail.eval_cell_key || detail.experiment_key || "cell"}::${detail.instance_id || detail.record_index}`;
+  const rolloutId = detail?.rollout_id ? `id-${detail.rollout_id}` : `idx-${rolloutIndex(detail)}`;
+  return `${traceInstanceKey(detail)}::${rolloutId}`;
+}
+
+function traceInstanceId(detail) {
+  return detail?.instance_id || `record-${detail?.record_index ?? 0}`;
+}
+
+function traceInstanceKey(detail) {
+  return `${detailCellKey(detail) || "cell"}::${traceInstanceId(detail)}`;
+}
+
+function rolloutIndex(detail) {
+  const value = Number(detail?.rollout_index);
+  return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0;
+}
+
+function compareTraceDetails(a, b) {
+  const instanceCmp = String(traceInstanceId(a)).localeCompare(String(traceInstanceId(b)));
+  if (instanceCmp) return instanceCmp;
+  const rolloutCmp = rolloutIndex(a) - rolloutIndex(b);
+  if (rolloutCmp) return rolloutCmp;
+  return Number(a?.record_index ?? 0) - Number(b?.record_index ?? 0);
+}
+
+function detailsForInstance(details, instanceKey) {
+  return details
+    .filter((detail) => traceInstanceKey(detail) === instanceKey)
+    .sort(compareTraceDetails);
 }
 
 function datasetRows(snapshot) {
@@ -423,14 +550,26 @@ function pathEdges(detail) {
   return Array.isArray(edges) ? edges : [];
 }
 
+function canonicalCaseType(raw, detail) {
+  const value = String(raw || "");
+  if (BONUS_MAP_METRIC_CASE_TYPES.has(value)) return value;
+  if (value !== "standard") return value;
+  const projection = pathProjection(detail);
+  const roots = new Set(projection.roots || []);
+  const anchors = new Set(projection.anchors || []);
+  const edges = pathEdges(detail);
+  if (!roots.size || !anchors.size || !edges.length) return "exposed";
+  return [...roots].some((root) => anchors.has(root)) ? "exposed" : "latent";
+}
+
 function detailCaseType(detail) {
-  return String(detail?.bonus_case_type || pathValue(detail, "path_case_kind", "chain_case_kind", "") || "");
+  const raw = detail?.bonus_case_type || pathValue(detail, "path_case_kind", "chain_case_kind", "") || "";
+  return canonicalCaseType(raw, detail);
 }
 
 function detailCaseFilterBucket(detail) {
   const caseType = detailCaseType(detail);
-  if (pathValue(detail, "path_evaluable", "chain_evaluable") === true && caseType === "direct") return "direct";
-  if (pathValue(detail, "path_evaluable", "chain_evaluable") === true && caseType === "standard") return "standard";
+  if (pathValue(detail, "path_evaluable", "chain_evaluable") === true && CASE_FILTER_BUCKETS.includes(caseType) && caseType !== "others") return caseType;
   return "others";
 }
 
@@ -449,7 +588,7 @@ function hasPathEdges(detail) {
 }
 
 function isOrderMetricDetail(detail) {
-  return isPathMetricDetail(detail) && hasPathEdges(detail) && !hasDualSymptomRoot(detail);
+  return isPathMetricDetail(detail) && detailCaseType(detail) === "latent" && hasPathEdges(detail);
 }
 
 function caseFilterEnabled(detail) {
@@ -468,7 +607,7 @@ function allCaseFiltersEnabled() {
 }
 
 function activeCaseFilterKey() {
-  return ["direct", "standard", "others"].filter((name) => state.caseFilters[name] !== false).join(",");
+  return CASE_FILTER_BUCKETS.filter((name) => state.caseFilters[name] !== false).join(",");
 }
 
 function combinedReverseMarker(item) {
@@ -577,7 +716,6 @@ function metricsFromDetails(details, snapshot) {
       avg_input_tokens: avg(items.map((item) => item.input_tokens)),
       avg_output_tokens: avg(items.map((item) => item.output_tokens)),
       avg_reasoning_tokens: avg(items.map((item) => item.reasoning_tokens)),
-      total_cost: sum(items.map((item) => item.cost)) || null,
       cache_hit_rate: cacheHit && inputTokens + cacheHit ? cacheHit / (inputTokens + cacheHit) : null,
       cache_write_rate: cacheWrite && inputTokens + cacheWrite ? cacheWrite / (inputTokens + cacheWrite) : null,
     };
@@ -603,7 +741,7 @@ function mergeMissingMetricFields(rows, fallbackRows) {
 function activeModelMetrics(snapshot) {
   const details = activeDetails(snapshot);
   const fallbackRows = details.length ? metricsFromDetails(details, snapshot) : [];
-  if (state.caseFilters.direct && state.caseFilters.standard && !state.caseFilters.others) {
+  if (state.caseFilters.direct && state.caseFilters.latent && state.caseFilters.exposed && !state.caseFilters.others) {
     const rows = snapshot?.path_metric_model_metrics || snapshot?.dynamic_traceable_model_metrics || [];
     if (rows.length) return mergeMissingMetricFields(rows, fallbackRows);
   }
@@ -633,6 +771,16 @@ function ensureSelection(snapshot) {
     return;
   }
   if (!state.selectedDataset || !datasets.some((row) => row.dataset === state.selectedDataset)) {
+    if (state.permalinkMissing) {
+      state.selectedDataset = null;
+      state.selectedEvalCellKey = null;
+      state.selectedExperimentKey = null;
+      state.selectedTraceKey = null;
+      state.selectedStepIndex = 0;
+      state.selectedGraphNodeKey = null;
+      resetTracePanels();
+      return;
+    }
     state.selectedDataset = datasets.length === 1 ? datasets[0].dataset : null;
   }
   const cells = experimentRows(snapshot).filter((row) => !state.selectedDataset || row.dataset === state.selectedDataset);
@@ -641,6 +789,11 @@ function ensureSelection(snapshot) {
   }
   if (!state.selectedEvalCellKey || !cells.some((row) => cellKey(row) === state.selectedEvalCellKey)) {
     state.selectedEvalCellKey = cells.length === 1 ? cellKey(cells[0]) : null;
+  }
+  if (!state.selectedEvalCellKey && state.selectedDataset) {
+    const visibleCellKeys = new Set(cells.map(cellKey));
+    const visibleRow = activeModelMetrics(snapshot).find((row) => row.dataset === state.selectedDataset && visibleCellKeys.has(cellKey(row)));
+    if (visibleRow) state.selectedEvalCellKey = cellKey(visibleRow);
   }
   state.selectedExperimentKey = state.selectedEvalCellKey;
   if (!state.selectedEvalCellKey) {
@@ -666,7 +819,7 @@ function ensureSelection(snapshot) {
   }
 }
 
-async function loadSnapshot() {
+async function loadSnapshot(options = {}) {
   if (state.loadingSnapshot) return;
   state.loadingSnapshot = true;
   const scrollState = captureInspectorScroll();
@@ -679,7 +832,7 @@ async function loadSnapshot() {
     return;
   }
   try {
-    const response = await fetch("/api/snapshot", { cache: "no-store" });
+    const response = await fetch(options.force ? "/api/snapshot?force=1" : "/api/snapshot", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     state.snapshot = await response.json();
     shouldRender = true;
@@ -722,8 +875,16 @@ function renderSelectedExperiment(snapshot) {
     : "None";
   const label = `Dataset: ${dataset} | Eval cell: ${cell}`;
   const filters = [];
+  if (selected?.selected_scope) filters.push(`scope: ${scopeSummary(selected)}`);
   if (!allCaseFiltersEnabled()) filters.push(`case types: ${activeCaseFilterLabels()}`);
+  const patternTags = activeTracePatternFilters();
+  if (patternTags.length) filters.push(`patterns: ${patternTags.join("+")}`);
   document.getElementById("selected-experiment").textContent = label + (filters.length ? ` | Filter: ${filters.join("; ")}` : "");
+  const notice = document.getElementById("permalink-notice");
+  if (notice) {
+    notice.hidden = !state.permalinkNotice;
+    notice.textContent = state.permalinkNotice || "";
+  }
 }
 
 function renderSummary(snapshot) {
@@ -748,6 +909,18 @@ function progress(row) {
   return `${done}/${target}`;
 }
 
+function scopeSummary(row) {
+  const scope = row?.selected_scope;
+  if (!scope || typeof scope !== "object") return "-";
+  const filter = scope.filter || {};
+  const caseTypes = (filter.case_types || []).join("+") || "all";
+  const sourceSize = scope.source_size ?? "-";
+  const selectedBeforeWindow = scope.selected_size_before_window ?? scope.selected_size ?? "-";
+  const selectedSize = scope.selected_size ?? row?.target ?? "-";
+  const pattern = filter.pattern_computable === true ? " pattern" : "";
+  return `${caseTypes}${pattern} · selected ${selectedBeforeWindow}/${sourceSize} · planned ${selectedSize}`;
+}
+
 function renderExperiments(snapshot) {
   const datasetRowsHtml = datasetRows(snapshot).map((row) => {
     const selected = row.dataset === state.selectedDataset;
@@ -765,24 +938,33 @@ function renderExperiments(snapshot) {
   const rows = cellRows.map((row) => {
     const key = cellKey(row);
     const selected = key === state.selectedEvalCellKey;
+    const deleteTarget = { experiment_id: row.experiment_id, provider_source: row.provider_source, dataset: row.dataset };
+    const deleteKey = deleteTargetKey(deleteTarget);
+    const adminCell = state.admin.authenticated
+      ? `<td><input class="admin-delete-target" type="checkbox" data-delete-target="${esc(deleteKey)}" ${state.adminDeleteKeys.has(deleteKey) ? "checked" : ""}></td>`
+      : "";
     return `<tr class="clickable ${selected ? "is-selected" : ""}" data-eval-cell-key="${esc(key)}">
+      ${adminCell}
       <td><button class="select-cell" type="button" data-eval-cell-key="${esc(key)}">${selected ? "Selected" : "Inspect"}</button></td>
       <td>${esc(row.source_kind)}</td>
       <td>${esc(row.experiment_id)}</td>
       <td>${esc(row.provider_source)}</td>
       <td>${esc(row.dataset)}</td>
       <td>${esc(row.model_label)}</td>
+      <td>${esc(scopeSummary(row))}</td>
       <td>${esc(progress(row))}</td>
       <td>${esc(row.trajectory_count ?? 0)}</td>
     </tr>`;
   });
   document.getElementById("experiment-table").innerHTML = `
     <section class="subsection"><h3>Datasets</h3>${table(["", "Dataset", "Instances", "Eval cells", "Trajectories", "Models", "Sources"], datasetRowsHtml)}</section>
-    <section class="subsection"><h3>Eval cells${state.selectedDataset ? ` in ${esc(state.selectedDataset)}` : ""}</h3>${table(["", "Kind", "Experiment", "Provider", "Dataset", "Model", "Done", "Traj"], rows)}</section>`;
+    <section class="subsection"><h3>Eval cells${state.selectedDataset ? ` in ${esc(state.selectedDataset)}` : ""}</h3>${table([...(state.admin.authenticated ? ["Delete"] : []), "", "Kind", "Experiment", "Provider", "Dataset", "Model", "Scope", "Done", "Traj"], rows)}</section>`;
   document.querySelectorAll(".select-dataset, #experiment-table tr[data-dataset]").forEach((el) => {
     el.addEventListener("click", () => {
       const dataset = el.dataset.dataset;
       if (!dataset) return;
+      state.permalinkMissing = false;
+      state.permalinkNotice = "";
       state.selectedDataset = dataset;
       state.selectedEvalCellKey = null;
       state.selectedExperimentKey = null;
@@ -795,8 +977,11 @@ function renderExperiments(snapshot) {
   });
   document.querySelectorAll(".select-cell, #experiment-table tr[data-eval-cell-key]").forEach((el) => {
     el.addEventListener("click", () => {
+      if (el.classList.contains("admin-delete-target")) return;
       const key = el.dataset.evalCellKey;
       if (!key) return;
+      state.permalinkMissing = false;
+      state.permalinkNotice = "";
       state.selectedEvalCellKey = key;
       state.selectedExperimentKey = key;
       const cell = experimentRows(state.snapshot).find((row) => cellKey(row) === key);
@@ -807,6 +992,17 @@ function renderExperiments(snapshot) {
       resetTracePanels();
       setTab(el.classList.contains("select-cell") ? "traces" : state.activeTab);
       render();
+    });
+  });
+  document.querySelectorAll(".admin-delete-target").forEach((input) => {
+    input.addEventListener("click", (event) => event.stopPropagation());
+    input.addEventListener("change", (event) => {
+      const key = event.target.dataset.deleteTarget;
+      if (!key) return;
+      if (event.target.checked) state.adminDeleteKeys.add(key);
+      else state.adminDeleteKeys.delete(key);
+      state.adminPreview = null;
+      renderAdminPanel(snapshot);
     });
   });
 }
@@ -875,39 +1071,52 @@ function kpiColumns(hasCacheWrite) {
     { header: "Kind", fixed: true, value: (row) => row.source_kind },
     { header: "Experiment", fixed: true, value: (row) => row.experiment_id },
     { header: "Done", group: "scope", value: (row) => progress(row) },
-    { header: "Graph P.", group: "graph", value: (row) => pct(row.avg_read_precision) },
-    { header: "Graph R.", group: "graph", value: (row) => pct(row.avg_node_recall) },
-    { header: "Graph F1", group: "graph", value: (row) => pct(row.avg_hit_f1) },
-    { header: "Task success", group: "outcome", value: (row) => pct(row.resolved_rate ?? row.reward_rate) },
-    { header: "Symptom hit", group: "outcome", value: (row) => pct(row.anchor_hit_rate) },
-    { header: "Root cause hit", group: "outcome", value: (row) => pct(row.root_hit_rate) },
-    { header: "First symptom", group: "outcome", value: (row) => fmt(row.avg_first_anchor_step, 1) },
-    { header: "First root cause", group: "outcome", value: (row) => fmt(row.avg_first_root_step, 1) },
-    { header: "Path P.", group: "path", value: (row) => pct(row.avg_path_node_precision ?? row.avg_chain_node_precision) },
-    { header: "Path R.", group: "path", value: (row) => pct(row.avg_path_node_recall ?? row.avg_chain_node_recall) },
-    { header: "Path F1", group: "path", value: (row) => pct(row.avg_path_node_f1 ?? row.avg_chain_node_f1 ?? f1(row.avg_path_node_precision ?? row.avg_chain_node_precision, row.avg_path_node_recall ?? row.avg_chain_node_recall)) },
-    { header: "Order score", group: "exploration_behavior", value: (row) => fmt(row.avg_order_score) },
-    { header: "Reverse rate", group: "exploration_behavior", value: (row) => pct(row.reverse_order_rate) },
-    { header: "Miracle rate", group: "exploration_behavior", value: (row) => pct(row.miracle_rate) },
-    { header: "Loop trace", group: "exploration_behavior", value: (row) => pct(row.loop_trace_rate) },
-    { header: "Error spiral", group: "exploration_behavior", value: (row) => pct(row.error_spiral_rate) },
-    { header: "Blocks", group: "purpose_blocks", value: (row) => fmt(row.avg_blocks_per_trace, 1) },
-    { header: "Achieved", group: "purpose_blocks", value: (row) => pct(row.block_achieve_rate) },
-    { header: "Wasted", group: "purpose_blocks", value: (row) => pct(row.block_waste_rate) },
-    { header: "Loop blocks", group: "purpose_blocks", value: (row) => pct(row.block_loop_rate) },
-    { header: "Turns", group: "efficiency_cost", value: (row) => fmt(row.avg_turns, 1) },
-    { header: "Tools", group: "efficiency_cost", value: (row) => fmt(row.avg_tool_calls, 1) },
-    { header: "Wall", group: "efficiency_cost", value: (row) => fmt(row.avg_wall_time, 1) },
-    { header: "In", group: "efficiency_cost", value: (row) => token(row.avg_input_tokens) },
-    { header: "Out", group: "efficiency_cost", value: (row) => token(row.avg_output_tokens) },
-    { header: "Reason", group: "efficiency_cost", value: (row) => token(row.avg_reasoning_tokens) },
-    { header: "Cost", group: "efficiency_cost", value: (row) => money(row.total_cost) },
-    { header: "Cache hit", group: "efficiency_cost", value: (row) => pct(row.cache_hit_rate) },
+    { header: "Graph P.", group: "graph", value: (row) => withStd(row, "avg_read_precision", pct) },
+    { header: "Graph R.", group: "graph", value: (row) => withStd(row, "avg_node_recall", pct) },
+    { header: "Graph F1", group: "graph", value: (row) => withStd(row, "avg_hit_f1", pct) },
+    { header: "Pass@K", group: "outcome", value: (row) => pct(passAtValue(row)) },
+    { header: "Avg@K", group: "outcome", value: (row) => withStd(row, row.resolved_rate === null || row.resolved_rate === undefined ? "reward_rate" : "resolved_rate", pct) },
+    { header: "Symptom hit", group: "outcome", value: (row) => withStd(row, "anchor_hit_rate", pct) },
+    { header: "Root cause hit", group: "outcome", value: (row) => withStd(row, "root_hit_rate", pct) },
+    { header: "First symptom", group: "outcome", value: (row) => withStd(row, "avg_first_anchor_step", fmt, 1) },
+    { header: "First root cause", group: "outcome", value: (row) => withStd(row, "avg_first_root_step", fmt, 1) },
+    { header: "Path P.", group: "path", value: (row) => withStd(row, row.avg_path_node_precision === null || row.avg_path_node_precision === undefined ? "avg_chain_node_precision" : "avg_path_node_precision", pct) },
+    { header: "Path R.", group: "path", value: (row) => withStd(row, row.avg_path_node_recall === null || row.avg_path_node_recall === undefined ? "avg_chain_node_recall" : "avg_path_node_recall", pct) },
+    { header: "Path F1", group: "path", value: (row) => pathF1Value(row) },
+    { header: "Order score", group: "exploration_behavior", value: (row) => withStd(row, "avg_order_score") },
+    { header: "Reverse rate", group: "exploration_behavior", value: (row) => withStd(row, "reverse_order_rate", pct) },
+    { header: "Miracle rate", group: "exploration_behavior", value: (row) => withStd(row, "miracle_rate", pct) },
+    { header: "Loop trace", group: "exploration_behavior", value: (row) => withStd(row, "loop_trace_rate", pct) },
+    { header: "Error spiral", group: "exploration_behavior", value: (row) => withStd(row, "error_spiral_rate", pct) },
+    { header: "Blocks", group: "purpose_blocks", value: (row) => withStd(row, "avg_blocks_per_trace", fmt, 1) },
+    { header: "Achieved", group: "purpose_blocks", value: (row) => withStd(row, "block_achieve_rate", pct) },
+    { header: "Wasted", group: "purpose_blocks", value: (row) => withStd(row, "block_waste_rate", pct) },
+    { header: "Loop blocks", group: "purpose_blocks", value: (row) => withStd(row, "block_loop_rate", pct) },
+    { header: "Turns", group: "efficiency_cost", value: (row) => withStd(row, "avg_turns", fmt, 1) },
+    { header: "Tools", group: "efficiency_cost", value: (row) => withStd(row, "avg_tool_calls", fmt, 1) },
+    { header: "Wall", group: "efficiency_cost", value: (row) => withStd(row, "avg_wall_time", fmt, 1) },
+    { header: "In", group: "efficiency_cost", value: (row) => withStd(row, "avg_input_tokens", token) },
+    { header: "Out", group: "efficiency_cost", value: (row) => withStd(row, "avg_output_tokens", token) },
+    { header: "Reason", group: "efficiency_cost", value: (row) => withStd(row, "avg_reasoning_tokens", token) },
+    { header: "Cache hit", group: "efficiency_cost", value: (row) => withStd(row, "cache_hit_rate", pct) },
   ];
   if (hasCacheWrite) {
-    columns.push({ header: "Cache write", group: "efficiency_cost", value: (row) => pct(row.cache_write_rate) });
+    columns.push({ header: "Cache write", group: "efficiency_cost", value: (row) => withStd(row, "cache_write_rate", pct) });
   }
   return columns.filter((column) => column.fixed || metricGroupEnabled(column.group));
+}
+
+function maxRolloutN(rows) {
+  return Math.max(1, ...rows.map((row) => Number(row.rollouts_per_instance || 1)).filter(Number.isFinite));
+}
+
+function renderPassAtControl(rows) {
+  const maxN = maxRolloutN(rows);
+  if (!state.passAtK || state.passAtK > maxN) state.passAtK = maxN;
+  const options = Array.from({ length: maxN }, (_item, index) => index + 1)
+    .map((k) => `<option value="${k}" ${Number(state.passAtK) === k ? "selected" : ""}>${k}</option>`)
+    .join("");
+  return `<label class="pass-at-control">Pass/Avg K <select id="pass-at-k">${options}</select></label>`;
 }
 
 function renderModels(snapshot) {
@@ -923,21 +1132,32 @@ function renderModels(snapshot) {
   const scopeNote = `Metrics and Traces both use the current global filters (${scopeBits.join("; ")}).`;
   document.getElementById("model-table").innerHTML = `
     <div class="panel-note">Metrics are scoped to dataset <strong>${esc(state.selectedDataset)}</strong>. ${esc(scopeNote)} Graph metrics score reads against the captured dependency Graph; Path metrics score the issue symptom-to-root-cause Path; Trace metrics describe the agent trajectory.</div>
+    ${renderPassAtControl(rows)}
     ${renderMetricGroupControls()}
     ${metricDefinitions("Metric definitions", MACRO_METRIC_GROUPS)}
-    <div class="table-wrap kpi-table">${renderKpiTable(columns, rows)}</div>`;
+    <div class="table-wrap kpi-table" data-scroll-key="model-kpi-table">${renderKpiTable(columns, rows)}</div>`;
   document.querySelectorAll(".metric-group-checkbox").forEach((input) => {
     input.addEventListener("change", (event) => {
       const group = event.target.dataset.metricGroup;
       if (!group) return;
+      const tableScrollState = captureTableScroll();
       state.metricGroupFilters[group] = Boolean(event.target.checked);
       renderModels(state.snapshot);
+      restoreTableScroll(tableScrollState);
     });
+  });
+  document.getElementById("pass-at-k")?.addEventListener("change", (event) => {
+    const tableScrollState = captureTableScroll();
+    state.passAtK = Number(event.target.value);
+    renderModels(state.snapshot);
+    restoreTableScroll(tableScrollState);
   });
   document.querySelectorAll(".select-kpi-cell, #model-table tr[data-eval-cell-key]").forEach((el) => {
     el.addEventListener("click", () => {
       const key = el.dataset.evalCellKey;
       if (!key) return;
+      state.permalinkMissing = false;
+      state.permalinkNotice = "";
       state.selectedEvalCellKey = key;
       state.selectedExperimentKey = key;
       const cell = experimentRows(state.snapshot).find((row) => cellKey(row) === key);
@@ -996,17 +1216,325 @@ function traceBlob(detail) {
   }).toLowerCase();
 }
 
+function activeTracePatternFilters() {
+  return TRACE_PATTERN_FILTERS.filter((key) => state.tracePatternFilters?.[key] === true);
+}
+
+function pathNodeHasRoleHit(detail, roles) {
+  const roleSet = new Set(roles);
+  return [...pathNodes(detail), ...graphContextNodes(detail)].some((node) => {
+    if (!node || node.hit !== true) return false;
+    const role = canonicalNodeRole(node.node_role);
+    if (roleSet.has(role)) return true;
+    if (roles.includes("symptom") && node.selected_issue_anchor === true) return true;
+    if (roles.includes("root_cause") && (node.root_cause === true || node.patched_callable === true)) return true;
+    return false;
+  });
+}
+
+function tracePatternMatches(detail, tag) {
+  if (tag === "miracle") {
+    return combinedMiracleMarker(detail) === true || blockMiracleMarker(detail) === true;
+  }
+  if (tag === "reverse") {
+    return combinedReverseMarker(detail) === true || blockReverseMarker(detail) === true;
+  }
+  if (tag === "loop") return (detail.bad_patterns || {}).has_loop === true;
+  if (tag === "error_spiral") return (detail.bad_patterns || {}).error_spiral === true;
+  if (tag === "hit_symptom") return pathNodeHasRoleHit(detail, ["symptom"]);
+  if (tag === "hit_root_cause") return pathNodeHasRoleHit(detail, ["root_cause"]);
+  if (tag === "edited_root_cause") return detail.edited_root_cause === true;
+  return false;
+}
+
+function tracePatternFilterEnabled(detail) {
+  const active = activeTracePatternFilters();
+  return !active.length || active.every((tag) => tracePatternMatches(detail, tag));
+}
+
 function filteredDetails(snapshot) {
   const query = state.traceQuery.trim().toLowerCase();
   if (!state.selectedEvalCellKey) return [];
   return activeDetails(snapshot)
     .filter((detail) => detailCellKey(detail) === state.selectedEvalCellKey)
+    .filter(tracePatternFilterEnabled)
     .filter((detail) => !query || traceBlob(detail).includes(query));
 }
 
 function selectedDetail(snapshot) {
   const details = filteredDetails(snapshot);
   return details.find((detail) => rowKey(detail) === state.selectedTraceKey) || details[0] || null;
+}
+
+function locatorForDetail(detail, level = "step") {
+  if (!detail) return null;
+  const params = new URLSearchParams();
+  params.set("p2a", "1");
+  if (detail.experiment_id) params.set("experiment_id", detail.experiment_id);
+  if (detail.provider_source) params.set("provider_source", detail.provider_source);
+  if (detail.model_api_name) params.set("model_api_name", detail.model_api_name);
+  if (detail.dataset || detail.data_source) params.set("dataset", detail.dataset || detail.data_source);
+  if (level !== "experiment" && detail.instance_id) params.set("instance_id", detail.instance_id);
+  if (level !== "experiment" && level !== "instance") {
+    if (detail.rollout_id !== null && detail.rollout_id !== undefined && detail.rollout_id !== "") params.set("rollout_id", detail.rollout_id);
+    else params.set("rollout_index", String(rolloutIndex(detail)));
+  }
+  if (level === "step") params.set("step_index", String(state.selectedStepIndex || 0));
+  if (state.selectedGraphNodeKey) params.set("graph_node", state.selectedGraphNodeKey);
+  return `#${params.toString()}`;
+}
+
+function parseLocator(text) {
+  const raw = String(text || "").trim();
+  const hash = raw.includes("#") ? raw.slice(raw.indexOf("#") + 1) : raw.replace(/^#/, "");
+  if (!hash) return null;
+  const params = new URLSearchParams(hash);
+  if (params.get("p2a") !== "1" && !params.get("experiment_id") && !params.get("instance_id")) return null;
+  return Object.fromEntries(params.entries());
+}
+
+function clearReachabilityFilters() {
+  CASE_FILTER_BUCKETS.forEach((key) => { state.caseFilters[key] = true; });
+  TRACE_PATTERN_FILTERS.forEach((key) => { state.tracePatternFilters[key] = false; });
+  state.traceQuery = "";
+}
+
+function applyLocator(snapshot, locator) {
+  if (!locator) return false;
+  clearReachabilityFilters();
+  const cells = experimentRows(snapshot);
+  const cell = cells.find((row) => (
+    (!locator.experiment_id || row.experiment_id === locator.experiment_id)
+    && (!locator.provider_source || row.provider_source === locator.provider_source)
+    && (!locator.model_api_name || row.model_api_name === locator.model_api_name)
+    && (!locator.dataset || row.dataset === locator.dataset)
+  ));
+  if (!cell) {
+    state.permalinkNotice = "Link target was not found in the loaded experiments.";
+    state.permalinkMissing = true;
+    state.selectedDataset = null;
+    state.permalinkMissing = false;
+    state.permalinkNotice = "";
+    state.selectedEvalCellKey = null;
+    state.selectedExperimentKey = null;
+    state.selectedTraceKey = null;
+    return false;
+  }
+  state.permalinkMissing = false;
+  state.selectedDataset = cell.dataset || locator.dataset || null;
+  state.selectedEvalCellKey = cellKey(cell);
+  state.selectedExperimentKey = state.selectedEvalCellKey;
+  const needsTrace = Boolean(locator.instance_id || locator.rollout_id || locator.rollout_index !== undefined || locator.step_index !== undefined);
+  const allDetails = activeDetails(snapshot).filter((detail) => detailCellKey(detail) === state.selectedEvalCellKey);
+  const detail = needsTrace
+    ? allDetails.find((item) => {
+      if (locator.instance_id && String(item.instance_id) !== String(locator.instance_id)) return false;
+      if (locator.rollout_id) return String(item.rollout_id || "") === String(locator.rollout_id);
+      if (locator.rollout_index !== undefined) return rolloutIndex(item) === Number(locator.rollout_index);
+      return true;
+    })
+    : null;
+  if (!detail && locator.instance_id) {
+    state.permalinkNotice = "Link target was not found; it may have been deleted or not loaded in this snapshot.";
+    state.permalinkMissing = true;
+    state.selectedTraceKey = null;
+    return false;
+  }
+  if (detail) state.selectedTraceKey = rowKey(detail);
+  state.selectedStepIndex = Number(locator.step_index || 0);
+  state.selectedGraphNodeKey = locator.graph_node || null;
+  state.permalinkNotice = "";
+  setTab(detail ? "traces" : "overview");
+  return true;
+}
+
+function applyPendingLocator(snapshot) {
+  if (!state.pendingLocator) return;
+  const locator = state.pendingLocator;
+  state.pendingLocator = null;
+  state.suppressHashUpdate = true;
+  applyLocator(snapshot, locator);
+  syncFilterControls();
+}
+
+function currentDashboardUrl(level = "step") {
+  const detail = selectedDetail(state.snapshot);
+  const locator = locatorForDetail(detail, level);
+  if (!locator) return "";
+  if (typeof window === "undefined" || !window.location) return locator;
+  return `${window.location.origin || ""}${window.location.pathname || ""}${locator}`;
+}
+
+function syncFilterControls() {
+  document.querySelectorAll(".case-filter-checkbox").forEach((input) => {
+    const bucket = input.dataset.caseFilter;
+    if (bucket) input.checked = state.caseFilters[bucket] !== false;
+  });
+  document.querySelectorAll(".trace-pattern-checkbox").forEach((input) => {
+    const tag = input.dataset.patternFilter;
+    if (tag) input.checked = state.tracePatternFilters[tag] === true;
+  });
+  const traceSearch = document.getElementById("trace-search");
+  if (traceSearch) traceSearch.value = state.traceQuery || "";
+}
+
+function syncHashToSelection() {
+  if (state.suppressHashUpdate) {
+    state.suppressHashUpdate = false;
+    return;
+  }
+  if (typeof window === "undefined" || !window.location || !state.selectedEvalCellKey) return;
+  const locator = locatorForDetail(selectedDetail(state.snapshot), "step");
+  if (locator && window.location.hash !== locator) {
+    state.ignoreNextHashChange = true;
+    window.location.hash = locator;
+  }
+}
+
+function copyDashboardLink(level) {
+  const url = currentDashboardUrl(level);
+  if (!url) return;
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) navigator.clipboard.writeText(url).catch(() => {});
+  state.permalinkNotice = `Copied ${level} link.`;
+  renderSelectedExperiment(state.snapshot);
+}
+
+function deleteTargetKey(target) {
+  return JSON.stringify({
+    experiment_id: target.experiment_id || "",
+    provider_source: target.provider_source || "",
+    dataset: target.dataset || "",
+  });
+}
+
+function deleteTargetFromKey(key) {
+  try {
+    return JSON.parse(key);
+  } catch (_error) {
+    return {};
+  }
+}
+
+function selectedDeleteTargets() {
+  const targets = [...state.adminDeleteKeys].map(deleteTargetFromKey);
+  if (state.adminManualTarget) targets.push(state.adminManualTarget);
+  const seen = new Set();
+  return targets.filter((target) => {
+    const clean = {
+      experiment_id: String(target.experiment_id || "").trim(),
+      provider_source: String(target.provider_source || "").trim(),
+      dataset: String(target.dataset || "").trim(),
+    };
+    if (!clean.experiment_id && !clean.provider_source && !clean.dataset) return false;
+    const key = deleteTargetKey(clean);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return clean;
+  });
+}
+
+async function apiPost(path, payload) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify(payload || {}),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+  return body;
+}
+
+async function loadAdminStatus() {
+  try {
+    const response = await fetch("/api/auth/status", { cache: "no-store", credentials: "same-origin" });
+    if (!response.ok) return;
+    const payload = await response.json();
+    state.admin.enabled = payload.admin_enabled === true;
+    state.admin.authenticated = payload.admin === true;
+    syncAdminControls();
+    renderAdminPanel(state.snapshot);
+  } catch (_error) {
+    state.admin.enabled = false;
+    state.admin.authenticated = false;
+  }
+}
+
+function syncAdminControls() {
+  const form = document.getElementById("admin-login");
+  const loginButton = document.getElementById("admin-login-button");
+  const logoutButton = document.getElementById("admin-logout-button");
+  const password = document.getElementById("admin-password");
+  if (!form) return;
+  form.hidden = !state.admin.enabled && !state.admin.authenticated;
+  if (loginButton) loginButton.hidden = state.admin.authenticated;
+  if (logoutButton) logoutButton.hidden = !state.admin.authenticated;
+  if (password) password.hidden = state.admin.authenticated;
+}
+
+function renderAdminPanel(snapshot) {
+  const panel = document.getElementById("admin-panel");
+  if (!panel) return;
+  if (!state.admin.authenticated) {
+    panel.hidden = true;
+    panel.innerHTML = "";
+    return;
+  }
+  panel.hidden = false;
+  const targets = selectedDeleteTargets();
+  const preview = state.adminPreview;
+  const counts = preview?.counts || {};
+  panel.innerHTML = `
+    <h2>Admin deletion</h2>
+    <form id="admin-target-form" class="admin-target-form">
+      <input id="admin-target-experiment" type="text" placeholder="experiment_id">
+      <input id="admin-target-provider" type="text" placeholder="provider_source">
+      <input id="admin-target-dataset" type="text" placeholder="dataset">
+      <button type="submit">Add target</button>
+    </form>
+    <div class="admin-targets">${targets.map((target) => `<code>${esc(deleteTargetKey(target))}</code>`).join("") || '<span class="muted">No delete target selected.</span>'}</div>
+    <div class="admin-actions">
+      <button id="admin-preview-delete" type="button" ${targets.length ? "" : "disabled"}>Preview delete</button>
+      <input id="admin-confirmation" type="text" placeholder="${esc(preview?.confirmation_phrase || "confirmation phrase")}">
+      <button id="admin-confirm-delete" type="button" ${preview ? "" : "disabled"}>Delete</button>
+    </div>
+    <div class="admin-message">${esc(state.adminMessage || "")}</div>
+    ${preview ? `<div class="panel-note">Preview: ${esc(counts.run_cells || 0)} run cells, ${esc(counts.raw_rollouts || 0)} raw rollouts, ${esc(counts.quantitative_metrics || 0)} metrics, ${esc(counts.experiments || 0)} experiments. Phrase: <code>${esc(preview.confirmation_phrase)}</code></div>` : ""}
+  `;
+  document.getElementById("admin-target-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const target = {
+      experiment_id: document.getElementById("admin-target-experiment")?.value || "",
+      provider_source: document.getElementById("admin-target-provider")?.value || "",
+      dataset: document.getElementById("admin-target-dataset")?.value || "",
+    };
+    state.adminManualTarget = target;
+    state.adminPreview = null;
+    renderAdminPanel(snapshot);
+  });
+  document.getElementById("admin-preview-delete")?.addEventListener("click", async () => {
+    try {
+      state.adminPreview = await apiPost("/api/delete/preview", { targets: selectedDeleteTargets() });
+      state.adminMessage = "";
+    } catch (error) {
+      state.adminMessage = String(error.message || error);
+    }
+    renderAdminPanel(snapshot);
+  });
+  document.getElementById("admin-confirm-delete")?.addEventListener("click", async () => {
+    try {
+      const confirmation = document.getElementById("admin-confirmation")?.value || "";
+      const result = await apiPost("/api/delete", { targets: selectedDeleteTargets(), confirmation });
+      state.adminMessage = `Deleted ${result.counts?.run_cells || 0} run cells; backup ${result.backup_path || "-"}`;
+      state.adminDeleteKeys.clear();
+      state.adminManualTarget = null;
+      state.adminPreview = null;
+      await loadSnapshot({ force: true });
+    } catch (error) {
+      state.adminMessage = String(error.message || error);
+      renderAdminPanel(snapshot);
+    }
+  });
 }
 
 function canonicalNodeRole(role) {
@@ -1081,19 +1609,24 @@ function hitNodeIsSymptom(node, detail) {
   return canonicalNodeRole(node?.node_role) === "symptom" || node?.selected_issue_anchor === true || node?.anchor === true || detailSymptomKeys(detail).has(node?.key);
 }
 
+function nodeIsFaultSidePatch(node) {
+  return node?.patched_callable === true || node?.patch_role === "root_cause" || node?.patch_role === "fix_adapter";
+}
+
 function hitNodeIsSymptomRootCause(node, detail) {
-  return hitNodeIsRootCause(node, detail) && hitNodeIsSymptom(node, detail);
+  return hitNodeIsSymptom(node, detail) && (hitNodeIsRootCause(node, detail) || nodeIsFaultSidePatch(node));
 }
 
 const STEP_ROLE_COLORS = {
   symptom: "#dcfce7",
-  "test-adapter": "#fef3c7",
+  "test-adapter": "#ffedd5",
   intermediate: "#dbeafe",
   "fix-adapter": "#fce7f3",
   root: "#fee2e2",
 };
 
 function stepNodeSegment(node, detail) {
+  if (hitNodeIsSymptomRootCause(node, detail)) return "symptom-root-cause";
   if (hitNodeIsSymptom(node, detail)) return "symptom";
   if (hitNodeIsRootCause(node, detail)) return "root";
   const role = canonicalNodeRole(node?.node_role);
@@ -1110,9 +1643,7 @@ function stepRoleSegments(step, detail) {
   if (step?.action_family === "edit" || (step?.write_actions || []).length || (scored.writes || []).length) return ["edit"];
   const roles = [];
   const present = new Set(nodes.map((node) => stepNodeSegment(node, detail)).filter(Boolean));
-  const onlySymptomRootCause = nodes.length > 0 && nodes.every((node) => hitNodeIsSymptomRootCause(node, detail));
-  if (onlySymptomRootCause) return ["symptom-root-cause"];
-  for (const role of ["symptom", "test-adapter", "intermediate", "fix-adapter", "root"]) {
+  for (const role of ["symptom-root-cause", "symptom", "test-adapter", "intermediate", "fix-adapter", "root"]) {
     if (present.has(role)) roles.push(role);
   }
   if (roles.length) return roles;
@@ -1133,10 +1664,79 @@ function stepSegmentsStyle(segments) {
   return ` style="--step-bg: linear-gradient(90deg, ${stops.join(", ")});"`;
 }
 
+function stepSegmentsMarkup(segments) {
+  const colorSegments = segments.filter((segment) => segment === "symptom-root-cause" || STEP_ROLE_COLORS[segment]);
+  if (colorSegments.length <= 1) return "";
+  return `<span class="step-segments" aria-hidden="true">${colorSegments.map((segment) => `<span class="step-segment ${esc(segment)}"></span>`).join("")}</span>`;
+}
+
 function nodeKeysFromSummaries(nodes) {
   return (nodes || [])
     .map((node) => node?.key)
     .filter(Boolean);
+}
+
+function rawStepLabel(step, fallback) {
+  const value = step?.step_index;
+  if (value !== null && value !== undefined && Number.isFinite(Number(value))) return Number(value);
+  return fallback + 1;
+}
+
+function stepLabelOffset(steps) {
+  const labels = (steps || [])
+    .map((step, index) => rawStepLabel(step, index))
+    .filter((value) => Number.isFinite(value));
+  return labels.length && Math.min(...labels) === 0 ? 1 : 0;
+}
+
+function displayStepLabel(step, detail, fallback = 0) {
+  const value = step?.step_index;
+  if (value !== null && value !== undefined && Number.isFinite(Number(value))) {
+    return Number(value) + stepLabelOffset(detailSteps(detail));
+  }
+  return fallback + 1;
+}
+
+function detailSteps(detail) {
+  const steps = (detail?.step_inspection || []).length ? detail.step_inspection : detail?.step_details || [];
+  return Array.isArray(steps) ? steps : [];
+}
+
+function stepHitNodesForFirstStep(step) {
+  const scored = step?.scored || step || {};
+  return scored.hit_nodes || [];
+}
+
+function displayFirstStepsByNode(detail) {
+  const steps = detailSteps(detail);
+  const offset = stepLabelOffset(steps);
+  const first = new Map();
+  steps.forEach((step, index) => {
+    const value = step?.step_index;
+    const label = value !== null && value !== undefined && Number.isFinite(Number(value))
+      ? Number(value) + offset
+      : index + 1;
+    for (const node of stepHitNodesForFirstStep(step)) {
+      const key = node?.key;
+      if (!key) continue;
+      if (!first.has(key) || label < first.get(key)) first.set(key, label);
+    }
+  });
+  return first;
+}
+
+function displayBlockIndex(block, detail, fallback = 0) {
+  const blocks = detail?.purpose_blocks || [];
+  const values = blocks
+    .map((item, index) => {
+      const value = item?.block_index;
+      return value !== null && value !== undefined && Number.isFinite(Number(value)) ? Number(value) : index + 1;
+    })
+    .filter((value) => Number.isFinite(value));
+  const offset = values.length && Math.min(...values) === 0 ? 1 : 0;
+  const raw = block?.block_index;
+  if (raw !== null && raw !== undefined && Number.isFinite(Number(raw))) return Number(raw) + offset;
+  return fallback + 1;
 }
 
 function finalEditNodeKeys(detail) {
@@ -1168,6 +1768,7 @@ function graphNodes(detail, { includeContext = state.showGraphContext } = {}) {
   const contextNodes = graphContextNodes(detail);
   const anchors = new Set(projection.anchors || []);
   const roots = new Set(projection.roots || []);
+  const displayFirstSteps = displayFirstStepsByNode(detail);
   const editedNodes = finalEditNodeKeys(detail);
   const topologyByKey = new Map((detail?.graph_topology?.nodes || []).map((node) => [node?.key, node]));
   const annotateNode = (node) => {
@@ -1181,6 +1782,7 @@ function graphNodes(detail, { includeContext = state.showGraphContext } = {}) {
       source_preview: node?.source_preview || topologyNode?.source_preview,
       selected_issue_anchor: Boolean(node?.selected_issue_anchor || anchors.has(node?.key)),
       root_cause: Boolean(node?.root_cause || roots.has(node?.key) || role === "root_cause"),
+      first_step: displayFirstSteps.has(node?.key) ? displayFirstSteps.get(node?.key) : node?.first_step ?? topologyNode?.first_step,
       final_edit: Boolean(editedNodes.has(node?.key)),
     });
   };
@@ -1278,6 +1880,8 @@ function aggregateGraph(nodes, edges) {
       first_step: hitSteps.length ? Math.min(...hitSteps) : null,
       selected_issue_anchor: members.some((member) => member.selected_issue_anchor),
       root_cause: members.some((member) => member.root_cause),
+      patched_callable: members.some((member) => member.patched_callable),
+      patch_role: members.find((member) => member.patch_role)?.patch_role,
     });
   });
   const aggregateEdgeByKey = new Map();
@@ -1320,13 +1924,25 @@ function stepHitNodeKeys(step) {
     .filter((key) => typeof key === "string" && key);
 }
 
-function firstHitNodeKeysFromProjection(detail) {
+function visibleStepHitKeys(step, toVisibleKey) {
+  const seen = new Set();
+  const keys = [];
+  stepHitNodeKeys(step).forEach((rawKey) => {
+    const key = toVisibleKey(rawKey);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    keys.push(key);
+  });
+  return keys;
+}
+
+function firstHitNodesFromProjection(detail) {
   const nodes = [...graphContextNodes(detail), ...pathNodes(detail)];
   return nodes
     .filter((node) => node?.first_step !== null && node?.first_step !== undefined)
     .sort((a, b) => Number(a.first_step) - Number(b.first_step))
-    .map((node) => node.key)
-    .filter((key) => typeof key === "string" && key);
+    .map((node) => ({ key: node.key, first_step: node.first_step }))
+    .filter((node) => typeof node.key === "string" && node.key);
 }
 
 function traceEdges(detail, model) {
@@ -1338,36 +1954,57 @@ function traceEdges(detail, model) {
   const rawSteps = (detail.step_inspection || []).length ? detail.step_inspection : detail.step_details || [];
   const steps = [...rawSteps]
     .sort((a, b) => Number(a.trace_index ?? a.step_index ?? 0) - Number(b.trace_index ?? b.step_index ?? 0));
-  const sequence = [];
-  const pushKey = (rawKey) => {
-    const key = toVisibleKey(rawKey);
-    if (!key) return;
-    if (sequence[sequence.length - 1] !== key) sequence.push(key);
-  };
-  steps.forEach((step) => {
-    const seenInStep = new Set();
-    stepHitNodeKeys(step).forEach((key) => {
-      if (seenInStep.has(key)) return;
-      seenInStep.add(key);
-      pushKey(key);
-    });
-  });
-  if (!sequence.length) firstHitNodeKeysFromProjection(detail).forEach(pushKey);
   const edgeByKey = new Map();
-  for (let index = 1; index < sequence.length; index += 1) {
-    const source = sequence[index - 1];
-    const target = sequence[index];
-    if (!source || !target || source === target) continue;
+  const addEdge = (source, target, firstStep) => {
+    if (!source || !target || source === target) return;
     const key = `${source}->${target}`;
-    const current = edgeByKey.get(key) || { source, target, caller: source, callee: target, edge_type: "trace", first_hop: index, count: 0 };
+    const current = edgeByKey.get(key) || { source, target, caller: source, callee: target, edge_type: "trace", first_step: firstStep, count: 0 };
     current.count += 1;
     edgeByKey.set(key, current);
+  };
+  const addStepEdges = (sourceStep, targetStep) => {
+    if (!sourceStep || !targetStep) return;
+    const sourceMulti = sourceStep.keys.length > 1;
+    const targetMulti = targetStep.keys.length > 1;
+    if (sourceMulti && targetMulti) return;
+    if (sourceMulti && targetStep.keys.every((target) => sourceStep.keys.includes(target))) return;
+    sourceStep.keys.forEach((source) => {
+      targetStep.keys.forEach((target) => addEdge(source, target, targetStep.step_label));
+    });
+  };
+  let previous = null;
+  let sawStepHit = false;
+  steps.forEach((step, index) => {
+    const keys = visibleStepHitKeys(step, toVisibleKey);
+    if (!keys.length) return;
+    sawStepHit = true;
+    const traceIndex = Number(step?.trace_index ?? index);
+    const stepLabel = displayStepLabel(step, detail, Number.isFinite(traceIndex) ? traceIndex : index);
+    const current = { keys, step_label: stepLabel };
+    addStepEdges(previous, current);
+    previous = current;
+  });
+  if (!sawStepHit) {
+    let fallbackPrevious = null;
+    const byStep = new Map();
+    firstHitNodesFromProjection(detail).forEach((node) => {
+      const key = toVisibleKey(node.key);
+      if (!key) return;
+      const label = node.first_step;
+      if (!byStep.has(label)) byStep.set(label, new Set());
+      byStep.get(label).add(key);
+    });
+    [...byStep.entries()].sort((a, b) => Number(a[0]) - Number(b[0])).forEach(([stepLabel, keys]) => {
+      const current = { keys: [...keys], step_label: stepLabel };
+      addStepEdges(fallbackPrevious, current);
+      fallbackPrevious = current;
+    });
   }
   return [...edgeByKey.values()];
 }
 
 function isSymptomRootCauseNode(node) {
-  return Boolean(node?.selected_issue_anchor && node?.root_cause);
+  return Boolean(node?.selected_issue_anchor && (node?.root_cause || nodeIsFaultSidePatch(node)));
 }
 
 function nodeRoleLabel(node) {
@@ -1710,7 +2347,24 @@ function renderGraphSourcePanel(model) {
   </aside>`;
 }
 
-function renderTraceTitleCard(detail) {
+function renderRolloutSelector(detail, snapshot) {
+  const rollouts = detailsForInstance(filteredDetails(snapshot), traceInstanceKey(detail));
+  if (rollouts.length <= 1) {
+    return `<div class="rollout-single">Rollout ${esc(rolloutIndex(detail) + 1)} · ${esc(traceRolloutOutcome(detail))}</div>`;
+  }
+  const successCount = rollouts.filter(traceResolved).length;
+  const options = rollouts.map((item) => {
+    const label = `Rollout ${rolloutIndex(item) + 1} · ${traceRolloutOutcome(item)}`;
+    return `<option value="${esc(rowKey(item))}" ${rowKey(item) === rowKey(detail) ? "selected" : ""}>${esc(label)}</option>`;
+  }).join("");
+  return `<label class="rollout-select-control">
+    <span>Rollout</span>
+    <select id="trace-rollout-select">${options}</select>
+    <strong>${esc(successCount)}/${esc(rollouts.length)} success</strong>
+  </label>`;
+}
+
+function renderTraceTitleCard(detail, snapshot) {
   const issue = detail.issue_description || "";
   const patch = detail.golden_patch || "";
   return `<div class="trace-overview-stack">
@@ -1719,7 +2373,13 @@ function renderTraceTitleCard(detail) {
         <strong>${esc(detail.instance_id || `record-${detail.record_index}`)}</strong>
         <div class="run-meta">${esc(detail.model_label || "-")} · ${esc(detail.run_id || "-")}</div>
       </div>
-      <div>${traceStatusIcons(detail)}</div>
+      <div class="trace-title-actions">
+        <button class="copy-link" type="button" data-copy-link="experiment">Experiment link</button>
+        <button class="copy-link" type="button" data-copy-link="instance">Instance link</button>
+        <button class="copy-link" type="button" data-copy-link="rollout">Rollout link</button>
+        ${renderRolloutSelector(detail, snapshot)}
+        ${traceStatusIcons(detail)}
+      </div>
     </div>
     <details class="instance-overview-toggle">
       <summary>Instance overview</summary>
@@ -1782,8 +2442,8 @@ function renderGraph(detail) {
     const b = positions.get(edge.target);
     if (!a || !b) return "";
     const label = graphEdgeLabelPosition(a, b);
-    const hopLabel = edge.count > 1 ? `${edge.first_hop}x${edge.count}` : String(edge.first_hop);
-    return `<path class="graph-edge trace graph-trace-edge" d="${graphEdgePath(a, b, "trace")}" marker-end="url(#graph-arrow-trace)"><title>Trace edge ${esc(edge.source)} -> ${esc(edge.target)} first hop ${esc(edge.first_hop)}${edge.count > 1 ? ` repeated ${esc(edge.count)} times` : ""}</title></path><text class="graph-trace-label" x="${label.x.toFixed(1)}" y="${label.y.toFixed(1)}">${esc(hopLabel)}</text>`;
+    const stepLabel = edge.count > 1 ? `${edge.first_step}x${edge.count}` : String(edge.first_step);
+    return `<path class="graph-edge trace graph-trace-edge" d="${graphEdgePath(a, b, "trace")}" marker-end="url(#graph-arrow-trace)"><title>Trace edge ${esc(edge.source)} -> ${esc(edge.target)} first seen at step ${esc(edge.first_step)}${edge.count > 1 ? ` repeated ${esc(edge.count)} times` : ""}</title></path><text class="graph-trace-label" x="${label.x.toFixed(1)}" y="${label.y.toFixed(1)}">${esc(stepLabel)}</text>`;
   }).join("");
   const nodeSvg = nodes.map((node) => {
     const pos = positions.get(node.key);
@@ -1819,7 +2479,7 @@ function renderGraph(detail) {
     ? ` Hidden by arrow filter: ${hiddenFixedEdgeCount} fixed, ${hiddenTraversalEdgeCount} Trace.`
     : "";
   const note = edges.length || traversalEdges.length
-    ? `${scope} Showing edges: ${edgeFilterSummary}. Blue edges are Path edges; gray edges are Graph edges outside the Path; orange dashed edges are Trace edges over visible Graph nodes.${hiddenNote}`
+    ? `${scope} Showing edges: ${edgeFilterSummary}. Blue edges are Path edges; gray edges are Graph edges outside the Path; orange dashed edges are Trace edges between adjacent Graph-hit steps when at least one side is single-hit. Multi-hit read steps do not create internal edges, and multi-hit to multi-hit transitions are omitted. Trace labels show first step; mxn means first seen at step m and repeated n times.${hiddenNote}`
     : `${scope} Showing edges: ${edgeFilterSummary}. No edges are visible under the current edge filter.`;
   const hasSelectedSource = model.nodes.some((node) => node.key === state.selectedGraphNodeKey);
   return `<section class="graph-panel" aria-label="Graph">
@@ -1890,19 +2550,50 @@ function traceSummary(detail) {
   return `${fmt(steps)} steps · ${fmt(blocks)} blocks${pathHits}`;
 }
 
-function renderTraceList(snapshot) {
-  const details = filteredDetails(snapshot);
-  const rows = details.map((detail) => {
-    const selected = rowKey(detail) === state.selectedTraceKey;
+function traceRolloutOutcome(detail) {
+  return traceResolved(detail) ? "success" : "failed";
+}
+
+function selectedRolloutForGroup(details) {
+  return details.find((detail) => rowKey(detail) === state.selectedTraceKey) || details[0] || null;
+}
+
+function traceRolloutSegments(details) {
+  const segments = details.map((detail) => {
     const resolved = traceResolved(detail);
-    const id = detail.instance_id || `record-${detail.record_index}`;
-    return `<button class="trace-row ${selected ? "is-selected" : ""} ${resolved ? "is-resolved" : "is-unresolved"}" type="button" data-trace-key="${esc(rowKey(detail))}" aria-label="${esc(`${id} ${resolved ? "resolved" : "unresolved"}`)}">
-      <span class="trace-id">${esc(detail.instance_id || `record-${detail.record_index}`)}</span>
-      <span class="trace-meta">${esc(traceSummary(detail))}</span>
-      ${traceStatusIcons(detail)}
+    const selected = rowKey(detail) === state.selectedTraceKey;
+    const label = `Rollout ${rolloutIndex(detail) + 1}: ${traceRolloutOutcome(detail)}`;
+    return `<span class="trace-rollout-segment ${resolved ? "is-resolved" : "is-unresolved"} ${selected ? "is-selected" : ""}" title="${esc(label)}" aria-label="${esc(label)}"></span>`;
+  }).join("");
+  return `<span class="trace-rollout-strip" aria-hidden="true">${segments}</span>`;
+}
+
+function groupedTraceDetails(snapshot) {
+  const groups = new Map();
+  filteredDetails(snapshot).sort(compareTraceDetails).forEach((detail) => {
+    const key = traceInstanceKey(detail);
+    if (!groups.has(key)) groups.set(key, { key, details: [] });
+    groups.get(key).details.push(detail);
+  });
+  return [...groups.values()];
+}
+
+function renderTraceList(snapshot) {
+  const rows = groupedTraceDetails(snapshot).map((group) => {
+    const selectedDetail = selectedRolloutForGroup(group.details);
+    const selected = group.details.some((detail) => rowKey(detail) === state.selectedTraceKey);
+    const resolvedCount = group.details.filter(traceResolved).length;
+    const total = group.details.length;
+    const id = traceInstanceId(selectedDetail);
+    const statusClass = resolvedCount === total ? "is-resolved" : resolvedCount === 0 ? "is-unresolved" : "is-mixed";
+    return `<button class="trace-row ${selected ? "is-selected" : ""} ${statusClass}" type="button" data-trace-key="${esc(rowKey(selectedDetail))}" data-instance-key="${esc(group.key)}" aria-label="${esc(`${id} ${resolvedCount}/${total} successful rollouts`)}">
+      ${traceRolloutSegments(group.details)}
+      <span class="trace-id">${esc(id)}</span>
+      <span class="trace-meta">${esc(`${resolvedCount}/${total} success · selected rollout ${rolloutIndex(selectedDetail) + 1} · ${traceSummary(selectedDetail)}`)}</span>
+      ${traceStatusIcons(selectedDetail)}
     </button>`;
   });
-  return rows.join("") || '<div class="empty">No trajectories in the selected experiment.</div>';
+  return rows.join("") || '<div class="empty">No instances in the selected experiment.</div>';
 }
 
 function renderTraceLegend() {
@@ -1947,11 +2638,11 @@ function renderTimeline(detail) {
   if (!blocks.length) {
     return `<div class="timeline-grid">${[...byIndex.values()].map((step) => renderStepThumb(step, detail)).join("")}</div>`;
   }
-  return blocks.map((block) => {
+  return blocks.map((block, blockIndex) => {
     const steps = blockSteps(block).map((idx) => byIndex.get(Number(idx))).filter(Boolean);
     return `<section class="purpose-block">
       <div class="block-head">
-        <strong>Block ${esc(block.block_index)}</strong>
+        <strong>Block ${esc(displayBlockIndex(block, detail, blockIndex))}</strong>
         <span>${esc(block.family || "-")} ${esc(block.target_path || "")}</span>
       </div>
       <div class="timeline-grid">${steps.map((step) => renderStepThumb(step, detail)).join("") || '<span class="muted">No captured step in this block.</span>'}</div>
@@ -1965,12 +2656,14 @@ function renderStepThumb(step, detail) {
   const tone = stepTone(step, detail);
   const segments = stepRoleSegments(step, detail);
   const style = stepSegmentsStyle(segments);
+  const segmentMarkup = stepSegmentsMarkup(segments);
   const failed = step.execution_error === true || step.status === "error";
   const tool = step.tool_name || (step.tool_names || [step.scored?.family || "step"]).join("+");
   const family = step.action_family && step.action_family !== "other" ? `${step.action_family}: ` : "";
   const target = step.target_path || step.path || step.scored?.target_path || "";
   return `<button type="button" class="step-thumb ${tone} ${failed ? "is-error" : ""} ${selected ? "is-selected" : ""}" data-step-index="${traceIndex}" data-step-tone="${esc(tone)}" data-step-roles="${esc(segments.join(","))}"${style}>
-    <span class="step-num">${esc(step.step_index ?? traceIndex)}</span>
+    ${segmentMarkup}
+    <span class="step-num">${esc(displayStepLabel(step, detail, traceIndex))}</span>
     <span class="step-tool">${esc(`${family}${tool}`)}</span>
     <span class="step-target">${esc(target.split("/").slice(-2).join("/") || step.command || "no target")}</span>
   </button>`;
@@ -2082,6 +2775,7 @@ function nodeLineRange(node) {
 
 function groupedStepHitNodes(step, detail) {
   const groups = [
+    { key: "symptom-root-cause", label: "symptom + root cause", nodes: [] },
     { key: "symptom", label: "symptom", nodes: [] },
     { key: "test-adapter", label: "test-adapter", nodes: [] },
     { key: "intermediate", label: "intermediate", nodes: [] },
@@ -2130,7 +2824,7 @@ function renderStepDetail(detail) {
     return `<section class="step-detail"><h3>Trajectory detail</h3><div class="empty">Raw step content was not captured for this artifact.</div></section>`;
   }
   return `<section class="step-detail">
-    <h3>Step ${esc(step.step_index ?? step.trace_index)}</h3>
+    <div class="step-detail-head"><h3>Step ${esc(displayStepLabel(step, detail, Number(step.trace_index ?? step.step_index ?? 0)))}</h3><button class="copy-link" type="button" data-copy-link="step">Step link</button></div>
     <div class="detail-badges">
       ${step.execution_error || step.status === "error" ? badge("execution error", true, "bad") : ""}
       ${step.parse_error ? badge("parse error", true, "bad") : ""}
@@ -2166,7 +2860,7 @@ function renderTraceInspector(snapshot) {
   document.getElementById("trace-inspector").innerHTML = `
     <aside id="trace-left-pane" class="trace-left">${renderTraceList(snapshot)}</aside>
     <section class="trace-workspace">
-      <div class="trace-overview">${renderTraceTitleCard(detail)}</div>
+      <div class="trace-overview">${renderTraceTitleCard(detail, snapshot)}</div>
       ${renderTraceWorkspacePanels(detail)}
     </section>`;
   document.querySelectorAll(".trace-section[data-trace-panel]").forEach((section) => {
@@ -2185,6 +2879,15 @@ function renderTraceInspector(snapshot) {
       restoreInspectorScroll({ left: leftScroll, middle: 0, right: 0 });
     });
   });
+  document.getElementById("trace-rollout-select")?.addEventListener("change", (event) => {
+    const scrollState = captureInspectorScroll();
+    state.selectedTraceKey = event.target.value;
+    state.selectedStepIndex = 0;
+    state.selectedGraphNodeKey = null;
+    resetTracePanels();
+    renderTraceInspector(state.snapshot);
+    restoreInspectorScroll({ ...scrollState, middle: 0, right: 0 });
+  });
   document.querySelectorAll(".step-thumb").forEach((button) => {
     button.addEventListener("click", () => {
       const scrollState = captureInspectorScroll();
@@ -2192,6 +2895,9 @@ function renderTraceInspector(snapshot) {
       renderTraceInspector(state.snapshot);
       restoreInspectorScroll({ ...scrollState, right: 0 });
     });
+  });
+  document.querySelectorAll(".copy-link").forEach((button) => {
+    button.addEventListener("click", () => copyDashboardLink(button.dataset.copyLink || "step"));
   });
   const graphContextToggle = document.getElementById("graph-context-toggle");
   if (graphContextToggle) {
@@ -2235,10 +2941,14 @@ function render(options = {}) {
     document.getElementById("summary-grid").innerHTML = '<div class="empty">Dashboard data is not available.</div>';
     return;
   }
+  const tableScrollState = options.tableScrollState || captureTableScroll();
+  applyPendingLocator(snapshot);
   ensureSelection(snapshot);
+  syncFilterControls();
   renderSources(snapshot);
   renderSelectedExperiment(snapshot);
   renderSummary(snapshot);
+  renderAdminPanel(snapshot);
   renderExperiments(snapshot);
   renderTrend(snapshot);
   renderDistributions(snapshot);
@@ -2246,7 +2956,9 @@ function render(options = {}) {
   renderRuns(snapshot);
   document.getElementById("trace-legend").innerHTML = renderTraceLegend();
   renderTraceInspector(snapshot);
+  restoreTableScroll(tableScrollState);
   restoreInspectorScroll(options.scrollState);
+  syncHashToSelection();
 }
 
 function setTab(tabName) {
@@ -2258,6 +2970,7 @@ function setTab(tabName) {
 function configureEvents() {
   document.querySelectorAll(".tab").forEach((tab) => tab.addEventListener("click", () => setTab(tab.dataset.tab)));
   document.getElementById("refresh-button").addEventListener("click", loadSnapshot);
+  document.getElementById("rebuild-button").addEventListener("click", () => loadSnapshot({ force: true }));
   document.querySelectorAll(".case-filter-checkbox").forEach((input) => {
     input.addEventListener("change", (event) => {
       const bucket = event.target.dataset.caseFilter;
@@ -2280,6 +2993,44 @@ function configureEvents() {
     resetTracePanels();
     render();
   });
+  document.getElementById("permalink-jump")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const locator = parseLocator(document.getElementById("permalink-input")?.value || "");
+    if (!locator) {
+      state.permalinkNotice = "Link format was not recognized.";
+      renderSelectedExperiment(state.snapshot);
+      return;
+    }
+    state.pendingLocator = locator;
+    render();
+  });
+  document.getElementById("admin-login")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const password = document.getElementById("admin-password")?.value || "";
+      await apiPost("/api/auth/login", { password });
+      state.admin.enabled = true;
+      state.admin.authenticated = true;
+      state.adminMessage = "";
+      syncAdminControls();
+      render();
+    } catch (error) {
+      state.adminMessage = String(error.message || error);
+      renderAdminPanel(state.snapshot);
+    }
+  });
+  document.getElementById("admin-logout-button")?.addEventListener("click", async () => {
+    try {
+      await apiPost("/api/auth/logout", {});
+    } catch (_error) {
+      // Local session state is still cleared if the server already forgot the token.
+    }
+    state.admin.authenticated = false;
+    state.adminDeleteKeys.clear();
+    state.adminPreview = null;
+    syncAdminControls();
+    render();
+  });
   document.getElementById("trace-search").addEventListener("input", (event) => {
     state.traceQuery = event.target.value;
     state.selectedTraceKey = null;
@@ -2288,10 +3039,32 @@ function configureEvents() {
     resetTracePanels();
     renderTraceInspector(state.snapshot);
   });
+  document.querySelectorAll(".trace-pattern-checkbox").forEach((input) => {
+    input.addEventListener("change", (event) => {
+      const tag = event.target.dataset.patternFilter;
+      if (!tag || !TRACE_PATTERN_FILTERS.includes(tag)) return;
+      state.tracePatternFilters[tag] = Boolean(event.target.checked);
+      state.selectedTraceKey = null;
+      state.selectedStepIndex = 0;
+      state.selectedGraphNodeKey = null;
+      resetTracePanels();
+      render();
+    });
+  });
   document.getElementById("auto-refresh").addEventListener("change", (event) => {
     if (event.target.checked) startAutoRefresh();
     else stopAutoRefresh();
   });
+  if (typeof window !== "undefined") {
+    window.addEventListener?.("hashchange", () => {
+      if (state.ignoreNextHashChange) {
+        state.ignoreNextHashChange = false;
+        return;
+      }
+      state.pendingLocator = parseLocator(window.location?.hash || "");
+      render();
+    });
+  }
 }
 
 function startAutoRefresh() {
@@ -2305,5 +3078,7 @@ function stopAutoRefresh() {
 }
 
 configureEvents();
+if (typeof window !== "undefined" && window.location) state.pendingLocator = parseLocator(window.location.hash || "");
+loadAdminStatus();
 loadSnapshot();
 if (document.getElementById("auto-refresh").checked) startAutoRefresh();

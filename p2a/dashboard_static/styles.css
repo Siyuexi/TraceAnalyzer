@@ -37,6 +37,26 @@ h2 { margin: 0 0 12px; font-size: 17px; letter-spacing: 0; }
 h3 { margin: 14px 0 8px; font-size: 14px; letter-spacing: 0; }
 .source-line { color: #cbd5e1; font-size: 12px; max-width: 980px; overflow-wrap: anywhere; }
 .top-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.admin-login,
+.permalink-jump,
+.admin-target-form,
+.admin-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.admin-login input,
+.permalink-jump input,
+.admin-target-form input,
+.admin-actions input {
+  min-height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+}
+.permalink-jump input { width: min(360px, 42vw); }
 .case-filter {
   display: inline-flex;
   align-items: center;
@@ -64,6 +84,54 @@ button {
 }
 button:hover { border-color: var(--accent); }
 .toggle { display: inline-flex; align-items: center; gap: 6px; color: #e5e7eb; }
+.trace-pattern-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.trace-pattern-filter legend {
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.admin-panel[hidden],
+.admin-login[hidden],
+.notice[hidden] { display: none; }
+.notice {
+  margin: 10px 0 18px;
+  padding: 8px 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 6px;
+  background: #eff6ff;
+  color: #1e3a8a;
+}
+.admin-targets {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 10px 0;
+}
+.admin-targets code {
+  background: #f2f4f7;
+  border: 1px solid #e4e7ec;
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+.admin-message {
+  min-height: 20px;
+  color: var(--bad);
+}
+.copy-link { white-space: nowrap; }
+.step-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
 .tabs {
   display: flex;
   gap: 2px;
@@ -347,6 +415,28 @@ tr.is-selected td {
   font-size: 12px;
   font-weight: 700;
 }
+.pass-at-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: #172033;
+  font-size: 12px;
+  font-weight: 700;
+}
+.pass-at-control select {
+  min-width: 58px;
+  height: 28px;
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  background: #fff;
+  color: #172033;
+  font: inherit;
+}
 .legend-step {
   display: inline-grid;
   grid-template-columns: 24px minmax(0, 1fr);
@@ -368,7 +458,7 @@ tr.is-selected td {
 .legend-step.root-edit { background: #ede9fe; border-color: #a78bfa; color: #4c1d95; }
 .legend-step.edit { background: #ccfbf1; border-color: #5eead4; color: #134e4a; }
 .legend-step.symptom { background: #dcfce7; border-color: #86efac; color: #14532d; }
-.legend-step.test-adapter { background: #fef3c7; border-color: #fcd34d; color: #78350f; }
+.legend-step.test-adapter { background: #ffedd5; border-color: #fdba74; color: #7c2d12; }
 .legend-step.symptom-root-cause {
   background: linear-gradient(135deg, #dcfce7 0 50%, #fee2e2 50% 100%);
   border-color: #64748b;
@@ -418,6 +508,12 @@ tr.is-selected td {
 .glossary-grid span {
   color: var(--muted);
   font-size: 12px;
+}
+.metric-def-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0 0 8px;
 }
 .kpi-table table {
   min-width: 2100px;
@@ -586,6 +682,7 @@ pre.log {
   border: 1px solid var(--line);
   border-left-width: 4px;
   background: var(--panel);
+  overflow: hidden;
 }
 .trace-row.is-resolved {
   border-left-color: var(--ok);
@@ -594,6 +691,10 @@ pre.log {
 .trace-row.is-unresolved {
   border-left-color: var(--bad);
   background: #fff8f7;
+}
+.trace-row.is-mixed {
+  border-left-color: var(--warn);
+  background: #fffdf5;
 }
 .trace-row.is-selected {
   border-color: var(--accent);
@@ -604,6 +705,29 @@ pre.log {
 }
 .trace-row.is-selected.is-unresolved {
   border-left-color: var(--bad);
+}
+.trace-row.is-selected.is-mixed {
+  border-left-color: var(--warn);
+}
+.trace-rollout-strip {
+  display: flex;
+  height: 9px;
+  min-width: 0;
+  margin: -9px -9px 5px;
+  border-bottom: 1px solid rgba(23, 32, 51, .12);
+}
+.trace-rollout-segment {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.trace-rollout-segment.is-resolved {
+  background: var(--ok-bg);
+}
+.trace-rollout-segment.is-unresolved {
+  background: var(--bad-bg);
+}
+.trace-rollout-segment.is-selected {
+  box-shadow: inset 0 0 0 2px var(--accent);
 }
 .trace-id {
   font-weight: 700;
@@ -644,6 +768,41 @@ pre.log {
   background: var(--panel);
   min-width: 0;
   flex: 1 1 360px;
+}
+.trace-title-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.rollout-select-control,
+.rollout-single {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 3px 7px;
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  background: #f8fafc;
+  color: #475467;
+  font-size: 12px;
+  font-weight: 700;
+}
+.rollout-select-control select {
+  max-width: 170px;
+  height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+}
+.rollout-select-control strong {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
 }
 .instance-overview-toggle {
   border: 1px solid var(--line);
@@ -869,7 +1028,7 @@ pre.log {
 }
 .graph-node.test circle { fill: #f5f3ff; stroke: #7c3aed; }
 .graph-node.pre circle,
-.graph-node.test-adapter circle { fill: #fef3c7; stroke: #d97706; }
+.graph-node.test-adapter circle { fill: #ffedd5; stroke: #ea580c; }
 .graph-node.root circle { fill: #fee2e2; stroke: #b42318; }
 .graph-node.symptom circle { fill: #dcfce7; stroke: #15803d; }
 .graph-node.path circle { fill: #dbeafe; stroke: #2563eb; }
@@ -1078,7 +1237,7 @@ pre.log {
 .step-thumb.root-edit { background: #ede9fe; border-color: #a78bfa; }
 .step-thumb.edit { background: #ccfbf1; border-color: #5eead4; }
 .step-thumb.symptom { background: #dcfce7; border-color: #86efac; }
-.step-thumb.test-adapter { background: #fef3c7; border-color: #fcd34d; }
+.step-thumb.test-adapter { background: #ffedd5; border-color: #fdba74; }
 .step-thumb.symptom-root-cause {
   background: linear-gradient(135deg, #dcfce7 0 50%, #fee2e2 50% 100%);
   border-color: #64748b;
@@ -1086,7 +1245,31 @@ pre.log {
 .step-thumb.multi-hit {
   background: var(--step-bg);
   border-color: #64748b;
+  overflow: hidden;
 }
+.step-thumb.multi-hit > :not(.step-segments) {
+  position: relative;
+  z-index: 1;
+}
+.step-segments {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  overflow: hidden;
+  border-radius: inherit;
+  z-index: 0;
+  pointer-events: none;
+}
+.step-segment {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.step-segment.symptom-root-cause { background: linear-gradient(135deg, #dcfce7 0 50%, #fee2e2 50% 100%); }
+.step-segment.symptom { background: #dcfce7; }
+.step-segment.test-adapter { background: #ffedd5; }
+.step-segment.intermediate { background: #dbeafe; }
+.step-segment.fix-adapter { background: #fce7f3; }
+.step-segment.root { background: #fee2e2; }
 .step-thumb.path,
 .step-thumb.intermediate { background: #dbeafe; border-color: #93c5fd; }
 .step-thumb.fix-adapter { background: #fce7f3; border-color: #f9a8d4; }
@@ -1179,9 +1362,13 @@ pre.log {
   border-left-color: #22c55e;
   background: #f0fdf4;
 }
+.node-hit-group.symptom-root-cause {
+  border-left-color: #64748b;
+  background: linear-gradient(135deg, #f0fdf4 0 50%, #fff1f2 50% 100%);
+}
 .node-hit-group.test-adapter {
-  border-left-color: #f59e0b;
-  background: #fffbeb;
+  border-left-color: #f97316;
+  background: #fff7ed;
 }
 .node-hit-group.root {
   border-left-color: #ef4444;
@@ -1213,7 +1400,8 @@ pre.log {
   background: #94a3b8;
 }
 .node-hit-group.symptom .node-hit-swatch { background: #22c55e; }
-.node-hit-group.test-adapter .node-hit-swatch { background: #f59e0b; }
+.node-hit-group.symptom-root-cause .node-hit-swatch { background: linear-gradient(135deg, #22c55e 0 50%, #ef4444 50% 100%); }
+.node-hit-group.test-adapter .node-hit-swatch { background: #f97316; }
 .node-hit-group.root .node-hit-swatch { background: #ef4444; }
 .node-hit-group.path .node-hit-swatch,
 .node-hit-group.intermediate .node-hit-swatch { background: #3b82f6; }
