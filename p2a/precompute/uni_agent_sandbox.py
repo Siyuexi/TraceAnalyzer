@@ -54,7 +54,7 @@ ln -s /root/r2e_tests /testbed/r2e_tests
 
 # R2E-Gym containers run a plain venv (no conda); its DockerRuntime passes
 # environment={"PATH": DOCKER_PATH} with the venv bin first. A one-shot ``execute`` is a
-# FRESH shell each call, so — unlike the old persistent interactive shell — it does NOT
+# fresh shell each call, so it does not
 # inherit post_setup_cmd's PATH export; we must re-inject this every call or the sandbox's
 # ``python``/pytest is not found (exit 127 → empty trace). Value copied from the pre-migration
 # tracer (rllm swe.py DOCKER_PATH).
@@ -272,6 +272,7 @@ def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment
             "container_runtime": os.getenv("P2A_LOCAL_CONTAINER_RUNTIME", "docker"),
         }
     elif impl == "arl":
+        repo_path = _repo_path_for_task(task) if _is_swebench_pro_task(task) else "/testbed"
         deployment_config = {
             "type": "arl",
             "image": image,
@@ -280,6 +281,7 @@ def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment
             "experiment_id": os.getenv("ARL_EXPERIMENT_ID", "p2a-uniagent-arl-precompute"),
             "timeout": float(os.getenv("ARL_TIMEOUT", "600")),
             "startup_timeout": float(os.getenv("ARL_STARTUP_TIMEOUT", os.getenv("ARL_SWEREX_STARTUP_TIMEOUT", "240"))),
+            "session_cwd": repo_path,
         }
         max_replicas = os.getenv("ARL_MAX_REPLICAS")
         if max_replicas:
@@ -338,13 +340,10 @@ class UniAgentSandboxAdapter:
 
     def _execute_raw(self, command: str, timeout: int | float | None = None) -> tuple[str, str, int]:
         # One-shot ``execute`` (stateless ManagedSession.execute over HTTP, retry-wrapped
-        # in ArlRuntime._session_execute), NOT the interactive WebSocket PTY shell.
-        # Tracing commands are self-contained (each does its own ``cd``) and all cross-step
-        # state lives on the sandbox filesystem, so a persistent shell buys nothing here —
-        # while ``run_in_session`` opens an InteractiveShellClient whose ``connect`` returns
-        # HTTP 404 for whole repos (the orange3 regression). This mirrors the pre-migration
-        # tracer, which ran every command through ``ManagedSession.execute`` (0 WS404), and
-        # returns stdout/stderr as separate streams the way ``_run`` callers expect.
+        # in ArlRuntime._session_execute). Tracing commands are self-contained
+        # and all cross-step state lives on the sandbox filesystem. This mirrors
+        # the pre-migration tracer and returns stdout/stderr as separate streams
+        # the way ``_run`` callers expect.
         from swerex.runtime.abstract import Command
 
         # Inject the sandbox env every call (one-shot execute = fresh shell, no persistent state),

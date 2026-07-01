@@ -50,16 +50,74 @@ class Response:
         }
 
 
+class RawUsageDetails:
+    reasoning_tokens = 7
+
+
+class RawUsage:
+    input_tokens = 11
+    output_tokens = 13
+    total_tokens = 24
+    output_tokens_details = RawUsageDetails()
+
+
+class RawSummaryBlock:
+    type = "summary_text"
+    text = "reason about seed"
+
+
+class RawReasoningItem:
+    type = "reasoning"
+    summary = [RawSummaryBlock()]
+
+
+class RawTextBlock:
+    type = "output_text"
+    text = "inspect"
+
+
+class RawMessageItem:
+    type = "message"
+    content = [RawTextBlock()]
+
+
+class RawFunctionCall:
+    type = "function_call"
+    call_id = "call-raw"
+    name = "str_replace_editor"
+    arguments = '{"command":"view","path":"/testbed/a.py"}'
+
+
+class RawResponse:
+    id = "resp_raw"
+    model = "doubao-seed-2-0-lite"
+    usage = RawUsage()
+    output = [RawReasoningItem(), RawMessageItem(), RawFunctionCall()]
+    _x_usage = {
+        "prompt_tokens": 11,
+        "completion_tokens": 13,
+        "total_tokens": 24,
+        "cache_hit_tokens": 2,
+        "cache_write_tokens": 0,
+        "cost": 5,
+    }
+    _x_account_id = "acct-raw"
+
+
 class Api:
     MODEL_CONFIGS = {
-        "passthrough_models": ["deepseek-v4-flash-passthrough"],
+        "passthrough_models": [
+            "deepseek-v4-flash-passthrough",
+            "doubao-seed-2-0-lite-passthrough",
+        ],
         "passthrough_chat_completions_models": {"deepseek-v4-flash-passthrough"},
         "passthrough_extra_body_map": {
             "deepseek-v4-flash-passthrough": {
                 "max_completion_tokens": 384000,
                 "temperature": 0.7,
                 "thinking": {"max_completion_tokens": 128000},
-            }
+            },
+            "doubao-seed-2-0-lite-passthrough": {},
         },
     }
 
@@ -68,6 +126,7 @@ class Api:
         self.user_name = user_name
         self.user_token = user_token
         self.calls = []
+        self.raw_calls = []
         self.requests = []
 
     def set_retry_config(self, **kwargs):
@@ -92,6 +151,17 @@ class Api:
             **self.MODEL_CONFIGS["passthrough_extra_body_map"][model_name],
         }
         return self._make_request_with_retry("POST", "http://provider.example", json=body)
+
+    def _handle_openai_passthrough_request(self, model_name, prompt, history, tools=None, tools_mode=False, save_id=None):
+        self.raw_calls.append({
+            "model_name": model_name,
+            "prompt": prompt,
+            "history": history,
+            "tools": tools,
+            "tools_mode": tools_mode,
+            "save_id_snapshot": dict(save_id or {}),
+        })
+        return RawResponse()
 
 
 HOST = "http://internal.example"
@@ -230,3 +300,44 @@ def test_internal_api_passes_save_id_on_follow_up_requests(tmp_path, monkeypatch
 
     assert model.inner.api.calls[0]["save_id_snapshot"] == {}
     assert model.inner.api.calls[1]["save_id_snapshot"]["account_id"] == "acct-1"
+
+
+def test_internal_api_responses_model_preserves_raw_reasoning(tmp_path, monkeypatch):
+    api_module = tmp_path / "internal_api_eval.py"
+    _write_fake_api_module(api_module)
+
+    async def call_now(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(internal_api_adapter.asyncio, "to_thread", call_now)
+    model = make_chat_model(
+        {"model_name": "doubao-seed-2-0-lite-passthrough"},
+        {"source": "internal_api", "api_module": api_module.name},
+        repo_root=tmp_path,
+    )
+    model.set_tools_schemas(
+        [{"type": "function", "function": {"name": "str_replace_editor"}}]
+    )
+
+    async def _query():
+        cache = await model.prepare_rollout_cache(
+            [{"role": "user", "content": "Fix the bug."}]
+        )
+        return await model.query(
+            [{"role": "user", "content": "Fix the bug."}],
+            cache,
+        )
+
+    content, tool_calls, cache, info = asyncio.run(_query())
+
+    assert content == "inspect"
+    assert tool_calls[0]["id"] == "call-raw"
+    assert tool_calls[0]["function"]["name"] == "str_replace_editor"
+    assert info["reasoning_content"] == "reason about seed"
+    assert info["reasoning_tokens"] == 7
+    assert info["cache_hit_tokens"] == 2
+    assert cache["internal_api_save_id"]["response_id"] == "resp_raw"
+    assert cache["internal_api_save_id"]["account_id"] == "acct-raw"
+    assert cache["internal_api_assistant_metadata"]["1"]["reasoning_content"] == "reason about seed"
+    assert model.inner.api.calls == []
+    assert model.inner.api.raw_calls[0]["prompt"] == "Fix the bug."

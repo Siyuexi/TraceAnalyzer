@@ -21,6 +21,7 @@ import uuid
 from p2a.internal_api_native import (
     normalize_model_name,
     parse_internal_response,
+    responses_api_response_to_payload,
     to_prompt_history,
     update_save_id_from_response,
     uses_openai_responses_api,
@@ -290,9 +291,8 @@ class InternalApiChatModel:
             assistant_metadata_by_index=assistant_metadata,
         )
         tools = self.tools_schemas or []
-        chain_active = uses_openai_responses_api(model_name, self.api_module) and bool(
-            save_id.get("response_id")
-        )
+        uses_responses_api = uses_openai_responses_api(model_name, self.api_module)
+        chain_active = uses_responses_api and bool(save_id.get("response_id"))
         call_kwargs: dict[str, Any] = {
             "history": history,
             "tools": tools,
@@ -301,27 +301,43 @@ class InternalApiChatModel:
             "save_id": save_id,
         }
 
+        response_obj: Any
+        raw_responses_handler = getattr(self.api, "_handle_openai_passthrough_request", None)
         try:
-            response_obj = await asyncio.to_thread(
-                self.api.call_data_eval,
-                model_name,
-                prompt,
-                **call_kwargs,
-            )
+            if uses_responses_api and callable(raw_responses_handler):
+                response_obj = await asyncio.to_thread(
+                    raw_responses_handler,
+                    model_name,
+                    prompt,
+                    history,
+                    tools=tools,
+                    tools_mode=bool(tools),
+                    save_id=save_id,
+                )
+            else:
+                response_obj = await asyncio.to_thread(
+                    self.api.call_data_eval,
+                    model_name,
+                    prompt,
+                    **call_kwargs,
+                )
         except Exception:
             if chain_active:
                 save_id.clear()
             raise
 
-        try:
-            payload = response_obj.json()
-        except Exception as exc:
-            if chain_active:
-                save_id.clear()
-            response_text = getattr(response_obj, "text", response_obj)
-            raise RuntimeError(
-                f"Internal API returned non-JSON response: {response_text!r}"
-            ) from exc
+        if uses_responses_api and not hasattr(response_obj, "status_code"):
+            payload = responses_api_response_to_payload(response_obj)
+        else:
+            try:
+                payload = response_obj.json()
+            except Exception as exc:
+                if chain_active:
+                    save_id.clear()
+                response_text = getattr(response_obj, "text", response_obj)
+                raise RuntimeError(
+                    f"Internal API returned non-JSON response: {response_text!r}"
+                ) from exc
 
         status = getattr(response_obj, "status_code", 200)
         if status and status >= 400:

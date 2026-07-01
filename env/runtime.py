@@ -4,20 +4,20 @@ This is the "兼容" layer: uni-agent's ``AgentEnv`` drives a swe-rex
 ``AbstractRuntime`` (9 methods). We keep that *interface* but back it with the
 **ARL SDK** (``arl-env``) directly — no swe-rex server:
 
-  * persistent bash sessions  -> ``arl.interactive_shell_client.InteractiveShellClient``
-    (Gateway WebSocket PTY shell). ``cd``/``export``/aliases persist across
-    ``run_in_session`` calls because it is one long-lived shell process.
-  * one-shot ``execute``       -> ``ManagedSession.execute`` (stateless step API).
+  * bash-session methods -> execute-backed session-state wrapper over
+    ``ManagedSession.execute``. ``cd`` and exported env persist through small
+    state files, while every command still uses the same one-shot API as
+    precompute.
   * ``read_file``/``write_file``/``upload`` -> chunked base64 over one-shot
     ``execute`` (the SDK has no generic file-transfer API in 0.3.1; swap this
     layer if a stable upload/download lands upstream).
 
 The SDK calls are synchronous (httpx / websockets.sync); every async method
-offloads them to a thread executor so we satisfy the async ``AbstractRuntime``
+offloads them to a worker thread so we satisfy the async ``AbstractRuntime``
 contract without blocking the event loop.
 
-``InteractiveShellClient`` is imported lazily so this module imports even when
-``arl-env`` is not yet installed in the ambient env.
+This adapter intentionally does not use ARL's human-oriented interactive shell
+client for model/tool execution.
 """
 
 from __future__ import annotations
@@ -30,8 +30,10 @@ import os
 import re
 import shlex
 import tarfile
+import threading
 import time
 import uuid
+import warnings
 from typing import Any
 
 from swerex.runtime.abstract import (
@@ -58,16 +60,22 @@ from swerex.runtime.abstract import (
 # base64 chunk size per execute step: keep a single shell command well under any
 # arg-length limit. base64 expands ~4/3, so 60k chars ≈ 45 KiB of raw bytes/step.
 _B64_CHUNK = 60_000
-_READ_POLL = 0.5  # seconds per websocket read while draining a command
 _DEFAULT_CMD_TIMEOUT = 60.0
 
 # Transient-error retry. At full-corpus (~4.5k instance) scale the ARL gateway
-# occasionally drops a connection mid-call — httpx for the managed-session
-# execute path, websockets for the interactive PTY shell. These are recoverable
-# by retrying (stateless execute) or reopening the shell, so we treat a bounded
-# set of network exceptions as transient rather than failing the instance.
+# occasionally drops a connection mid-call. Stateless execute calls are safe to
+# retry, so we treat a bounded set of network exceptions as transient rather
+# than failing the instance.
 _RETRY_ATTEMPTS = 3
 _RETRY_BASE_DELAY = 1.5  # seconds; exponential backoff: 1.5, 3.0, ...
+_TERMINAL_CONTROL_RE = re.compile(
+    r"\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\r"
+)
+
+
+def _strip_terminal_controls(text: str) -> str:
+    """Remove PTY/readline control sequences before they reach the agent trace."""
+    return _TERMINAL_CONTROL_RE.sub("", text)
 
 
 def _is_transient_step_failure(output: Any) -> bool:
@@ -109,6 +117,12 @@ def _transient_exc_types() -> tuple[type[BaseException], ...]:
         import websockets.exceptions as _wse
 
         types += [_wse.ConnectionClosed, _wse.ConnectionClosedError, _wse.ConnectionClosedOK]
+        for name in ("InvalidStatus", "InvalidStatusCode", "InvalidHandshake"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                exc_type = getattr(_wse, name, None)
+            if isinstance(exc_type, type):
+                types.append(exc_type)
     except Exception:  # noqa: BLE001 - websockets optional at import time
         pass
     return tuple(dict.fromkeys(types))
@@ -140,18 +154,45 @@ class ArlRuntime(AbstractRuntime):
         run_id: str,
         logger: Any | None = None,
         gateway_url: str | None = None,
+        api_key: str | None = None,
+        startup_commands: list[str] | None = None,
+        one_time_startup_commands: list[str] | None = None,
+        session_cwd: str | None = "/testbed",
     ) -> None:
         self._session = session
         self.run_id = run_id
         self.logger = logger or logging.getLogger(f"arl-runtime.{run_id}")
         self._gateway_url = _extract_gateway_url(session, gateway_url)
-        self._shells: dict[str, Any] = {}  # session name -> InteractiveShellClient
+        self._api_key = api_key
+        self._session_cwd = session_cwd.strip() if isinstance(session_cwd, str) and session_cwd.strip() else None
+        self._startup_commands = [command for command in (startup_commands or []) if command.strip()]
+        self._one_time_startup_commands = [
+            command for command in (one_time_startup_commands or []) if command.strip()
+        ]
+        self._completed_one_time_startup_sessions: set[str] = set()
+        self._session_startup_sources: dict[str, list[str]] = {}
+        self._initialized_sessions: set[str] = set()
+        safe_run_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", run_id)
+        self._state_root = f"/tmp/arl_runtime_sessions/{safe_run_id}"
         self._closed = False
 
     # ── async plumbing ────────────────────────────────────────────────────
     async def _blocking(self, func, *args):
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, func, *args)
+        result: dict[str, Any] = {}
+
+        def _target() -> None:
+            try:
+                result["value"] = func(*args)
+            except BaseException as exc:  # noqa: BLE001 - transfer sync failure to async caller
+                result["error"] = exc
+
+        thread = threading.Thread(target=_target, name="arl-runtime", daemon=True)
+        thread.start()
+        while thread.is_alive():
+            await asyncio.sleep(0.05)
+        if "error" in result:
+            raise result["error"]
+        return result.get("value")
 
     @property
     def _arl_session_id(self) -> str:
@@ -210,70 +251,68 @@ class ArlRuntime(AbstractRuntime):
             time.sleep(delay)
         return last_resp
 
-    # ── persistent interactive shells ─────────────────────────────────────
-    def _open_shell(self, name: str, startup_source: list[str] | None) -> str:
-        from arl.interactive_shell_client import InteractiveShellClient
+    # ── execute-backed bash session emulation ─────────────────────────────
+    def _session_state_dir(self, name: str) -> str:
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
+        return f"{self._state_root}/{safe_name}"
 
-        shell = InteractiveShellClient(gateway_url=self._gateway_url)
-        shell.connect(self._arl_session_id)
-        # Suppress PTY echo + prompt so command output is clean; apply startup files.
-        shell.send_input("export PS1=''; stty -echo 2>/dev/null || true\n")
-        for src in startup_source or []:
-            shell.send_input(f"source {shlex.quote(src)} 2>/dev/null || true\n")
-        self._shells[name] = shell
-        return self._drain_banner(shell)
+    def _session_wrapper(self, name: str, command: str) -> str:
+        state_dir = shlex.quote(self._session_state_dir(name))
+        initial_cwd = shlex.quote(self._session_cwd or "")
+        return "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f"__arl_state_dir={state_dir}",
+                f"__arl_initial_cwd={initial_cwd}",
+                'mkdir -p "$__arl_state_dir"',
+                'if [ -f "$__arl_state_dir/env.sh" ]; then source "$__arl_state_dir/env.sh"; fi',
+                'if [ -f "$__arl_state_dir/cwd" ]; then cd "$(cat "$__arl_state_dir/cwd")" 2>/dev/null || true; fi',
+                'if [ ! -f "$__arl_state_dir/cwd" ] && [ -n "$__arl_initial_cwd" ]; then cd "$__arl_initial_cwd" || exit $?; fi',
+                "__arl_dump_state() {",
+                "  __arl_status=$?",
+                "  trap - EXIT",
+                "  set +e",
+                '  pwd > "$__arl_state_dir/cwd.tmp" && mv "$__arl_state_dir/cwd.tmp" "$__arl_state_dir/cwd"',
+                '  export -p > "$__arl_state_dir/env.sh.tmp" && mv "$__arl_state_dir/env.sh.tmp" "$__arl_state_dir/env.sh"',
+                "  exit $__arl_status",
+                "}",
+                "trap __arl_dump_state EXIT",
+                "__arl_user_command() {",
+                command,
+                "}",
+                "__arl_user_command",
+                "exit $?",
+                "",
+            ]
+        )
 
-    @staticmethod
-    def _drain_banner(shell: Any, settle: float = 0.5) -> str:
-        """Read whatever the shell emits during startup, until it goes quiet."""
-        chunks: list[str] = []
-        deadline = time.monotonic() + settle
-        while time.monotonic() < deadline:
-            msg = shell.read_message(timeout=_READ_POLL)
-            if msg is None:
-                break
-            if msg.type == "output":
-                chunks.append(msg.data)
-                deadline = time.monotonic() + settle  # keep draining while active
-        return "".join(chunks)
+    def _run_session_command_sync(self, name: str, command: str, timeout: float) -> tuple[str, int, str]:
+        script_path = f"{self._session_state_dir(name)}/cmd_{uuid.uuid4().hex}.sh"
+        self._write_bytes_sync(self._session_wrapper(name, command).encode("utf-8"), script_path)
+        output = self._exec_sync(f"bash {shlex.quote(script_path)} 2>&1", timeout)
+        text = _strip_terminal_controls((output.stdout or "") + (output.stderr or ""))
+        return text, int(output.exit_code or 0), ""
 
-    def _run_in_shell_sync(self, name: str, command: str, timeout: float) -> tuple[str, int, str]:
-        """Send a command + sentinel; drain until the sentinel exit line. Sync."""
-        shell = self._shells[name]
-        marker = f"__ARL_END_{uuid.uuid4().hex}__"
-        # ``$?`` here is the exit status of `command`. The executed echo prints
-        # ``marker:<digits>``; even if echo isn't suppressed, the *typed* line
-        # contains literal ``$?`` and won't match ``marker:\d+``.
-        shell.send_input(command + "\n")
-        shell.send_input(f'echo "{marker}:$?"\n')
+    def _ensure_session_sync(self, name: str, startup_source: list[str] | None = None) -> str:
+        if startup_source is not None:
+            self._session_startup_sources[name] = list(startup_source)
+        if name in self._initialized_sessions:
+            return ""
 
-        pattern = re.compile(rf"{re.escape(marker)}:(\d+)")
-        buf = ""
-        deadline = time.monotonic() + (timeout or _DEFAULT_CMD_TIMEOUT)
-        while True:
-            if time.monotonic() > deadline:
-                try:
-                    shell.send_signal("SIGINT")
-                except Exception:
-                    pass
-                return buf, -1, "timeout"
-            msg = shell.read_message(timeout=_READ_POLL)
-            if msg is None:
-                continue
-            if msg.type == "output":
-                buf += msg.data
-                m = pattern.search(buf)
-                if m:
-                    exit_code = int(m.group(1))
-                    output = buf[: m.start()]
-                    # strip a trailing echoed-command line if echo wasn't suppressed
-                    if output.endswith("\n"):
-                        output = output[:-1]
-                    return output, exit_code, ""
-            elif msg.type == "exit":
-                return buf, msg.exit_code, "shell_exited"
-            elif msg.type == "error":
-                return buf, -1, msg.data or "shell_error"
+        commands: list[str] = [
+            f"source {shlex.quote(src)} 2>/dev/null || true"
+            for src in self._session_startup_sources.get(name, [])
+        ]
+        commands.extend(self._startup_commands)
+        if name not in self._completed_one_time_startup_sessions:
+            commands.extend(self._one_time_startup_commands)
+        command = "\n".join(commands) if commands else "true"
+        output, exit_code, failure = self._run_session_command_sync(name, command, _DEFAULT_CMD_TIMEOUT)
+        if exit_code != 0 or failure:
+            raise RuntimeError(f"ARL execute-backed session startup failed ({exit_code=} {failure}): {output[-1000:]}")
+        self._initialized_sessions.add(name)
+        self._completed_one_time_startup_sessions.add(name)
+        return output
 
     # ── one-shot execute helpers (stateless ManagedSession.execute) ────────
     def _exec_sync(self, shell_cmd: str, timeout: float | None = None) -> Any:
@@ -311,40 +350,17 @@ class ArlRuntime(AbstractRuntime):
     # ── AbstractRuntime: 9 methods ─────────────────────────────────────────
     async def create_session(self, request: CreateBashSessionRequest) -> CreateBashSessionResponse:
         name = request.session
-        banner = await self._blocking(self._open_shell, name, list(request.startup_source or []))
-        return CreateBashSessionResponse(output=banner, session_type="bash")
+        output = await self._blocking(self._ensure_session_sync, name, list(request.startup_source or []))
+        return CreateBashSessionResponse(output=output, session_type="bash")
 
     async def run_in_session(self, action: BashAction | BashInterruptAction) -> BashObservation:
         name = getattr(action, "session", "default")
         if getattr(action, "action_type", "command") == "interrupt":
-            shell = self._shells.get(name)
-            if shell is not None:
-                await self._blocking(shell.send_signal, "SIGINT")
             return BashObservation(output="", exit_code=0, session_type="bash")
 
-        if name not in self._shells:  # auto-create if AgentEnv skipped create_session
-            await self._blocking(self._open_shell, name, None)
-
         timeout = float(getattr(action, "timeout", None) or _DEFAULT_CMD_TIMEOUT)
-
-        def _run_with_reconnect() -> tuple[str, int, str]:
-            try:
-                return self._run_in_shell_sync(name, action.command, timeout)
-            except _TRANSIENT as exc:
-                # The PTY websocket dropped. Reopen the shell and retry once.
-                # Caveat: shell state (cwd/export) is lost on reopen — gate/setup
-                # paths should use the stateless ``execute`` for critical steps.
-                self.logger.warning("ARL shell %r dropped (%r); reopening + retry once", name, exc)
-                old = self._shells.pop(name, None)
-                if old is not None:
-                    try:
-                        old.close()
-                    except Exception:  # noqa: BLE001 - best-effort close
-                        pass
-                self._open_shell(name, None)
-                return self._run_in_shell_sync(name, action.command, timeout)
-
-        output, exit_code, failure = await self._blocking(_run_with_reconnect)
+        await self._blocking(self._ensure_session_sync, name, None)
+        output, exit_code, failure = await self._blocking(self._run_session_command_sync, name, action.command, timeout)
         return BashObservation(
             output=output,
             exit_code=exit_code,
@@ -353,9 +369,8 @@ class ArlRuntime(AbstractRuntime):
         )
 
     async def close_session(self, request: CloseBashSessionRequest) -> CloseBashSessionResponse:
-        shell = self._shells.pop(request.session, None)
-        if shell is not None:
-            await self._blocking(shell.close)
+        self._initialized_sessions.discard(request.session)
+        await self._blocking(self._exec_sync, f"rm -rf {shlex.quote(self._session_state_dir(request.session))}")
         return CloseBashSessionResponse(session_type="bash")
 
     async def execute(self, command: Command) -> CommandResponse:
@@ -417,10 +432,9 @@ class ArlRuntime(AbstractRuntime):
         if self._closed:
             return CloseResponse()
         self._closed = True
-        for shell in list(self._shells.values()):
-            try:
-                await self._blocking(shell.close)
-            except Exception as exc:  # noqa: BLE001
-                self.logger.debug(f"shell close failed: {exc}")
-        self._shells.clear()
+        self._initialized_sessions.clear()
+        try:
+            await self._blocking(self._exec_sync, f"rm -rf {shlex.quote(self._state_root)}")
+        except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
+            self.logger.debug(f"session-state cleanup failed: {exc}")
         return CloseResponse()

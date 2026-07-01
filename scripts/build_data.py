@@ -242,7 +242,7 @@ def _require_swebench_pro_scripts_dir(scripts_dir: str | None) -> Path:
     return path
 
 
-def validate_swebench_pro_parquet(path: str | Path) -> None:
+def validate_swebench_pro_parquet(path: str | Path, *, allow_missing_scripts: bool = False) -> None:
     parquet_path = Path(path)
     df = pd.read_parquet(parquet_path)
     required = ("run_tests", "swebench_pro_parser")
@@ -254,10 +254,11 @@ def validate_swebench_pro_parquet(path: str | Path) -> None:
         )
     if df.empty:
         return
+    script_columns = {"run_tests", "swebench_pro_parser"} if allow_missing_scripts else set()
     bad_columns = [
         column
         for column in required
-        if df[column].fillna("").astype(str).str.strip().eq("").any()
+        if column not in script_columns and df[column].fillna("").astype(str).str.strip().eq("").any()
     ]
     if bad_columns:
         bad_count = int(
@@ -407,7 +408,7 @@ def cmd_swebench_pro(args) -> int:
         )
 
     pd.DataFrame(rows, columns=output_columns).to_parquet(args.out, index=False)
-    validate_swebench_pro_parquet(args.out)
+    validate_swebench_pro_parquet(args.out, allow_missing_scripts=allow_missing_scripts)
     print(
         f"swebench-pro phase1 language={language}: {len(rows)}/{total} "
         f"(skipped_language={skipped_language}, skipped_invalid_selected={skipped_invalid_selected}, "

@@ -25,7 +25,6 @@ from p2a.eval_cache import (
     ERROR_STATUS,
     completed_rollout_keys,
     ensure_db,
-    ingest_artifacts,
     mark_cells_running,
     upsert_experiment,
     upsert_planned_cells,
@@ -355,6 +354,7 @@ def _base_command(
     run_dir: Path,
     missing_jobs: list[tuple[str, int]],
     config: BatchConfig,
+    model: BatchModel,
     bonus_map_dir: Path | None,
 ) -> list[str]:
     command = [
@@ -384,6 +384,14 @@ def _base_command(
         str(run_dir / "details.jsonl"),
         "--report-out",
         str(run_dir / "report.md"),
+        "--cache-db",
+        str(config.db_path),
+        "--experiment-id",
+        config.experiment_id,
+        "--dataset-name",
+        config.dataset_name,
+        "--model-label",
+        model.label,
     ]
     if bonus_map_dir is not None:
         command.extend(["--bonus-map-dir", str(bonus_map_dir)])
@@ -480,6 +488,39 @@ def _mark_missing_error(
         conn.commit()
 
 
+def _remaining_unfinished_jobs(
+    db_path: Path,
+    *,
+    config: BatchConfig,
+    model: BatchModel,
+    rollout_jobs: list[tuple[str, int]],
+) -> list[tuple[str, int]]:
+    if not rollout_jobs:
+        return []
+    source = provider_source(config.provider)
+    with ensure_db(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT instance_id, rollout_index, status
+            FROM run_cells
+            WHERE experiment_id = ?
+              AND provider_source = ?
+              AND model_api_name = ?
+              AND dataset = ?
+            """,
+            (config.experiment_id, source, model.api_name, config.dataset_name),
+        ).fetchall()
+    status_by_job = {(str(row["instance_id"]), int(row["rollout_index"] or 0)): str(row["status"]) for row in rows}
+    terminal = {DONE_STATUS, ERROR_STATUS}
+    return [job for job in rollout_jobs if status_by_job.get(job) not in terminal]
+
+
+def _count_rollout_records(path: Path) -> int:
+    if not path.exists():
+        return 0
+    return sum(1 for _record in iter_records(path))
+
+
 async def run_model_phase(
     *,
     config: BatchConfig,
@@ -547,22 +588,28 @@ async def run_model_phase(
         run_dir=run_dir,
         missing_jobs=missing_jobs,
         config=config,
+        model=model,
         bonus_map_dir=bonus_map_dir,
     )
     model_env = dict(env)
     model_env["P2A_THIRD_PARTY_MODEL"] = model.api_name
 
     rollouts_path = run_dir / "rollouts.jsonl"
-    details_path = run_dir / "details.jsonl"
     returncode, output = await _run_subprocess(command, env=model_env, timeout_s=_duration_seconds(config.run_timeout))
     log_path = run_dir / "run.log"
     log_path.write_text(output, encoding="utf-8")
     if returncode != 0:
-        _mark_missing_error(
+        unfinished_jobs = _remaining_unfinished_jobs(
             config.db_path,
             config=config,
             model=model,
             rollout_jobs=missing_jobs,
+        )
+        _mark_missing_error(
+            config.db_path,
+            config=config,
+            model=model,
+            rollout_jobs=unfinished_jobs,
             error=f"third_party_eval exited {returncode}; see {log_path}",
         )
         return {
@@ -572,20 +619,10 @@ async def run_model_phase(
             "returncode": returncode,
             "log": str(log_path),
             "n_missing": len(missing_jobs),
+            "n_persisted": len(missing_jobs) - len(unfinished_jobs),
         }
 
-    with ensure_db(config.db_path) as conn:
-        n_ingested = ingest_artifacts(
-            conn,
-            experiment_id=config.experiment_id,
-            provider_source=source,
-            model_api_name=model.api_name,
-            model_label=model.label,
-            dataset=config.dataset_name,
-            rollouts_path=rollouts_path,
-            details_path=details_path,
-        )
-        conn.commit()
+    n_ingested = _count_rollout_records(rollouts_path)
     system_error = _system_error_summary(rollouts_path)
     if system_error is not None:
         return {

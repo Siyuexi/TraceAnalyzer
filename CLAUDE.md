@@ -38,6 +38,19 @@ touching this tree. The research-level `CLAUDE.md` is at the repo root.
 6. **Training runtime = uv-managed `.venv` on native CUDA 13.0.** Launchers default
    to `/usr/local/cuda-13.0` and the locked cu130 stack; do not add a parallel
    pip-managed runtime path.
+7. **Precompute and rollout MUST share execution semantics (INVIOLABLE — see root
+   `FACTS.md` FACT-001).** The bonus map / golden call graph is built by the
+   precompute path; its supervision is applied to the rollout path. Both MUST use
+   the *same* command-execution interface and the *same* sandbox env (PATH / venv /
+   cwd / shell init), or the supervision no longer matches what the agent ran.
+   Current ARL rollout execution uses `ArlRuntime.run_in_session` over
+   `ManagedSession.execute`, seeds the configured repo cwd (`session_cwd`, `/testbed`
+   for R2E and `/app` for SWE-Bench-Pro), preserves `cd`/exported env through
+   runtime state files, and strips terminal control sequences from observations.
+   `InteractiveShellClient` is a human/debug readline PTY and must not be used for
+   model/tool command execution. Any change to one path's exec interface or env
+   MUST be mirrored to the other; do not add a precompute-only or rollout-only
+   execution nuance.
 
 ## Asset and artifact paths
 
@@ -116,8 +129,10 @@ touching this tree. The research-level `CLAUDE.md` is at the repo root.
   score fields. New collection paths should store basic facts such as resolved
   state, token usage, runtime, artifacts, and raw rollout content, but should
   not populate localization score columns, `metrics_json.detail`, or pattern
-  flags. If dashboard-computed scores are persisted later, the write path is
-  one-way dashboard -> DB and the default read path still recomputes.
+  flags. The live dashboard may persist `metrics_json.detail` only through the
+  one-way dashboard -> DB cache writer, and the read path must validate the
+  fingerprint against scorer version, scoring params, raw rollout hash, and
+  bonus-map hash before using it.
 - Treat node source code as bonus-map data. Dashboard Node Source must read full
   callable source from the inferred or explicit P2A bonus-map directory; DB
   `source_preview` fields are only compatibility fallbacks for old artifacts.

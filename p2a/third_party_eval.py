@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+from collections.abc import Callable
 import json
 import os
 from pathlib import Path
@@ -18,7 +19,7 @@ import yaml
 from p2a.api_providers import make_chat_model, normalize_provider_config, provider_source
 from p2a.bonus_map_scope import parse_bonus_map_instance_filter, select_rows_by_bonus_map_scope
 from p2a.core import BonusMapStore
-from p2a.eval_cache import ensure_db, ingest_artifacts, upsert_experiment
+from p2a.eval_cache import ensure_db, ingest_artifacts, upsert_experiment, upsert_rollout_record
 from p2a.eval_fault_localization import (
     _json_default,
     iter_records,
@@ -81,6 +82,7 @@ SYSTEM_ERROR_KINDS = {
     "network_error",
     "runtime_timeout",
 }
+RecordSink = Callable[[dict[str, Any]], Any]
 
 
 def classify_error(error: BaseException | str | None) -> str | None:
@@ -251,6 +253,14 @@ def _as_jsonable(value: Any) -> Any:
     return value
 
 
+def _assistant_metadata(interaction_result: dict[str, Any]) -> dict[str, Any]:
+    rollout_cache = interaction_result.get("rollout_cache") if isinstance(interaction_result, dict) else {}
+    if not isinstance(rollout_cache, dict):
+        return {}
+    metadata = rollout_cache.get("internal_api_assistant_metadata")
+    return _as_jsonable(metadata) if isinstance(metadata, dict) else {}
+
+
 def _load_rows(path: Path) -> list[dict[str, Any]]:
     if path.suffix.lower() == ".parquet":
         import pandas as pd
@@ -376,7 +386,7 @@ def _make_env(row: dict[str, Any], *, instance_id: str, deployment: str):
 
     env_dict = build_agent_env_config(row, instance_id=instance_id, deployment=deployment)
     if env_dict["deployment"].get("type") == "arl":
-        env_dict["deployment"]["require_interactive_shell"] = True
+        env_dict["deployment"]["require_bash_session"] = True
         env_config = make_env_config(
             env_dict["deployment"],
             env_variables=env_dict.get("env_variables"),
@@ -463,21 +473,42 @@ async def _install_tools(
 
 def build_step_traces(interaction_result: dict[str, Any]) -> list[dict[str, Any]]:
     messages = interaction_result.get("messages") or []
-    assistant_messages = [message for message in messages if isinstance(message, dict) and message.get("role") == "assistant"]
+    assistant_messages = [
+        (message_index, message)
+        for message_index, message in enumerate(messages)
+        if isinstance(message, dict) and message.get("role") == "assistant"
+    ]
+    assistant_metadata = _assistant_metadata(interaction_result)
     traces = []
     for idx, step in enumerate(interaction_result.get("trajectory") or []):
         step_data = _as_jsonable(step)
-        message = assistant_messages[idx] if idx < len(assistant_messages) else {}
-        traces.append(
-            {
-                "step_idx": int(step_data.get("step_idx", idx + 1)),
-                "response_text": step_data.get("response") or message.get("content") or "",
-                "thought": step_data.get("thought") or "",
-                "tool_calls": _as_jsonable(message.get("tool_calls") or []),
-                "tool_results": _as_jsonable(step_data.get("tool_results") or []),
-                "exit_reason": step_data.get("exit_reason"),
-            }
+        message_index, message = assistant_messages[idx] if idx < len(assistant_messages) else (-1, {})
+        metadata = assistant_metadata.get(str(message_index), {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        reasoning = (
+            step_data.get("reasoning")
+            or step_data.get("reasoning_content")
+            or message.get("reasoning")
+            or message.get("reasoning_content")
+            or metadata.get("reasoning_content")
+            or ""
         )
+        trace = {
+            "step_idx": int(step_data.get("step_idx", idx + 1)),
+            "response_text": step_data.get("response") or message.get("content") or "",
+            "thought": step_data.get("thought") or "",
+            "tool_calls": _as_jsonable(message.get("tool_calls") or []),
+            "tool_results": _as_jsonable(step_data.get("tool_results") or []),
+            "exit_reason": step_data.get("exit_reason"),
+        }
+        if reasoning:
+            trace["reasoning"] = reasoning
+            trace["reasoning_content"] = reasoning
+        for key in ("reasoning_blocks", "text_blocks"):
+            if metadata.get(key):
+                trace[key] = _as_jsonable(metadata[key])
+        traces.append(trace)
     return traces
 
 
@@ -501,9 +532,13 @@ def build_dump_record(
         extra_info.setdefault("instance_id", instance_id)
     extra_info.setdefault("data_source", _data_source(row))
 
-    trajectory = _as_jsonable((interaction_result or {}).get("trajectory") or [])
-    messages = _as_jsonable((interaction_result or {}).get("messages") or [])
-    traces = build_step_traces(interaction_result or {})
+    interaction_result = interaction_result or {}
+    trajectory = _as_jsonable(interaction_result.get("trajectory") or [])
+    messages = _as_jsonable(interaction_result.get("messages") or [])
+    traces = build_step_traces(interaction_result)
+    assistant_metadata = _assistant_metadata(interaction_result)
+    rollout_cache = interaction_result.get("rollout_cache")
+    rollout_cache = rollout_cache if isinstance(rollout_cache, dict) else {}
     responses = [trace["response_text"] for trace in traces if trace.get("response_text")]
     termination_reason = trajectory[-1].get("exit_reason") if trajectory else "error" if error else "unknown"
 
@@ -519,20 +554,101 @@ def build_dump_record(
         "messages": messages,
         "trajectory": trajectory,
         "p2a_step_traces": traces,
+        "assistant_metadata": assistant_metadata,
         "response_text": "\n".join(responses),
         "reward": reward_score,
         "reward_details": _as_jsonable(reward_details),
         "resolved": bool(reward_details.get("resolved")) if isinstance(reward_details, dict) else None,
         "termination_reason": termination_reason,
-        "execution_time": (interaction_result or {}).get("execution_time"),
-        "metrics": _as_jsonable((interaction_result or {}).get("rollout_cache", {}).get("metrics", {})),
-        "token_usage": _as_jsonable((interaction_result or {}).get("rollout_cache", {}).get("token_usage", {})),
+        "execution_time": interaction_result.get("execution_time"),
+        "metrics": _as_jsonable(rollout_cache.get("metrics", {})),
+        "token_usage": _as_jsonable(rollout_cache.get("token_usage", {})),
         "extra_info": extra_info,
         "error": error,
         "error_kind": error_kind,
         "error_stage": error_stage,
         "system_error": is_system_error_kind(error_kind),
     }
+
+
+class IncrementalRolloutSink:
+    """Serialize completed rollout records to JSONL and the eval cache immediately."""
+
+    def __init__(
+        self,
+        *,
+        rollouts_path: Path,
+        db_path: Path | None = None,
+        experiment_id: str | None = None,
+        provider_source_name: str | None = None,
+        model_api_name: str | None = None,
+        model_label: str | None = None,
+        dataset_name: str | None = None,
+        config_snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        self.rollouts_path = rollouts_path
+        self.db_path = db_path
+        self.experiment_id = experiment_id
+        self.provider_source_name = provider_source_name
+        self.model_api_name = model_api_name
+        self.model_label = model_label
+        self.dataset_name = dataset_name
+        self.config_snapshot = config_snapshot or {}
+        self.count = 0
+        self.n_cached = 0
+        self._lock = asyncio.Lock()
+
+    def prepare(self) -> None:
+        self.rollouts_path.parent.mkdir(parents=True, exist_ok=True)
+        self.rollouts_path.touch(exist_ok=True)
+        if self.db_path:
+            required = {
+                "experiment_id": self.experiment_id,
+                "provider_source_name": self.provider_source_name,
+                "model_api_name": self.model_api_name,
+                "model_label": self.model_label,
+                "dataset_name": self.dataset_name,
+            }
+            missing = [name for name, value in required.items() if not value]
+            if missing:
+                raise ValueError(f"--cache-db requires {', '.join(missing)}")
+            with ensure_db(self.db_path) as conn:
+                upsert_experiment(
+                    conn,
+                    experiment_id=str(self.experiment_id),
+                    provider_source=str(self.provider_source_name),
+                    dataset=str(self.dataset_name),
+                    config_snapshot=self.config_snapshot,
+                )
+                conn.commit()
+
+    async def __call__(self, record: dict[str, Any]) -> None:
+        async with self._lock:
+            if self.db_path:
+                with ensure_db(self.db_path) as conn:
+                    upsert_rollout_record(
+                        conn,
+                        experiment_id=str(self.experiment_id),
+                        provider_source=str(self.provider_source_name),
+                        model_api_name=str(self.model_api_name),
+                        model_label=str(self.model_label),
+                        dataset=str(self.dataset_name),
+                        record=record,
+                        artifact_rollouts=self.rollouts_path,
+                    )
+                    conn.commit()
+                self.n_cached += 1
+            with self.rollouts_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, default=_json_default, ensure_ascii=False) + "\n")
+            self.count += 1
+
+
+async def _emit_record(record_sink: RecordSink | None, record: dict[str, Any]) -> None:
+    if record_sink is None:
+        return
+    result = record_sink(record)
+    if asyncio.iscoroutine(result):
+        await result
 
 
 async def run_provider_smoke(model_cfg: dict[str, Any], provider_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -657,6 +773,8 @@ async def run_batch(
     rollouts_per_instance: int = 1,
     per_instance_parallelism: int = 1,
     rollout_jobs: list[tuple[str, int]] | None = None,
+    record_sink: RecordSink | None = None,
+    collect_records: bool = True,
 ) -> list[dict[str, Any]]:
     semaphore = asyncio.Semaphore(max(n_parallel, 1))
     row_by_id = {_instance_id(row): row for row in rows}
@@ -672,18 +790,26 @@ async def run_batch(
             instance_semaphores[instance_id] = asyncio.Semaphore(max(1, int(per_instance_parallelism or 1)))
         return instance_semaphores[instance_id]
 
-    async def guarded(row: dict[str, Any], rollout_index: int) -> dict[str, Any]:
+    async def guarded(job_index: int, row: dict[str, Any], rollout_index: int) -> tuple[int, dict[str, Any]]:
         async with semaphore:
             async with instance_semaphore(row):
-                return await run_one(
+                record = await run_one(
                     row,
                     model_cfg=model_cfg,
                     agent_cfg=agent_cfg,
                     provider_cfg=provider_cfg,
                     rollout_index=rollout_index,
                 )
+                return job_index, record
 
-    return await asyncio.gather(*(guarded(row, rollout_index) for row, rollout_index in jobs))
+    tasks = [asyncio.create_task(guarded(index, row, rollout_index)) for index, (row, rollout_index) in enumerate(jobs)]
+    records_by_index: dict[int, dict[str, Any]] = {}
+    for task in asyncio.as_completed(tasks):
+        index, record = await task
+        await _emit_record(record_sink, record)
+        if collect_records:
+            records_by_index[index] = record
+    return [records_by_index[index] for index in sorted(records_by_index)]
 
 
 def write_analysis(
@@ -888,8 +1014,18 @@ def main() -> int:
     if scope_metadata:
         config.setdefault("experiment", {})["scope"] = scope_metadata
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    records = asyncio.run(
+    sink = IncrementalRolloutSink(
+        rollouts_path=args.out,
+        db_path=args.cache_db,
+        experiment_id=args.experiment_id or f"third-party-{args.dataset_name or _data_source(rows[0])}",
+        provider_source_name=provider_source(provider_cfg),
+        model_api_name=model_cfg["model_name"],
+        model_label=args.model_label or model_cfg["model_name"],
+        dataset_name=args.dataset_name or _data_source(rows[0]),
+        config_snapshot=_redact_config(config),
+    )
+    sink.prepare()
+    asyncio.run(
         run_batch(
             rows,
             model_cfg=model_cfg,
@@ -899,10 +1035,11 @@ def main() -> int:
             rollouts_per_instance=rollouts_per_instance,
             per_instance_parallelism=per_instance_parallelism,
             rollout_jobs=args.rollout_job or None,
+            record_sink=sink,
+            collect_records=False,
         )
     )
-    write_jsonl(args.out, records)
-    print(json.dumps({"rollouts": str(args.out), "n_records": len(records)}, indent=2))
+    print(json.dumps({"rollouts": str(args.out), "n_records": sink.count}, indent=2))
 
     if args.bonus_map_dir:
         details_path = args.details_out or args.out.with_suffix(".details.jsonl")
@@ -920,19 +1057,7 @@ def main() -> int:
     else:
         details_path = None
     if args.cache_db:
-        dataset_name = args.dataset_name or _data_source(rows[0])
-        n_cached = cache_rollouts(
-            db_path=args.cache_db,
-            experiment_id=args.experiment_id or f"third-party-{dataset_name}",
-            provider_source_name=provider_source(provider_cfg),
-            model_api_name=model_cfg["model_name"],
-            model_label=args.model_label or model_cfg["model_name"],
-            dataset_name=dataset_name,
-            config_snapshot=_redact_config(config),
-            rollouts_path=args.out,
-            details_path=details_path,
-        )
-        print(json.dumps({"cache_db": str(args.cache_db), "n_cached": n_cached}, indent=2))
+        print(json.dumps({"cache_db": str(args.cache_db), "n_cached": sink.n_cached}, indent=2))
     return 0
 
 

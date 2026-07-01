@@ -6,6 +6,7 @@ import json
 import os
 import pickle
 import re
+import hashlib
 import sqlite3
 import time
 from collections import defaultdict
@@ -20,7 +21,7 @@ from p2a.bonus_map_scope import (
     canonical_detail_case_type,
 )
 from p2a.core import BonusMapStore, _bonus_map_candidate_ids, normalize_action, reads_from_step_trace, writes_from_step_trace
-from p2a.eval_cache import aggregate_model_metrics, connect_readonly, json_loads
+from p2a.eval_cache import aggregate_model_metrics, connect, connect_readonly, init_db, json_dumps, json_loads, write_dashboard_detail_cache
 from p2a.eval_fault_localization import (
     _json_default,
     _kendall_order,
@@ -35,6 +36,7 @@ from p2a.hf_assets import shared_p2a_data_dir
 
 
 DASHBOARD_SCHEMA_VERSION = "p2a_unified_dashboard_v1"
+DASHBOARD_DETAIL_CACHE_VERSION = "dashboard_detail_cache_v1"
 THIRD_PARTY_PROVIDER_SOURCES = {
     "internal_api",
     "openai_compatible",
@@ -112,6 +114,7 @@ class DashboardRequest:
     near_threshold: float = 0.5
     m_max: float = 3.0
     detail_limit: int = 500
+    defer_db_scoring: bool = False
 
 
 def _safe_json_loads(value: str | None, default: Any) -> Any:
@@ -121,6 +124,21 @@ def _safe_json_loads(value: str | None, default: Any) -> Any:
 
 def _jsonable(value: Any) -> Any:
     return json.loads(json.dumps(value, default=_json_default, ensure_ascii=False))
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def _sha256_file(path: Path) -> str | None:
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return None
 
 
 def _as_mapping(value: Any) -> dict[str, Any]:
@@ -262,6 +280,24 @@ def _content_block_text(value: Any, *, types: set[str]) -> str:
     return "".join(parts)
 
 
+def _join_unique_text(parts: Iterable[str | None]) -> str:
+    selected: list[str] = []
+    seen_blocks: set[str] = set()
+    for part in parts:
+        if not part:
+            continue
+        text = str(part).strip()
+        if not text:
+            continue
+        blocks = [block.strip() for block in re.split(r"\n\s*\n", text) if block.strip()]
+        block_keys = blocks or [text]
+        if all(block in seen_blocks for block in block_keys):
+            continue
+        selected.append(text)
+        seen_blocks.update(block_keys)
+    return "\n\n".join(selected)
+
+
 def _split_reasoning_and_chat(trace: dict[str, Any], tool_calls: list[Any]) -> tuple[str, str, list[dict[str, Any]]]:
     response_text = _first_text(trace, ("completion", "response_text", "response", "assistant_response", "content"))
     reasoning = _first_text(trace, ("reasoning", "reasoning_content", "reasoning_text"))
@@ -272,13 +308,13 @@ def _split_reasoning_and_chat(trace: dict[str, Any], tool_calls: list[Any]) -> t
     if content_reasoning:
         reasoning_parts.append(content_reasoning)
     if reasoning_parts:
-        reasoning = "\n\n".join([part for part in [reasoning, *reasoning_parts] if part])
+        reasoning = _join_unique_text([reasoning, *reasoning_parts])
     text_block_chat = "\n\n".join(_block_values(trace.get("text_blocks")))
     if not response_text:
         response_text = text_block_chat or _content_block_text(trace.get("content"), types={"text", "output_text", "message"})
     think_parts = [match.group(1).strip() for match in THINK_BLOCK_RE.finditer(response_text) if match.group(1).strip()]
     if think_parts:
-        reasoning = "\n\n".join([part for part in [reasoning, *think_parts] if part])
+        reasoning = _join_unique_text([reasoning, *think_parts])
     chat = THINK_BLOCK_RE.sub("", response_text).strip()
     parsed_calls = [_parsed_tool_call(call) for call in tool_calls]
     if not parsed_calls:
@@ -990,6 +1026,94 @@ def _empty_summary(request: DashboardRequest) -> dict[str, Any]:
     ))
 
 
+def _record_dashboard_cache(record: dict[str, Any]) -> dict[str, Any]:
+    cache = record.get("_dashboard_cache")
+    return cache if isinstance(cache, dict) else {}
+
+
+def _bonus_map_file_for_instance(bonus_map_dir: Path | None, instance_id: str) -> Path | None:
+    if bonus_map_dir is None or not instance_id:
+        return None
+    for candidate_id in _bonus_map_candidate_ids(instance_id):
+        path = bonus_map_dir / f"{candidate_id}.json"
+        if path.exists():
+            return path
+    return None
+
+
+def _dashboard_detail_fingerprint(record: dict[str, Any], *, request: DashboardRequest) -> str | None:
+    if request.bonus_map_dir is None:
+        return None
+    cache = _record_dashboard_cache(record)
+    raw_hash = cache.get("raw_rollout_sha256")
+    if not raw_hash:
+        raw_hash = _sha256_text(json_dumps(_scoreable_record(record)))
+    instance_id = str(record.get("instance_id") or "")
+    bonus_map_file = _bonus_map_file_for_instance(request.bonus_map_dir, instance_id)
+    payload = {
+        "version": DASHBOARD_DETAIL_CACHE_VERSION,
+        "tracking_mode": request.tracking_mode,
+        "near_threshold": request.near_threshold,
+        "m_max": request.m_max,
+        "raw_rollout_sha256": raw_hash,
+        "bonus_map_path": str(bonus_map_file) if bonus_map_file else None,
+        "bonus_map_sha256": _sha256_file(bonus_map_file) if bonus_map_file else None,
+    }
+    return _sha256_text(json_dumps(payload))
+
+
+def _cached_dashboard_detail(record: dict[str, Any], fingerprint: str | None) -> dict[str, Any] | None:
+    if not fingerprint:
+        return None
+    cache = _record_dashboard_cache(record)
+    if cache.get("fingerprint") != fingerprint:
+        return None
+    detail = cache.get("detail")
+    return dict(detail) if isinstance(detail, dict) and detail else None
+
+
+def _scoreable_record(record: dict[str, Any]) -> dict[str, Any]:
+    if "_dashboard_cache" not in record:
+        return record
+    return {key: value for key, value in record.items() if key != "_dashboard_cache"}
+
+
+def _write_pending_dashboard_detail_cache(
+    request: DashboardRequest,
+    pending_writes: list[tuple[int, str, dict[str, Any]]],
+) -> None:
+    if not request.db_path or not pending_writes:
+        return
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = connect(request.db_path, timeout=0.5)
+        init_db(conn)
+        for cell_id, fingerprint, detail in pending_writes:
+            write_dashboard_detail_cache(conn, cell_id=cell_id, fingerprint=fingerprint, detail=detail)
+        conn.commit()
+    except (OSError, sqlite3.Error):
+        if conn is not None:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _deferred_dashboard_detail(record: dict[str, Any], *, index: int) -> dict[str, Any]:
+    return {
+        "record_index": index,
+        "instance_id": _row_instance_id(record),
+        "data_source": _record_dataset(record) or "unknown",
+        "has_step_traces": bool(record.get("p2a_step_traces")),
+        "not_path_evaluable_reason": "dashboard_cache_pending",
+        "not_chain_evaluable_reason": "dashboard_cache_pending",
+        "dashboard_cache_pending": True,
+    }
+
+
 def _score_records(
     records: Iterable[dict[str, Any]],
     *,
@@ -1000,16 +1124,28 @@ def _score_records(
         return []
     bonus_maps = BonusMapStore(str(request.bonus_map_dir))
     scored = []
+    pending_writes: list[tuple[int, str, dict[str, Any]]] = []
     for index, record in enumerate(records):
-        detail = score_record(
-            record,
-            index=start_index + index,
-            bonus_maps=bonus_maps,
-            tracking_mode=request.tracking_mode,
-            near_threshold=request.near_threshold,
-            m_max=request.m_max,
-        )
+        fingerprint = _dashboard_detail_fingerprint(record, request=request)
+        cached = _cached_dashboard_detail(record, fingerprint)
+        if cached is not None:
+            detail = cached
+        elif request.defer_db_scoring and _record_dashboard_cache(record).get("cell_id"):
+            detail = _deferred_dashboard_detail(record, index=start_index + index)
+        else:
+            detail = score_record(
+                _scoreable_record(record),
+                index=start_index + index,
+                bonus_maps=bonus_maps,
+                tracking_mode=request.tracking_mode,
+                near_threshold=request.near_threshold,
+                m_max=request.m_max,
+            )
+            cache = _record_dashboard_cache(record)
+            if fingerprint and cache.get("cell_id"):
+                pending_writes.append((int(cache["cell_id"]), fingerprint, detail))
         scored.append(_enrich_detail_from_record(detail, record, request))
+    _write_pending_dashboard_detail_cache(request, pending_writes)
     return scored
 
 
@@ -1145,9 +1281,12 @@ def _load_db_records(conn: sqlite3.Connection, request: DashboardRequest) -> tup
     patch_sql = "r.golden_patch" if "golden_patch" in raw_columns else "NULL AS golden_patch"
     rollout_index_sql = "c.rollout_index" if "rollout_index" in cell_columns else "0 AS rollout_index"
     rollout_id_sql = "c.rollout_id" if "rollout_id" in cell_columns else "NULL AS rollout_id"
+    metric_columns = _sqlite_columns(conn, "quantitative_metrics")
+    fingerprint_sql = "q.fingerprint" if "fingerprint" in metric_columns else "NULL AS fingerprint"
     rows = conn.execute(
         f"""
         SELECT
+          c.id AS cell_id,
           c.experiment_id,
           c.provider_source,
           c.dataset,
@@ -1163,6 +1302,7 @@ def _load_db_records(conn: sqlite3.Connection, request: DashboardRequest) -> tup
           {issue_sql},
           {patch_sql},
           r.rollout_json,
+          {fingerprint_sql},
           q.metrics_json
         FROM run_cells c
         LEFT JOIN raw_rollouts r ON r.cell_id = c.id
@@ -1177,7 +1317,22 @@ def _load_db_records(conn: sqlite3.Connection, request: DashboardRequest) -> tup
     stored_details: list[dict[str, Any]] = []
     for row in rows:
         record = _safe_json_loads(row["rollout_json"], {})
+        metrics = _safe_json_loads(row["metrics_json"], {})
+        detail = metrics.get("detail") if isinstance(metrics, dict) else None
         if isinstance(record, dict) and record:
+            if isinstance(detail, dict) and detail:
+                record["_dashboard_cache"] = {
+                    "cell_id": row["cell_id"],
+                    "fingerprint": row["fingerprint"],
+                    "raw_rollout_sha256": _sha256_text(str(row["rollout_json"] or "")),
+                    "detail": detail,
+                }
+            else:
+                record["_dashboard_cache"] = {
+                    "cell_id": row["cell_id"],
+                    "fingerprint": row["fingerprint"],
+                    "raw_rollout_sha256": _sha256_text(str(row["rollout_json"] or "")),
+                }
             record.setdefault("experiment_id", row["experiment_id"])
             record.setdefault("provider_source", row["provider_source"])
             record.setdefault("data_source", row["dataset"])
@@ -1194,8 +1349,6 @@ def _load_db_records(conn: sqlite3.Connection, request: DashboardRequest) -> tup
                 record["golden_patch"] = row["golden_patch"]
             records.append(record)
 
-        metrics = _safe_json_loads(row["metrics_json"], {})
-        detail = metrics.get("detail") if isinstance(metrics, dict) else None
         if isinstance(detail, dict) and detail:
             if isinstance(record, dict) and record:
                 stored_details.append(_enrich_detail_from_record(detail, record, request))
@@ -1454,6 +1607,25 @@ def _bonus_map_dir_has_instance(candidate: Path, instance_id: str) -> bool:
     return any((candidate / f"{candidate_id}.json").exists() for candidate_id in _bonus_map_candidate_ids(instance_id))
 
 
+_BONUS_MAP_DIR_CACHE: dict[tuple[Any, ...], dict[str, Path]] = {}
+
+
+def _source_version(path: Path | None) -> tuple[str, int, int] | None:
+    if path is None:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path), -1, -1)
+    return (str(path), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _records_version(raw_records: Iterable[dict[str, Any]], details: Iterable[dict[str, Any]]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    record_bits = tuple(sorted(str(record.get("instance_id") or "") for record in raw_records if record.get("instance_id")))
+    detail_bits = tuple(sorted(str(detail.get("instance_id") or "") for detail in details if detail.get("instance_id")))
+    return record_bits, detail_bits
+
+
 def _effective_bonus_map_dirs(
     request: DashboardRequest,
     raw_records: Iterable[dict[str, Any]],
@@ -1461,14 +1633,30 @@ def _effective_bonus_map_dirs(
 ) -> dict[str, Path]:
     raw_records = list(raw_records)
     details = list(details)
+    cache_key = (
+        str(request.bonus_map_dir) if request.bonus_map_dir is not None else None,
+        request.dataset,
+        _source_version(request.db_path),
+        _source_version(request.log_dir),
+        _source_version(request.data_file),
+        _records_version(raw_records, details),
+        tuple((str(path), _source_version(path)) for path in request.rollouts),
+        tuple((str(path), _source_version(path)) for path in request.details),
+    )
+    cached = _BONUS_MAP_DIR_CACHE.get(cache_key)
+    if cached is not None:
+        return dict(cached)
     datasets = {name for name in [_record_dataset(record) for record in raw_records] if name}
     datasets.update(name for name in [_detail_dataset(detail) for detail in details] if name)
     if request.dataset:
         datasets = {request.dataset}
     if request.bonus_map_dir is not None:
         if not datasets:
-            return {"": request.bonus_map_dir}
-        return {dataset: request.bonus_map_dir for dataset in datasets}
+            result = {"": request.bonus_map_dir}
+        else:
+            result = {dataset: request.bonus_map_dir for dataset in datasets}
+        _BONUS_MAP_DIR_CACHE[cache_key] = dict(result)
+        return result
     if not datasets:
         return {}
     instance_ids_by_dataset = _dataset_instance_ids(raw_records, details)
@@ -1482,6 +1670,7 @@ def _effective_bonus_map_dirs(
             ):
                 bonus_map_dirs[dataset] = candidate
                 break
+    _BONUS_MAP_DIR_CACHE[cache_key] = dict(bonus_map_dirs)
     return bonus_map_dirs
 
 
