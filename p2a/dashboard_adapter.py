@@ -264,15 +264,19 @@ def _content_block_text(value: Any, *, types: set[str]) -> str:
 
 def _join_unique_text(parts: Iterable[str | None]) -> str:
     selected: list[str] = []
-    seen: set[str] = set()
+    seen_blocks: set[str] = set()
     for part in parts:
         if not part:
             continue
         text = str(part).strip()
-        if not text or text in seen:
+        if not text:
+            continue
+        blocks = [block.strip() for block in re.split(r"\n\s*\n", text) if block.strip()]
+        block_keys = blocks or [text]
+        if all(block in seen_blocks for block in block_keys):
             continue
         selected.append(text)
-        seen.add(text)
+        seen_blocks.update(block_keys)
     return "\n\n".join(selected)
 
 

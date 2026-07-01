@@ -386,7 +386,7 @@ def _make_env(row: dict[str, Any], *, instance_id: str, deployment: str):
 
     env_dict = build_agent_env_config(row, instance_id=instance_id, deployment=deployment)
     if env_dict["deployment"].get("type") == "arl":
-        env_dict["deployment"]["require_interactive_shell"] = True
+        env_dict["deployment"]["require_bash_session"] = True
         env_config = make_env_config(
             env_dict["deployment"],
             env_variables=env_dict.get("env_variables"),
@@ -600,7 +600,7 @@ class IncrementalRolloutSink:
 
     def prepare(self) -> None:
         self.rollouts_path.parent.mkdir(parents=True, exist_ok=True)
-        self.rollouts_path.write_text("", encoding="utf-8")
+        self.rollouts_path.touch(exist_ok=True)
         if self.db_path:
             required = {
                 "experiment_id": self.experiment_id,

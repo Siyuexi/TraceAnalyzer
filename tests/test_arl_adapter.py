@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
@@ -92,7 +93,7 @@ class ArlAdapterTests(unittest.TestCase):
             _ = deployment.runtime
 
     def test_arl_deployment_filters_managed_session_kwargs_by_sdk_signature(self) -> None:
-        from env.deployment import _supported_kwargs
+        from env.deployment import _supported_kwargs, _validate_managed_session_signature
 
         def old_sdk(image, experiment_id, namespace, gateway_url, timeout, workspace_dir, max_replicas):
             return None
@@ -121,6 +122,10 @@ class ArlAdapterTests(unittest.TestCase):
             set(_supported_kwargs(new_sdk, kwargs)),
             {"image", "experiment_id", "gateway_url", "timeout", "resources", "workspace_dir", "profile", "api_key"},
         )
+        with self.assertRaisesRegex(RuntimeError, "namespace"):
+            _validate_managed_session_signature(new_sdk, {**kwargs, "namespace": "p2a"})
+        with self.assertRaisesRegex(RuntimeError, "max_replicas"):
+            _validate_managed_session_signature(new_sdk, {**kwargs, "namespace": "default", "max_replicas": 2})
 
     def test_arl_deployment_attaches_managed_session_without_pool_ref(self) -> None:
         from env.deployment import _attach_managed_session_payload, _missing_pool_ref_payload
@@ -168,59 +173,12 @@ class ArlAdapterTests(unittest.TestCase):
         runtime = ArlRuntime(FakeSession(), run_id="run-1")
         self.assertEqual(runtime._arl_session_id, "arl-session-1")
 
-    def test_arl_runtime_filters_interactive_shell_kwargs_by_sdk_signature(self) -> None:
-        from env.runtime import _supported_kwargs
-
-        def old_shell(gateway_url):
-            return None
-
-        def new_shell(gateway_url, api_key=None):
-            return None
-
-        kwargs = {"gateway_url": "http://gateway", "api_key": "secret"}
-
-        self.assertEqual(_supported_kwargs(old_shell, kwargs), {"gateway_url": "http://gateway"})
-        self.assertEqual(_supported_kwargs(new_shell, kwargs), kwargs)
-
-    def test_arl_runtime_strips_pty_control_sequences_from_shell_output(self) -> None:
-        from env.runtime import ArlRuntime, _strip_terminal_controls
-
-        class FakeClient:
-            base_url = "http://gateway"
-
-        class FakeSession:
-            _client = FakeClient()
-            _session_id = "arl-session-1"
-
-        class FakeShell:
-            def __init__(self):
-                self.inputs = []
-                self.sent = False
-
-            def send_input(self, data):
-                self.inputs.append(data)
-
-            def read_message(self, timeout):
-                if self.sent:
-                    return None
-                self.sent = True
-                marker = self.inputs[-1].split('"')[1].split(":")[0]
-                return SimpleNamespace(
-                    type="output",
-                    data=f"\x1b[?2004l\rknown output\r\n\x1b[?2004h{marker}:0\r\n",
-                )
-
-        runtime = ArlRuntime(FakeSession(), run_id="run-1")
-        runtime._shells["default"] = FakeShell()
-
-        output, exit_code, failure = runtime._run_in_shell_sync("default", "printf known", 1.0)
+    def test_arl_runtime_strips_terminal_control_sequences(self) -> None:
+        from env.runtime import _strip_terminal_controls
 
         self.assertEqual(_strip_terminal_controls("\x1b[?2004hhello\r\n"), "hello\n")
-        self.assertEqual(output, "known output")
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(failure, "")
 
-    def test_arl_runtime_does_not_replay_one_time_setup_on_reconnect(self) -> None:
+    def test_arl_runtime_execute_backed_sessions_replay_only_repeatable_startup(self) -> None:
         from env.runtime import ArlRuntime
 
         class FakeClient:
@@ -230,53 +188,117 @@ class ArlAdapterTests(unittest.TestCase):
             _client = FakeClient()
             _session_id = "arl-session-1"
 
-        class FakeShell:
-            instances = []
-
-            def __init__(self, **_kwargs):
-                self.commands = []
-                self.messages = []
-                FakeShell.instances.append(self)
-
-            def connect(self, _session_id):
-                return None
-
-            def send_input(self, data):
-                if data.startswith("echo \"__ARL_END_"):
-                    marker = data.split('"')[1].split(":")[0]
-                    self.messages.append(SimpleNamespace(type="output", data=f"{marker}:0\n"))
-                elif not data.startswith("export PS1"):
-                    self.commands.append(data.strip())
-
-            def read_message(self, timeout):
-                return self.messages.pop(0) if self.messages else None
-
-            def close(self):
-                return None
-
-        fake_arl = ModuleType("arl")
-        fake_shell_module = ModuleType("arl.interactive_shell_client")
-        fake_shell_module.InteractiveShellClient = FakeShell
-
         runtime = ArlRuntime(
             FakeSession(),
             run_id="run-1",
             startup_commands=["export PAGER=cat"],
             one_time_startup_commands=["mv /testbed/run_tests.sh /tmp/run_tests.sh"],
         )
-        with patch.dict(
-            sys.modules,
-            {
-                "arl": fake_arl,
-                "arl.interactive_shell_client": fake_shell_module,
-            },
-        ):
-            runtime._open_shell("default", None)
-            runtime._shells.pop("default")
-            runtime._open_shell("default", None)
+        scripts = []
+        commands = []
+        runtime._write_bytes_sync = lambda data, _path: scripts.append(data.decode("utf-8"))
+        runtime._exec_sync = lambda command, _timeout=None: commands.append(command) or SimpleNamespace(
+            stdout="",
+            stderr="",
+            exit_code=0,
+        )
 
-        self.assertEqual(FakeShell.instances[0].commands, ["export PAGER=cat", "mv /testbed/run_tests.sh /tmp/run_tests.sh"])
-        self.assertEqual(FakeShell.instances[1].commands, ["export PAGER=cat"])
+        runtime._ensure_session_sync("default", None)
+        runtime._initialized_sessions.remove("default")
+        runtime._ensure_session_sync("default", None)
+
+        self.assertIn("export PAGER=cat", scripts[0])
+        self.assertIn("mv /testbed/run_tests.sh /tmp/run_tests.sh", scripts[0])
+        self.assertIn("export PAGER=cat", scripts[1])
+        self.assertNotIn("mv /testbed/run_tests.sh /tmp/run_tests.sh", scripts[1])
+        self.assertEqual(len(commands), 2)
+
+    def test_arl_runtime_execute_backed_sessions_preserve_cwd_and_exported_env(self) -> None:
+        from swerex.runtime.abstract import BashAction
+
+        from env.runtime import ArlRuntime
+
+        class FakeClient:
+            base_url = "http://gateway"
+
+        class FakeSession:
+            _client = FakeClient()
+            _session_id = "arl-session-1"
+
+            def execute(self, steps):
+                results = []
+                for step in steps:
+                    command = list(step["command"])
+                    if command[:2] == ["bash", "-lc"]:
+                        command[1] = "-c"
+                    completed = subprocess.run(
+                        command,
+                        text=True,
+                        capture_output=True,
+                        timeout=step.get("timeout") or 60,
+                        check=False,
+                    )
+                    results.append(
+                        SimpleNamespace(
+                            output=SimpleNamespace(
+                                exit_code=completed.returncode,
+                                stdout=completed.stdout,
+                                stderr=completed.stderr,
+                            )
+                        )
+                    )
+                return SimpleNamespace(results=results)
+
+        runtime = ArlRuntime(FakeSession(), run_id=f"test-{uuid.uuid4().hex}")
+
+        async def _run():
+            try:
+                first = await runtime.run_in_session(
+                    BashAction(command="cd /tmp && export P2A_ARL_TEST_VALUE=kept", timeout=10),
+                )
+                second = await runtime.run_in_session(
+                    BashAction(command="printf '%s %s' \"$PWD\" \"$P2A_ARL_TEST_VALUE\"", timeout=10),
+                )
+                return first, second
+            finally:
+                await runtime.close()
+
+        first, second = asyncio.run(_run())
+
+        self.assertEqual(first.output, "")
+        self.assertEqual(first.exit_code, 0)
+        self.assertEqual(first.failure_reason, "")
+        self.assertEqual(second.exit_code, 0)
+        self.assertEqual(second.failure_reason, "")
+        self.assertEqual(second.output, "/tmp kept")
+
+    def test_arl_runtime_failed_startup_is_not_cached(self) -> None:
+        from env.runtime import ArlRuntime
+
+        class FakeClient:
+            base_url = "http://gateway"
+
+        class FakeSession:
+            _client = FakeClient()
+            _session_id = "arl-session-1"
+
+        runtime = ArlRuntime(
+            FakeSession(),
+            run_id="run-1",
+            one_time_startup_commands=["false"],
+        )
+        runtime._write_bytes_sync = lambda _data, _path: None
+        runtime._exec_sync = lambda _command, _timeout=None: SimpleNamespace(
+            stdout="failed setup",
+            stderr="",
+            exit_code=1,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "session startup failed"):
+            runtime._ensure_session_sync("default", None)
+
+        self.assertNotIn("default", runtime._initialized_sessions)
+        self.assertNotIn("default", runtime._completed_one_time_startup_sessions)
 
     def test_arl_runtime_retries_gateway_execute_refusal(self) -> None:
         from env.runtime import ArlRuntime
@@ -364,7 +386,19 @@ class ArlAdapterTests(unittest.TestCase):
 
         self.assertEqual(calls["count"], 3)
 
-    def test_deployment_config_accepts_required_interactive_shell(self) -> None:
+    def test_deployment_config_accepts_required_bash_session(self) -> None:
+        config = ArlDeploymentConfig.from_mapping(
+            {
+                "type": "arl",
+                "image": "registry.local/r2e:latest",
+                "gateway_url": "http://gateway",
+                "require_bash_session": True,
+            }
+        )
+
+        self.assertTrue(config.require_bash_session)
+
+    def test_deployment_config_accepts_legacy_required_session_alias(self) -> None:
         config = ArlDeploymentConfig.from_mapping(
             {
                 "type": "arl",
@@ -374,7 +408,7 @@ class ArlAdapterTests(unittest.TestCase):
             }
         )
 
-        self.assertTrue(config.require_interactive_shell)
+        self.assertTrue(config.require_bash_session)
 
     def test_uni_agent_sandbox_adapter_runs_post_setup_via_execute(self) -> None:
         from p2a.precompute.uni_agent_sandbox import UniAgentSandboxAdapter

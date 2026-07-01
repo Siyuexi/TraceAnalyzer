@@ -75,16 +75,23 @@ def _reward_test_args(metadata: dict[str, Any]) -> list[str]:
     return [",".join(selected_files)] if selected_files else []
 
 
+_TERMINAL_CONTROL_RE = re.compile(r"\x1b\][^\x07]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\r")
+
+
+def _strip_terminal_controls(text: str) -> str:
+    return _TERMINAL_CONTROL_RE.sub("", text)
+
+
 async def _run_env_command(env: AgentEnv, command: str, *, timeout: int | float | None = None, check: str = "ignore") -> str:
     runtime = getattr(getattr(env, "deployment", None), "runtime", None)
     execute = getattr(runtime, "execute", None)
     if callable(execute):
         response = await execute(Command(command=["bash", "-lc", command], timeout=timeout))
-        output = (response.stdout or "") + (response.stderr or "")
+        output = _strip_terminal_controls((response.stdout or "") + (response.stderr or ""))
         if check == "raise" and int(response.exit_code or 0) != 0:
             raise RuntimeError(f"command failed with exit code {response.exit_code}: {output}")
         return output
-    return await env.communicate(command, timeout=timeout, check=check)
+    return _strip_terminal_controls(await env.communicate(command, timeout=timeout, check=check))
 
 
 def _make_swebench_eval_script_list(instance, specs, env_name, repo_directory, test_patch):
@@ -167,7 +174,7 @@ class SWEBenchRewardSpec(AbstractRewardSpec):
             result["eval_completed"] = True
             result["eval_execution_time"] = execution_time
 
-            output = re.sub(r"\x1b\[[0-9;]*m|\r", "", output)
+            output = _strip_terminal_controls(output)
             eval_report = self._get_eval_report(output)
             result["eval_report"] = eval_report
             result["resolved"] = bool(eval_report["resolved"])
@@ -257,8 +264,8 @@ class SWEBenchRewardSpec(AbstractRewardSpec):
 
         eval_ref = {
             "instance_id": self.metadata["instance_id"],
-            "FAIL_TO_PASS": json.loads(self.metadata.get("FAIL_TO_PASS", "[]")),
-            "PASS_TO_PASS": json.loads(self.metadata.get("PASS_TO_PASS", "[]")),
+            "FAIL_TO_PASS": parse_string_list(self.metadata.get("FAIL_TO_PASS")),
+            "PASS_TO_PASS": parse_string_list(self.metadata.get("PASS_TO_PASS")),
         }
         repo = self.metadata["repo"]
         eval_type = EvalType.FAIL_ONLY if repo in FAIL_ONLY_REPOS else EvalType.PASS_AND_FAIL

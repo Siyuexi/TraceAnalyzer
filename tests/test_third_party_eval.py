@@ -447,6 +447,17 @@ def test_incremental_rollout_sink_writes_jsonl_and_cache_db(tmp_path):
     assert json.loads(raw["rollout_json"])["run_id"] == "run-stream"
 
 
+def test_incremental_rollout_sink_prepare_preserves_existing_jsonl(tmp_path):
+    rollout_path = tmp_path / "rollouts.jsonl"
+    existing = {"run_id": "already-done"}
+    rollout_path.write_text(json.dumps(existing) + "\n", encoding="utf-8")
+    sink = IncrementalRolloutSink(rollouts_path=rollout_path)
+
+    sink.prepare()
+
+    assert rollout_path.read_text(encoding="utf-8") == json.dumps(existing) + "\n"
+
+
 def test_eval_batch_emits_records_as_each_rollout_finishes(monkeypatch):
     async def fake_run_one(row, *, rollout_index, **_kwargs):
         if row["instance_id"] == "slow":

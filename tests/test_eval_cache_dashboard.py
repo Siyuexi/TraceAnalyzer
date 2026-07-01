@@ -1195,8 +1195,11 @@ def test_dashboard_step_inspection_deduplicates_reasoning_blocks(tmp_path):
     record["p2a_step_traces"] = [
         {
             "step_idx": 1,
-            "reasoning_content": "inspect before reading",
-            "reasoning_blocks": [{"type": "reasoning", "value": "inspect before reading"}],
+            "reasoning_content": "inspect before reading\n\nthen open the file",
+            "reasoning_blocks": [
+                {"type": "reasoning", "value": "inspect before reading"},
+                {"type": "reasoning", "value": "then open the file"},
+            ],
             "response_text": "",
             "tool_calls": [
                 {
@@ -1215,7 +1218,7 @@ def test_dashboard_step_inspection_deduplicates_reasoning_blocks(tmp_path):
     snapshot = build_dashboard_snapshot(DashboardRequest(rollouts=(rollouts,), bonus_map_dir=bonus_dir))
     step = snapshot["details"][0]["step_inspection"][0]
 
-    assert step["reasoning_text"] == "inspect before reading"
+    assert step["reasoning_text"] == "inspect before reading\n\nthen open the file"
 
 
 def test_dashboard_step_inspection_marks_root_edits_and_execution_errors(tmp_path):
