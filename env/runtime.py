@@ -503,13 +503,6 @@ class NexusRuntime(AbstractRuntime):
                     stderr = status.stderr or ""
                     output = status.output or (stdout + stderr) or ""
                     exit_code = status.exit_code if status.exit_code is not None else 0
-                    # Readiness fence: confirm session accepts commands (like ARL marker)
-                    try:
-                        await self._nexus.start_command_in_terminal_session(
-                            session_id=sid, command="true",
-                        )
-                    except Exception:
-                        pass
                     return BashObservation(
                         output=output,
                         exit_code=exit_code,
