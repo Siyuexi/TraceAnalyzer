@@ -13,7 +13,7 @@ This is the "兼容" layer: uni-agent's ``AgentEnv`` drives a swe-rex
     layer if a stable upload/download lands upstream).
 
 The SDK calls are synchronous (httpx / websockets.sync); every async method
-offloads them to a thread executor so we satisfy the async ``AbstractRuntime``
+offloads them to a worker thread so we satisfy the async ``AbstractRuntime``
 contract without blocking the event loop.
 
 This adapter intentionally does not use ARL's human-oriented interactive shell
@@ -157,12 +157,14 @@ class ArlRuntime(AbstractRuntime):
         api_key: str | None = None,
         startup_commands: list[str] | None = None,
         one_time_startup_commands: list[str] | None = None,
+        session_cwd: str | None = "/testbed",
     ) -> None:
         self._session = session
         self.run_id = run_id
         self.logger = logger or logging.getLogger(f"arl-runtime.{run_id}")
         self._gateway_url = _extract_gateway_url(session, gateway_url)
         self._api_key = api_key
+        self._session_cwd = session_cwd.strip() if isinstance(session_cwd, str) and session_cwd.strip() else None
         self._startup_commands = [command for command in (startup_commands or []) if command.strip()]
         self._one_time_startup_commands = [
             command for command in (one_time_startup_commands or []) if command.strip()
@@ -256,13 +258,16 @@ class ArlRuntime(AbstractRuntime):
 
     def _session_wrapper(self, name: str, command: str) -> str:
         state_dir = shlex.quote(self._session_state_dir(name))
+        initial_cwd = shlex.quote(self._session_cwd or "")
         return "\n".join(
             [
                 "#!/usr/bin/env bash",
                 f"__arl_state_dir={state_dir}",
+                f"__arl_initial_cwd={initial_cwd}",
                 'mkdir -p "$__arl_state_dir"',
                 'if [ -f "$__arl_state_dir/env.sh" ]; then source "$__arl_state_dir/env.sh"; fi',
                 'if [ -f "$__arl_state_dir/cwd" ]; then cd "$(cat "$__arl_state_dir/cwd")" 2>/dev/null || true; fi',
+                'if [ ! -f "$__arl_state_dir/cwd" ] && [ -n "$__arl_initial_cwd" ]; then cd "$__arl_initial_cwd" || exit $?; fi',
                 "__arl_dump_state() {",
                 "  __arl_status=$?",
                 "  trap - EXIT",

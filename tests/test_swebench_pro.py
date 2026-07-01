@@ -499,6 +499,30 @@ def test_swebench_pro_create_sandbox_does_not_mark_verified(monkeypatch):
     assert adapter.repo_path == "/app"
 
 
+def test_swebench_pro_arl_env_config_uses_app_session_cwd(monkeypatch):
+    from p2a.precompute.uni_agent_sandbox import build_agent_env_config
+
+    monkeypatch.setenv("ARL_GATEWAY_URL", "http://gateway")
+    monkeypatch.delenv("ARL_MAX_REPLICAS", raising=False)
+    task = {
+        "data_source": "swebench-pro",
+        "dockerhub_tag": "demo/pro:latest",
+        "extra_info": {
+            "tools_kwargs": {
+                "env": {"deployment": {"image": "registry.local/swebench-pro:latest"}},
+                "reward": {
+                    "name": "swe_bench_pro",
+                    "metadata": {"swebench_pro_repo_path": "/app"},
+                },
+            }
+        },
+    }
+
+    config = build_agent_env_config(task, instance_id="demo", deployment="arl")
+
+    assert config["deployment"]["session_cwd"] == "/app"
+
+
 def test_swebench_pro_precompute_runner_uses_official_script_with_selected_files():
     from p2a.precompute.precompute_bonus_maps import _prepare_swebench_pro_test_script
 

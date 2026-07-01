@@ -272,6 +272,7 @@ def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment
             "container_runtime": os.getenv("P2A_LOCAL_CONTAINER_RUNTIME", "docker"),
         }
     elif impl == "arl":
+        repo_path = _repo_path_for_task(task) if _is_swebench_pro_task(task) else "/testbed"
         deployment_config = {
             "type": "arl",
             "image": image,
@@ -280,6 +281,7 @@ def build_agent_env_config(task: dict[str, Any], *, instance_id: str, deployment
             "experiment_id": os.getenv("ARL_EXPERIMENT_ID", "p2a-uniagent-arl-precompute"),
             "timeout": float(os.getenv("ARL_TIMEOUT", "600")),
             "startup_timeout": float(os.getenv("ARL_STARTUP_TIMEOUT", os.getenv("ARL_SWEREX_STARTUP_TIMEOUT", "240"))),
+            "session_cwd": repo_path,
         }
         max_replicas = os.getenv("ARL_MAX_REPLICAS")
         if max_replicas:

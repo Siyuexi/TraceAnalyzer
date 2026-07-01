@@ -77,6 +77,7 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertEqual(env_config.deployment.experiment_id, "exp-1")
         self.assertEqual(env_config.deployment.startup_timeout, 12)
         self.assertEqual(env_config.deployment.max_replicas, 2)
+        self.assertEqual(env_config.deployment.session_cwd, "/testbed")
         self.assertEqual(env_config.deployment.startup_env_variables, {"PIP_CACHE_DIR": "~/.cache/pip"})
         self.assertEqual(env_config.deployment.shell_post_setup_cmd, "git checkout abc123")
         self.assertIsNone(env_config.env_variables)
@@ -249,28 +250,34 @@ class ArlAdapterTests(unittest.TestCase):
                     )
                 return SimpleNamespace(results=results)
 
-        runtime = ArlRuntime(FakeSession(), run_id=f"test-{uuid.uuid4().hex}")
+        runtime = ArlRuntime(FakeSession(), run_id=f"test-{uuid.uuid4().hex}", session_cwd="/tmp")
 
         async def _run():
             try:
                 first = await runtime.run_in_session(
-                    BashAction(command="cd /tmp && export P2A_ARL_TEST_VALUE=kept", timeout=10),
+                    BashAction(command="printf '%s' \"$PWD\"", timeout=10),
                 )
                 second = await runtime.run_in_session(
+                    BashAction(command="cd / && export P2A_ARL_TEST_VALUE=kept", timeout=10),
+                )
+                third = await runtime.run_in_session(
                     BashAction(command="printf '%s %s' \"$PWD\" \"$P2A_ARL_TEST_VALUE\"", timeout=10),
                 )
-                return first, second
+                return first, second, third
             finally:
                 await runtime.close()
 
-        first, second = asyncio.run(_run())
+        first, second, third = asyncio.run(_run())
 
-        self.assertEqual(first.output, "")
+        self.assertEqual(first.output, "/tmp")
         self.assertEqual(first.exit_code, 0)
         self.assertEqual(first.failure_reason, "")
         self.assertEqual(second.exit_code, 0)
+        self.assertEqual(second.output, "")
         self.assertEqual(second.failure_reason, "")
-        self.assertEqual(second.output, "/tmp kept")
+        self.assertEqual(third.exit_code, 0)
+        self.assertEqual(third.failure_reason, "")
+        self.assertEqual(third.output, "/ kept")
 
     def test_arl_runtime_failed_startup_is_not_cached(self) -> None:
         from env.runtime import ArlRuntime
@@ -397,6 +404,18 @@ class ArlAdapterTests(unittest.TestCase):
         )
 
         self.assertTrue(config.require_bash_session)
+
+    def test_deployment_config_uses_startup_timeout_for_required_bash_session(self) -> None:
+        required = ArlDeploymentConfig(
+            image="registry.local/r2e:latest",
+            gateway_url="http://gateway",
+            require_bash_session=True,
+            startup_timeout=240,
+        )
+        optional = ArlDeploymentConfig(image="registry.local/r2e:latest", gateway_url="http://gateway")
+
+        self.assertEqual(required.bash_session_preflight_timeout(10), 240)
+        self.assertEqual(optional.bash_session_preflight_timeout(10), 10)
 
     def test_deployment_config_accepts_legacy_required_session_alias(self) -> None:
         config = ArlDeploymentConfig.from_mapping(
@@ -675,6 +694,7 @@ class ArlAdapterTests(unittest.TestCase):
         self.assertEqual(deployment["timeout"], 12.0)
         self.assertEqual(deployment["startup_timeout"], 34.0)
         self.assertEqual(deployment["max_replicas"], 3)
+        self.assertEqual(deployment["session_cwd"], "/testbed")
         self.assertNotIn("endpoint_host", deployment)
         self.assertNotIn("command", deployment)
         self.assertIn("PIP_CACHE_DIR", config["env_variables"])

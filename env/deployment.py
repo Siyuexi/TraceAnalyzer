@@ -123,6 +123,7 @@ class ArlDeploymentConfig:
     require_interactive_shell: bool = False
     startup_env_variables: dict[str, str] | None = field(default=None)
     shell_post_setup_cmd: str | None = None
+    session_cwd: str | None = "/testbed"
     # Accepted for compatibility with older generated configs. Direct ARL mode
     # does not use a SWE-ReX bootstrap command or endpoint template.
     command: str | None = None
@@ -131,6 +132,9 @@ class ArlDeploymentConfig:
     def __post_init__(self) -> None:
         if self.require_interactive_shell:
             self.require_bash_session = True
+
+    def bash_session_preflight_timeout(self, eager_shell_timeout: float) -> float:
+        return self.startup_timeout if self.require_bash_session else eager_shell_timeout
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> ArlDeploymentConfig:
@@ -298,17 +302,19 @@ class ArlDeployment(AbstractDeployment):
             api_key=api_key,
             startup_commands=startup_commands,
             one_time_startup_commands=one_time_startup_commands,
+            session_cwd=self._config.session_cwd,
         )
         self._hooks.on_custom_step("Waiting for ARL execute readiness")
         await self._wait_until_runtime_ready(self._config.startup_timeout)
         # AgentEnv.communicate() needs cwd/env continuity; ArlRuntime preserves
         # that state while routing every command through ManagedSession.execute.
         eager_shell_timeout = float(os.getenv("ARL_EAGER_SHELL_TIMEOUT", "10"))
+        preflight_timeout = self._config.bash_session_preflight_timeout(eager_shell_timeout)
         try:
             if self._config.require_bash_session or eager_shell_timeout > 0:
                 await asyncio.wait_for(
                     self._runtime.create_session(CreateBashSessionRequest()),
-                    timeout=eager_shell_timeout if eager_shell_timeout > 0 else self._config.startup_timeout,
+                    timeout=preflight_timeout,
                 )
         except Exception as exc:  # noqa: BLE001 - session state is initialized lazily by run_in_session
             if self._config.require_bash_session:
