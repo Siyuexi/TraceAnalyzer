@@ -526,26 +526,13 @@ class NexusRuntime(AbstractRuntime):
                 except Exception:
                     pass
             elif "Command failed to start" in exc_str or "command is already running" in exc_str.lower():
-                # Bad command or previous command still running — Ctrl+C and wait for clear
+                # Bad command or previous command still running — Ctrl+C to recover
                 try:
                     await self._nexus.send_keys_to_terminal_session(
                         session_id=sid, keys=["C-c", "C-c"],
                     )
-                    await asyncio.sleep(1)
-                    await self._nexus.terminate_terminal_session_processes(
-                        session_id=sid,
-                    )
                 except Exception:
                     pass
-                # Wait for nexus to clear running state
-                for _ in range(15):
-                    try:
-                        await self._nexus.start_command_in_terminal_session(
-                            session_id=sid, command="true",
-                        )
-                        break
-                    except Exception:
-                        await asyncio.sleep(1)
             return BashObservation(
                 output=exc_str,
                 exit_code=1,
